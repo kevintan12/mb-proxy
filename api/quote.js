@@ -37,48 +37,44 @@ module.exports = async function handler(req, res) {
   try { sym = decodeURIComponent(sym); } catch(e) {}
 
   try {
-    // Use v7/quote — returns regularMarketChange and regularMarketChangePercent directly
-    // so we never have to compute change ourselves (avoids prev-close mismatch bugs)
-    const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(sym)}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketPreviousClose,regularMarketDayHigh,regularMarketDayLow,regularMarketVolume,longName,shortName,currency`;
+    // v8 chart API — no cookie/crumb required, works reliably
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`;
     const response = await fetch(url, { headers: HEADERS });
     if (!response.ok) throw new Error('Yahoo Finance returned HTTP ' + response.status);
     const data = await response.json();
-    const q = data?.quoteResponse?.result?.[0];
-    if (!q) throw new Error('No quote data returned');
+    if (!data.chart?.result?.[0]) throw new Error('No chart data returned');
+    const result = data.chart.result[0];
+    const meta = result.meta;
 
-    const price = q.regularMarketPrice;
-    const change = q.regularMarketChange;
-    const changePct = q.regularMarketChangePercent;
-    const prev = q.regularMarketPreviousClose;
-    if (!price) throw new Error('Missing price data');
+    const price = meta.regularMarketPrice;
+    const prev  = meta.regularMarketPreviousClose || meta.chartPreviousClose;
+    if (!price || !prev) throw new Error('Missing price data');
 
-    // Volume: regularMarketVolume from v7 is reliable
-    // For indices (^DJI etc) volume may be 0 — fall back to chart endpoint for volume only
-    let volume = q.regularMarketVolume || 0;
-    if (volume === 0 && !sym.startsWith('^')) {
-      // Attempt chart fallback for volume
-      try {
-        const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`;
-        const cr = await fetch(chartUrl, { headers: HEADERS });
-        const cd = await cr.json();
-        const vols = cd?.chart?.result?.[0]?.indicators?.quote?.[0]?.volume || [];
-        for (let i = vols.length - 1; i >= 0; i--) {
-          if (vols[i] != null && vols[i] > 0) { volume = vols[i]; break; }
-        }
-      } catch(_) {}
+    // Use Yahoo's pre-computed change values from meta — never calculate manually
+    // These match exactly what Yahoo Finance displays on their site
+    const change    = meta.regularMarketChange    ?? parseFloat((price - prev).toFixed(4));
+    const changePct = meta.regularMarketChangePercent ?? parseFloat(((price - prev) / prev * 100).toFixed(4));
+
+    // Volume: regularMarketVolume is live; fall back to last bar in quotes array
+    let volume = meta.regularMarketVolume || 0;
+    if (volume === 0) {
+      const vols = result.indicators?.quote?.[0]?.volume || [];
+      for (let i = vols.length - 1; i >= 0; i--) {
+        if (vols[i] != null && vols[i] > 0) { volume = vols[i]; break; }
+      }
     }
 
     res.status(200).json({
       symbol: sym,
-      name: q.longName || q.shortName || sym,
+      name: meta.longName || meta.shortName || sym,
       price,
-      prev: prev || price,
-      change: parseFloat((change || 0).toFixed(4)),
-      changePct: parseFloat((changePct || 0).toFixed(4)),
-      high: q.regularMarketDayHigh || price,
-      low: q.regularMarketDayLow || price,
-      volume,
-      currency: q.currency || ''
+      prev,
+      change:    parseFloat(change.toFixed(4)),
+      changePct: parseFloat(changePct.toFixed(4)),
+      high:   meta.regularMarketDayHigh || price,
+      low:    meta.regularMarketDayLow  || price,
+      volume: volume || 0,
+      currency: meta.currency || ''
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 };
