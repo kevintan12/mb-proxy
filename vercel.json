@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/quote.js": {
+      "runtime": "nodejs20.x"
+    }
+  }
+}
