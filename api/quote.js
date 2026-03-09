@@ -36,7 +36,8 @@ module.exports = async function handler(req, res) {
   let sym = symbol;
   try { sym = decodeURIComponent(sym); } catch(e) {}
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=2d`;
+    // range=5d ensures we always get recent quotes with volume
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`;
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
@@ -48,10 +49,21 @@ module.exports = async function handler(req, res) {
     if (!response.ok) throw new Error('Yahoo Finance returned HTTP ' + response.status);
     const data = await response.json();
     if (!data.chart?.result?.[0]) throw new Error('No chart data returned');
-    const meta = data.chart.result[0].meta;
+    const result = data.chart.result[0];
+    const meta = result.meta;
     const price = meta.regularMarketPrice;
-    const prev = meta.chartPreviousClose || meta.previousClose;
+    // Use regularMarketPreviousClose — the official prior session close
+    const prev = meta.regularMarketPreviousClose || meta.chartPreviousClose;
     if (!price || !prev) throw new Error('Missing price data');
+    // Volume: prefer regularMarketVolume (live), fall back to last quote bar volume
+    let volume = meta.regularMarketVolume;
+    if (!volume || volume === 0) {
+      const vols = result.indicators?.quote?.[0]?.volume || [];
+      // Last non-null/non-zero value
+      for (let i = vols.length - 1; i >= 0; i--) {
+        if (vols[i] != null && vols[i] > 0) { volume = vols[i]; break; }
+      }
+    }
     res.status(200).json({
       symbol: sym,
       name: meta.longName || meta.shortName || sym,
@@ -60,6 +72,7 @@ module.exports = async function handler(req, res) {
       changePct: parseFloat(((price - prev) / prev * 100).toFixed(4)),
       high: meta.regularMarketDayHigh || price,
       low: meta.regularMarketDayLow || price,
+      volume: volume || 0,
       currency: meta.currency || ''
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
