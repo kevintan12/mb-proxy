@@ -33,7 +33,7 @@ module.exports = async function handler(req, res) {
   try { sym = decodeURIComponent(sym); } catch(e) {}
 
   try {
-    // Fetch 5d of daily bars — gives us last session's close as prev, and current price in meta
+    // Fetch 5d of daily bars — gives us last session's close and prior close
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`;
     const r = await fetch(url, { headers: HEADERS });
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -45,28 +45,37 @@ module.exports = async function handler(req, res) {
     const closes = result.indicators?.quote?.[0]?.close || [];
     const vols   = result.indicators?.quote?.[0]?.volume || [];
 
-    const price = meta.regularMarketPrice;
-    if (!price) throw new Error('No price');
-
-    // Previous close: use the second-to-last (or last) close bar from the daily series
-    // This is the actual last completed session close — more reliable than meta.regularMarketPreviousClose
-    // which can be stale or reflect pre/post-market adjusted values
-    let prev = null;
-    // Collect all non-null closes
+    // Collect all non-null positive closes from the 5d series
     const validCloses = closes.filter(c => c != null && c > 0);
-    if (validCloses.length >= 2) {
-      // Second to last = prior session's close (last = today's close if session ended, else current partial)
-      prev = validCloses[validCloses.length - 2];
-    } else if (validCloses.length === 1) {
-      prev = validCloses[0];
-    } else {
-      // Final fallback
-      prev = meta.regularMarketPreviousClose || meta.chartPreviousClose;
-    }
-    if (!prev) throw new Error('No previous close');
 
-    // Volume: regularMarketVolume for live session, last bar otherwise
-    let volume = meta.regularMarketVolume || 0;
+    // Determine if a live trading session is in progress
+    const isLive = meta.marketState === 'REGULAR';
+
+    let price, prev;
+
+    if (isLive) {
+      // Live session — real-time price vs last completed session close
+      price = meta.regularMarketPrice;
+      prev  = validCloses.length >= 2
+        ? validCloses[validCloses.length - 2]
+        : meta.regularMarketPreviousClose || meta.chartPreviousClose;
+    } else {
+      // Market closed (weekend, holiday, pre/post-market) —
+      // show last completed session close vs the session before it
+      // so change always reflects the last trading day's actual move
+      price = validCloses.length >= 1
+        ? validCloses[validCloses.length - 1]
+        : meta.regularMarketPrice;
+      prev  = validCloses.length >= 2
+        ? validCloses[validCloses.length - 2]
+        : meta.regularMarketPreviousClose || meta.chartPreviousClose;
+    }
+
+    if (!price) throw new Error('No price');
+    if (!prev)  throw new Error('No previous close');
+
+    // Volume: use live volume during session, last completed bar otherwise
+    let volume = isLive ? (meta.regularMarketVolume || 0) : 0;
     if (!volume) {
       for (let i = vols.length - 1; i >= 0; i--) {
         if (vols[i] != null && vols[i] > 0) { volume = vols[i]; break; }
@@ -78,7 +87,7 @@ module.exports = async function handler(req, res) {
 
     res.status(200).json({
       symbol: sym,
-      name: meta.longName || meta.shortName || sym,
+      name:     meta.longName || meta.shortName || sym,
       price, prev,
       change, changePct,
       high:     meta.regularMarketDayHigh || price,
