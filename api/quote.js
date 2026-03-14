@@ -39,32 +39,18 @@ module.exports = async function handler(req, res) {
       const data = await r.json();
       const result = data?.quoteSummary?.result?.[0];
       if (!result) throw new Error('No data');
-
       const ks  = result.defaultKeyStatistics || {};
       const fd  = result.financialData || {};
       const ish = result.incomeStatementHistory?.incomeStatementHistory || [];
       const cfh = result.cashflowStatementHistory?.cashflowStatements || [];
-
-      // EPS — trailing
       const trailingEps = ks.trailingEps?.raw || null;
-
-      // Historical annual EPS for CAGR
-      const epsHistory = ish
-        .map(s => s.basicEPS?.raw || s.dilutedEPS?.raw || null)
-        .filter(v => v !== null && v > 0);
-
-      // FCF per share
+      const epsHistory = ish.map(s => s.basicEPS?.raw || s.dilutedEPS?.raw || null).filter(v => v !== null && v > 0);
       const fcf = cfh[0]?.freeCashflow?.raw || null;
       const sharesOut = ks.sharesOutstanding?.raw || ks.impliedSharesOutstanding?.raw || null;
       const fcfps = (fcf && sharesOut && sharesOut > 0) ? fcf / sharesOut : null;
-
-      // Book value per share and P/B
       const bvps = ks.bookValue?.raw || null;
       const pb   = ks.priceToBook?.raw || null;
-
-      // Analyst earnings growth rate
       const analystGrowth = fd.earningsGrowth?.raw || fd.revenueGrowth?.raw || null;
-
       return res.status(200).json({ trailingEps, epsHistory, fcfps, bvps, pb, analystGrowth });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
@@ -83,15 +69,40 @@ module.exports = async function handler(req, res) {
 
     const result = data.chart.result[0];
     const meta   = result.meta;
+    const closes = result.indicators?.quote?.[0]?.close || [];
     const vols   = result.indicators?.quote?.[0]?.volume || [];
 
-    const price = meta.regularMarketPrice;
-    const prev  = meta.regularMarketPreviousClose || meta.chartPreviousClose;
+    // Valid completed session closes from the 5d series
+    const validCloses = closes.filter(c => c != null && c > 0);
+
+    // Determine if a live trading session is in progress
+    const isLive = meta.marketState === 'REGULAR';
+
+    let price, prev;
+
+    if (isLive) {
+      // Live session: real-time price vs previous session's close
+      price = meta.regularMarketPrice;
+      prev  = validCloses.length >= 1
+        ? validCloses[validCloses.length - 1]
+        : meta.regularMarketPreviousClose || meta.chartPreviousClose;
+    } else {
+      // Market closed: use last two completed session closes from the chart series
+      // This is more reliable than regularMarketPreviousClose on weekends
+      if (validCloses.length >= 2) {
+        price = validCloses[validCloses.length - 1];  // Friday's close
+        prev  = validCloses[validCloses.length - 2];  // Thursday's close
+      } else {
+        price = meta.regularMarketPrice;
+        prev  = meta.regularMarketPreviousClose || meta.chartPreviousClose;
+      }
+    }
 
     if (!price) throw new Error('No price');
     if (!prev)  throw new Error('No previous close');
 
-    let volume = meta.regularMarketVolume || 0;
+    // Volume: live session volume when market open, last completed bar otherwise
+    let volume = isLive ? (meta.regularMarketVolume || 0) : 0;
     if (!volume) {
       for (let i = vols.length - 1; i >= 0; i--) {
         if (vols[i] != null && vols[i] > 0) { volume = vols[i]; break; }
