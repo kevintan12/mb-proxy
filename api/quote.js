@@ -27,6 +27,58 @@ module.exports = async function handler(req, res) {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
+  // ── Financials endpoint ───────────────────────────────────────────────────
+  if (symbol && req.url && req.url.includes('/api/financials')) {
+    let sym = symbol;
+    try { sym = decodeURIComponent(sym); } catch(e) {}
+    try {
+      const modules = 'incomeStatementHistory,cashflowStatementHistory,balanceSheetHistory,defaultKeyStatistics,financialData';
+      const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(sym)}?modules=${modules}`;
+      const r = await fetch(url, { headers: HEADERS });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      const result = data?.quoteSummary?.result?.[0];
+      if (!result) throw new Error('No data');
+
+      const ks  = result.defaultKeyStatistics || {};
+      const fd  = result.financialData || {};
+      const ish = result.incomeStatementHistory?.incomeStatementHistory || [];
+      const cfh = result.cashflowStatementHistory?.cashflowStatements || [];
+      const bsh = result.balanceSheetHistory?.balanceSheetStatements || [];
+
+      // EPS — trailing preferred, else compute from net income / shares
+      const trailingEps = ks.trailingEps?.raw || null;
+
+      // Historical annual EPS for CAGR (up to 4 years)
+      const epsHistory = ish
+        .map(s => s.basicEPS?.raw || s.dilutedEPS?.raw || null)
+        .filter(v => v !== null && v > 0);
+
+      // FCF — most recent annual
+      const fcf = cfh[0]?.freeCashflow?.raw || null;
+      const sharesOut = ks.sharesOutstanding?.raw || ks.impliedSharesOutstanding?.raw || null;
+      const fcfps = (fcf && sharesOut && sharesOut > 0) ? fcf / sharesOut : null;
+
+      // Book value per share
+      const bvps = ks.bookValue?.raw || null;
+
+      // P/B ratio (current)
+      const pb = ks.priceToBook?.raw || null;
+
+      // Analyst earnings growth rate
+      const analystGrowth = fd.earningsGrowth?.raw || fd.revenueGrowth?.raw || null;
+
+      return res.status(200).json({
+        trailingEps,
+        epsHistory,
+        fcfps,
+        bvps,
+        pb,
+        analystGrowth
+      });
+    } catch(e) { return res.status(500).json({ error: e.message }); }
+  }
+
   // ── Quote endpoint ────────────────────────────────────────────────────────
   if (!symbol) return res.status(400).json({ error: 'symbol or search required' });
   let sym = symbol;
