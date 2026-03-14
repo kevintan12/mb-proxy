@@ -17,12 +17,8 @@ module.exports = async function handler(req, res) {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return res.status(403).json({ error: 'Claude API key not configured' });
     try {
-      const body = await new Promise((resolve, reject) => {
-        let data = '';
-        req.on('data', chunk => data += chunk);
-        req.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { reject(e); } });
-        req.on('error', reject);
-      });
+      // Vercel parses req.body automatically — use it directly
+      const body = req.body || {};
       const upstream = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -32,18 +28,15 @@ module.exports = async function handler(req, res) {
         },
         body: JSON.stringify(body)
       });
+      // Stream response back to client
       res.status(upstream.status);
       res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
-      // Stream the response back
       const reader = upstream.body.getReader();
-      const flush = async () => {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) { res.end(); break; }
-          res.write(value);
-        }
-      };
-      await flush();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) { res.end(); break; }
+        res.write(value);
+      }
     } catch(e) { res.status(500).json({ error: e.message }); }
     return;
   }
