@@ -3,7 +3,7 @@ module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
-  const { symbol, search } = req.query;
+  const { symbol, search, financials } = req.query;
   const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'application/json',
@@ -27,8 +27,8 @@ module.exports = async function handler(req, res) {
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
-  // ── Financials endpoint ───────────────────────────────────────────────────
-  if (symbol && req.url && req.url.includes('/api/financials')) {
+  // ── Financials endpoint (?financials=1&symbol=MSFT) ───────────────────────
+  if (financials && symbol) {
     let sym = symbol;
     try { sym = decodeURIComponent(sym); } catch(e) {}
     try {
@@ -44,38 +44,28 @@ module.exports = async function handler(req, res) {
       const fd  = result.financialData || {};
       const ish = result.incomeStatementHistory?.incomeStatementHistory || [];
       const cfh = result.cashflowStatementHistory?.cashflowStatements || [];
-      const bsh = result.balanceSheetHistory?.balanceSheetStatements || [];
 
-      // EPS — trailing preferred, else compute from net income / shares
+      // EPS — trailing
       const trailingEps = ks.trailingEps?.raw || null;
 
-      // Historical annual EPS for CAGR (up to 4 years)
+      // Historical annual EPS for CAGR
       const epsHistory = ish
         .map(s => s.basicEPS?.raw || s.dilutedEPS?.raw || null)
         .filter(v => v !== null && v > 0);
 
-      // FCF — most recent annual
+      // FCF per share
       const fcf = cfh[0]?.freeCashflow?.raw || null;
       const sharesOut = ks.sharesOutstanding?.raw || ks.impliedSharesOutstanding?.raw || null;
       const fcfps = (fcf && sharesOut && sharesOut > 0) ? fcf / sharesOut : null;
 
-      // Book value per share
+      // Book value per share and P/B
       const bvps = ks.bookValue?.raw || null;
-
-      // P/B ratio (current)
-      const pb = ks.priceToBook?.raw || null;
+      const pb   = ks.priceToBook?.raw || null;
 
       // Analyst earnings growth rate
       const analystGrowth = fd.earningsGrowth?.raw || fd.revenueGrowth?.raw || null;
 
-      return res.status(200).json({
-        trailingEps,
-        epsHistory,
-        fcfps,
-        bvps,
-        pb,
-        analystGrowth
-      });
+      return res.status(200).json({ trailingEps, epsHistory, fcfps, bvps, pb, analystGrowth });
     } catch(e) { return res.status(500).json({ error: e.message }); }
   }
 
@@ -95,14 +85,12 @@ module.exports = async function handler(req, res) {
     const meta   = result.meta;
     const vols   = result.indicators?.quote?.[0]?.volume || [];
 
-    // price and prev — Yahoo always populates both correctly regardless of market state
     const price = meta.regularMarketPrice;
     const prev  = meta.regularMarketPreviousClose || meta.chartPreviousClose;
 
     if (!price) throw new Error('No price');
     if (!prev)  throw new Error('No previous close');
 
-    // Volume: regularMarketVolume for live session, last bar otherwise
     let volume = meta.regularMarketVolume || 0;
     if (!volume) {
       for (let i = vols.length - 1; i >= 0; i--) {
