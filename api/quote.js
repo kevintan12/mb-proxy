@@ -61,7 +61,8 @@ module.exports = async function handler(req, res) {
   try { sym = decodeURIComponent(sym); } catch(e) {}
 
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`;
+    // Use 10d range so weekend fetches have enough distinct daily closes
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=10d`;
     const r = await fetch(url, { headers: HEADERS });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
@@ -72,26 +73,30 @@ module.exports = async function handler(req, res) {
     const closes = result.indicators?.quote?.[0]?.close || [];
     const vols   = result.indicators?.quote?.[0]?.volume || [];
 
-    // Valid completed session closes from the 5d series
-    const validCloses = closes.filter(c => c != null && c > 0);
+    // Collect distinct completed session closes — deduplicate consecutive identical values
+    const allCloses = closes.filter(c => c != null && c > 0);
+    const validCloses = [];
+    for (let i = 0; i < allCloses.length; i++) {
+      if (validCloses.length === 0 || allCloses[i] !== validCloses[validCloses.length - 1]) {
+        validCloses.push(allCloses[i]);
+      }
+    }
 
-    // Determine if a live trading session is in progress
     const isLive = meta.marketState === 'REGULAR';
 
     let price, prev;
 
     if (isLive) {
-      // Live session: real-time price vs previous session's close
+      // Live session: real-time price vs last completed session close
       price = meta.regularMarketPrice;
       prev  = validCloses.length >= 1
         ? validCloses[validCloses.length - 1]
         : meta.regularMarketPreviousClose || meta.chartPreviousClose;
     } else {
-      // Market closed: use last two completed session closes from the chart series
-      // This is more reliable than regularMarketPreviousClose on weekends
+      // Market closed: last two distinct completed closes = Friday vs Thursday
       if (validCloses.length >= 2) {
-        price = validCloses[validCloses.length - 1];  // Friday's close
-        prev  = validCloses[validCloses.length - 2];  // Thursday's close
+        price = validCloses[validCloses.length - 1];
+        prev  = validCloses[validCloses.length - 2];
       } else {
         price = meta.regularMarketPrice;
         prev  = meta.regularMarketPreviousClose || meta.chartPreviousClose;
@@ -101,7 +106,6 @@ module.exports = async function handler(req, res) {
     if (!price) throw new Error('No price');
     if (!prev)  throw new Error('No previous close');
 
-    // Volume: live session volume when market open, last completed bar otherwise
     let volume = isLive ? (meta.regularMarketVolume || 0) : 0;
     if (!volume) {
       for (let i = vols.length - 1; i >= 0; i--) {
