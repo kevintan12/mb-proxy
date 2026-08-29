@@ -1,3 +1,16 @@
+const QUOTE_CACHE_TTL_MS = 5000;
+const QUOTE_CACHE_MAX_ENTRIES = 100;
+const quoteCache = new Map();
+
+function pruneQuoteCache(now) {
+  for (const [key, entry] of quoteCache) {
+    if (now - entry.cachedAt >= QUOTE_CACHE_TTL_MS) quoteCache.delete(key);
+  }
+  while (quoteCache.size >= QUOTE_CACHE_MAX_ENTRIES) {
+    quoteCache.delete(quoteCache.keys().next().value);
+  }
+}
+
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -104,6 +117,13 @@ module.exports = async function handler(req, res) {
   if (!symbol) return res.status(400).json({ error: 'symbol or search required' });
   let sym = symbol;
   try { sym = decodeURIComponent(sym); } catch(e) {}
+  const cacheKey = String(sym).toUpperCase();
+  const now = Date.now();
+  const cached = quoteCache.get(cacheKey);
+  if (cached && now - cached.cachedAt < QUOTE_CACHE_TTL_MS) {
+    return res.status(200).json({ ...cached.body, symbol: sym });
+  }
+  if (cached) quoteCache.delete(cacheKey);
 
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=10d`;
@@ -184,7 +204,7 @@ module.exports = async function handler(req, res) {
     const change    = parseFloat((price - prev).toFixed(4));
     const changePct = parseFloat(((price - prev) / prev * 100).toFixed(4));
 
-    res.status(200).json({
+    const responseBody = {
       symbol: sym,
       name:     meta.longName || meta.shortName || sym,
       price, prev, change, changePct,
@@ -221,6 +241,9 @@ module.exports = async function handler(req, res) {
         previousDailyCloseTime: previousDailyObservation?.time ?? null,
         latestChartTimestamp
       }
-    });
+    };
+    pruneQuoteCache(Date.now());
+    quoteCache.set(cacheKey, { body: responseBody, cachedAt: Date.now() });
+    res.status(200).json(responseBody);
   } catch(e) { res.status(500).json({ error: e.message }); }
 };
