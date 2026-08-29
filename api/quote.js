@@ -116,6 +116,7 @@ module.exports = async function handler(req, res) {
     const meta   = result.meta;
     const closes = result.indicators?.quote?.[0]?.close || [];
     const vols   = result.indicators?.quote?.[0]?.volume || [];
+    const timestamps = result.timestamp || [];
 
     const allCloses = closes.filter(c => c != null && c > 0);
     const validCloses = [];
@@ -125,20 +126,31 @@ module.exports = async function handler(req, res) {
       }
     }
 
+    let latestChartTimestamp = null;
+    for (let i = closes.length - 1; i >= 0; i--) {
+      if (closes[i] != null && closes[i] > 0) {
+        latestChartTimestamp = timestamps[i] ?? null;
+        break;
+      }
+    }
+
     const isLive = meta.marketState === 'REGULAR';
-    let price, prev;
+    let price, prev, priceSource;
 
     if (isLive) {
       price = meta.regularMarketPrice;
+      priceSource = 'regularMarketPrice';
       prev  = validCloses.length >= 1
         ? validCloses[validCloses.length - 1]
         : meta.regularMarketPreviousClose || meta.chartPreviousClose;
     } else {
       if (validCloses.length >= 2) {
         price = validCloses[validCloses.length - 1];
+        priceSource = 'latestDailyClose';
         prev  = validCloses[validCloses.length - 2];
       } else {
         price = meta.regularMarketPrice;
+        priceSource = 'regularMarketPrice';
         prev  = meta.regularMarketPreviousClose || meta.chartPreviousClose;
       }
     }
@@ -163,7 +175,32 @@ module.exports = async function handler(req, res) {
       high:     meta.regularMarketDayHigh || price,
       low:      meta.regularMarketDayLow  || price,
       volume:   volume || 0,
-      currency: meta.currency || ''
+      currency: meta.currency || '',
+      priceSource,
+      provider: {
+        marketState: meta.marketState ?? null,
+        regularMarketPrice: meta.regularMarketPrice ?? null,
+        regularMarketPreviousClose: meta.regularMarketPreviousClose ?? null,
+        regularMarketTime: meta.regularMarketTime ?? null,
+        regularMarketDayHigh: meta.regularMarketDayHigh ?? null,
+        regularMarketDayLow: meta.regularMarketDayLow ?? null,
+        regularMarketVolume: meta.regularMarketVolume ?? null,
+        exchange: meta.exchange ?? null,
+        exchangeName: meta.exchangeName ?? null,
+        fullExchangeName: meta.fullExchangeName ?? null,
+        exchangeTimezoneName: meta.exchangeTimezoneName ?? null,
+        quoteType: meta.quoteType ?? null,
+        instrumentType: meta.instrumentType ?? null,
+        preMarketPrice: meta.preMarketPrice ?? null,
+        preMarketChange: meta.preMarketChange ?? null,
+        preMarketChangePercent: meta.preMarketChangePercent ?? null,
+        preMarketTime: meta.preMarketTime ?? null,
+        postMarketPrice: meta.postMarketPrice ?? null,
+        postMarketChange: meta.postMarketChange ?? null,
+        postMarketChangePercent: meta.postMarketChangePercent ?? null,
+        postMarketTime: meta.postMarketTime ?? null,
+        latestChartTimestamp
+      }
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 };
