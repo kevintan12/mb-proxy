@@ -118,6 +118,22 @@ module.exports = async function handler(req, res) {
     const vols   = result.indicators?.quote?.[0]?.volume || [];
     const timestamps = result.timestamp || [];
 
+    const dailyObservations = [];
+    for (let i = 0; i < closes.length; i++) {
+      if (Number.isFinite(closes[i]) && closes[i] > 0) {
+        dailyObservations.push({
+          close: closes[i],
+          time: Number.isFinite(timestamps[i]) ? timestamps[i] : null
+        });
+      }
+    }
+    const latestDailyObservation = dailyObservations.length >= 1
+      ? dailyObservations[dailyObservations.length - 1]
+      : null;
+    const previousDailyObservation = dailyObservations.length >= 2
+      ? dailyObservations[dailyObservations.length - 2]
+      : null;
+
     const allCloses = closes.filter(c => c != null && c > 0);
     const validCloses = [];
     for (let i = 0; i < allCloses.length; i++) {
@@ -199,6 +215,10 @@ module.exports = async function handler(req, res) {
         postMarketChange: meta.postMarketChange ?? null,
         postMarketChangePercent: meta.postMarketChangePercent ?? null,
         postMarketTime: meta.postMarketTime ?? null,
+        latestDailyClose: latestDailyObservation?.close ?? null,
+        latestDailyCloseTime: latestDailyObservation?.time ?? null,
+        previousDailyClose: previousDailyObservation?.close ?? null,
+        previousDailyCloseTime: previousDailyObservation?.time ?? null,
         latestChartTimestamp
       }
     });
