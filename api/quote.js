@@ -171,14 +171,19 @@ module.exports = async function handler(req, res) {
     const timestamps = result.timestamp || [];
 
     const dailyObservations = [];
+    const completedDailyRows = [];
     const nowSeconds = Date.now() / 1000;
     for (let i = 0; i < closes.length; i++) {
-      if (Number.isFinite(closes[i]) && closes[i] > 0
-          && isCompletedDailyObservation(timestamps[i], meta, nowSeconds)) {
-        dailyObservations.push({
-          close: closes[i],
-          time: timestamps[i]
-        });
+      if (isCompletedDailyObservation(timestamps[i], meta, nowSeconds)) {
+        const validClose = Number.isFinite(closes[i]) && closes[i] > 0;
+        completedDailyRows.push({ index: i, validClose });
+        if (validClose) {
+          dailyObservations.push({
+            close: closes[i],
+            time: timestamps[i],
+            index: i
+          });
+        }
       }
     }
     const latestDailyObservation = dailyObservations.length >= 1
@@ -187,6 +192,27 @@ module.exports = async function handler(req, res) {
     const previousDailyObservation = dailyObservations.length >= 2
       ? dailyObservations[dailyObservations.length - 2]
       : null;
+    const dailyClosePairHasGap = !!(latestDailyObservation && previousDailyObservation
+      && completedDailyRows.some(row => !row.validClose
+        && row.index > previousDailyObservation.index
+        && row.index < latestDailyObservation.index));
+
+    let immediatePreviousClose = null;
+    let immediatePreviousCloseSource = null;
+    if (dailyClosePairHasGap) {
+      try {
+        const fallbackUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=1d`;
+        const fallbackResponse = await fetch(fallbackUrl, { headers: HEADERS });
+        if (fallbackResponse.ok) {
+          const fallbackData = await fallbackResponse.json();
+          const fallbackPreviousClose = fallbackData.chart?.result?.[0]?.meta?.chartPreviousClose;
+          if (Number.isFinite(fallbackPreviousClose) && fallbackPreviousClose > 0) {
+            immediatePreviousClose = fallbackPreviousClose;
+            immediatePreviousCloseSource = 'yahooChart1d';
+          }
+        }
+      } catch(e) {}
+    }
 
     const allCloses = closes.filter(c => c != null && c > 0);
     const validCloses = [];
@@ -273,6 +299,9 @@ module.exports = async function handler(req, res) {
         latestDailyCloseTime: latestDailyObservation?.time ?? null,
         previousDailyClose: previousDailyObservation?.close ?? null,
         previousDailyCloseTime: previousDailyObservation?.time ?? null,
+        dailyClosePairHasGap,
+        immediatePreviousClose,
+        immediatePreviousCloseSource,
         latestChartTimestamp
       }
     };
