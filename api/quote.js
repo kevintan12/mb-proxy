@@ -1,4 +1,4 @@
-const QUOTE_CACHE_TTL_MS = 5000;
+const QUOTE_CACHE_TTL_MS = 1500;
 const QUOTE_CACHE_MAX_ENTRIES = 100;
 const quoteCache = new Map();
 
