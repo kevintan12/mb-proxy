@@ -11,6 +11,38 @@ function pruneQuoteCache(now) {
   }
 }
 
+function exchangeDateKey(epochSeconds, timeZone) {
+  if (!Number.isFinite(epochSeconds) || !timeZone) return null;
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).formatToParts(new Date(epochSeconds * 1000));
+    const values = {};
+    for (const part of parts) values[part.type] = part.value;
+    return `${values.year}-${values.month}-${values.day}`;
+  } catch(e) {
+    return null;
+  }
+}
+
+function isCompletedDailyObservation(timestamp, meta, nowSeconds) {
+  if (!Number.isFinite(timestamp)) return false;
+  const timeZone = meta.exchangeTimezoneName;
+  const observationDate = exchangeDateKey(timestamp, timeZone);
+  const currentDate = exchangeDateKey(nowSeconds, timeZone);
+  if (!observationDate || !currentDate) return false;
+  if (observationDate < currentDate) return true;
+  if (observationDate > currentDate) return false;
+
+  const regularEnd = meta.currentTradingPeriod?.regular?.end;
+  return Number.isFinite(regularEnd)
+    && exchangeDateKey(regularEnd, timeZone) === currentDate
+    && nowSeconds >= regularEnd;
+}
+
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -139,11 +171,13 @@ module.exports = async function handler(req, res) {
     const timestamps = result.timestamp || [];
 
     const dailyObservations = [];
+    const nowSeconds = Date.now() / 1000;
     for (let i = 0; i < closes.length; i++) {
-      if (Number.isFinite(closes[i]) && closes[i] > 0) {
+      if (Number.isFinite(closes[i]) && closes[i] > 0
+          && isCompletedDailyObservation(timestamps[i], meta, nowSeconds)) {
         dailyObservations.push({
           close: closes[i],
-          time: Number.isFinite(timestamps[i]) ? timestamps[i] : null
+          time: timestamps[i]
         });
       }
     }
