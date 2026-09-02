@@ -48,7 +48,7 @@ function mockRes() {
   };
 }
 
-async function requestQuote(name, baseData, fallbackResult) {
+async function requestQuote(name, baseData, fallbackResult, symbol = `TEST-${name}`) {
   const calls = [];
   global.fetch = async url => {
     calls.push(url);
@@ -59,7 +59,7 @@ async function requestQuote(name, baseData, fallbackResult) {
     return response(baseData);
   };
   const res = mockRes();
-  await handler({ method: 'GET', query: { symbol: `TEST-${name}` } }, res);
+  await handler({ method: 'GET', query: { symbol } }, res);
   return { res, calls };
 }
 
@@ -161,6 +161,77 @@ test('invalid 1d chartPreviousClose is safely unavailable', async () => {
   const { res } = await requestQuote('invalid-fallback', data, fallback);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.provider.dailyClosePairHasGap, true);
+  assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseSource, null);
+});
+
+test('HSI without regularMarketPreviousClose verifies 1d even without a detected gap', async () => {
+  Date.now = () => FIXED_NOW_MS + 2000;
+  const data = chartResult([100, 105, 110], [
+    epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
+  ], { regularMarketPreviousClose: null });
+  const fallback = response({ chart: { result: [{ meta: { chartPreviousClose: 107 } }] } });
+  const { res, calls } = await requestQuote('hsi-missing-previous', data, fallback, '^HSI');
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 2);
+  assert.match(calls[1], /%5EHSI\?interval=1d&range=1d$/);
+  assert.equal(res.body.provider.dailyClosePairHasGap, false);
+  assert.equal(res.body.provider.immediatePreviousClose, 107);
+  assert.equal(res.body.provider.immediatePreviousCloseSource, 'yahooChart1d');
+});
+
+test('HSI with valid regularMarketPreviousClose and no gap makes no targeted request', async () => {
+  Date.now = () => FIXED_NOW_MS + 4000;
+  const data = chartResult([100, 105, 110], [
+    epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
+  ]);
+  const { res, calls } = await requestQuote('hsi-valid-previous', data, undefined, '^HSI');
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(res.body.provider.dailyClosePairHasGap, false);
+  assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseSource, null);
+});
+
+test('non-HSI without regularMarketPreviousClose and no gap remains single-request', async () => {
+  const data = chartResult([100, 105, 110], [
+    epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
+  ], { regularMarketPreviousClose: null });
+  const { res, calls } = await requestQuote('non-hsi-missing-previous', data);
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(res.body.provider.dailyClosePairHasGap, false);
+  assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseSource, null);
+});
+
+test('failed targeted HSI verification preserves base quote without immediate metadata', async () => {
+  Date.now = () => FIXED_NOW_MS + 6000;
+  const data = chartResult([100, 105, 110], [
+    epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
+  ], { regularMarketPreviousClose: null });
+  const { res, calls } = await requestQuote(
+    'hsi-fallback-failure', data, new Error('fallback unavailable'), '^HSI'
+  );
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 2);
+  assert.equal(res.body.price, 110);
+  assert.equal(res.body.provider.dailyClosePairHasGap, false);
+  assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseSource, null);
+});
+
+test('invalid targeted HSI chartPreviousClose preserves base quote without immediate metadata', async () => {
+  Date.now = () => FIXED_NOW_MS + 8000;
+  const data = chartResult([100, 105, 110], [
+    epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
+  ], { regularMarketPreviousClose: 0 });
+  const fallback = response({ chart: { result: [{ meta: { chartPreviousClose: 0 } }] } });
+  const { res, calls } = await requestQuote('hsi-invalid-fallback', data, fallback, '^HSI');
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 2);
+  assert.equal(res.body.price, 110);
+  assert.equal(res.body.provider.dailyClosePairHasGap, false);
   assert.equal(res.body.provider.immediatePreviousClose, null);
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });

@@ -196,10 +196,14 @@ module.exports = async function handler(req, res) {
       && completedDailyRows.some(row => !row.validClose
         && row.index > previousDailyObservation.index
         && row.index < latestDailyObservation.index));
+    const hasValidRegularMarketPreviousClose = Number.isFinite(meta.regularMarketPreviousClose)
+      && meta.regularMarketPreviousClose > 0;
+    const shouldVerifyImmediatePreviousClose = dailyClosePairHasGap
+      || (cacheKey === '^HSI' && !hasValidRegularMarketPreviousClose);
 
     let immediatePreviousClose = null;
     let immediatePreviousCloseSource = null;
-    if (dailyClosePairHasGap) {
+    if (shouldVerifyImmediatePreviousClose) {
       try {
         const fallbackUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=1d`;
         const fallbackResponse = await fetch(fallbackUrl, { headers: HEADERS });
