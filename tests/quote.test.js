@@ -235,3 +235,74 @@ test('invalid targeted HSI chartPreviousClose preserves base quote without immed
   assert.equal(res.body.provider.immediatePreviousClose, null);
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });
+
+test('STI trailing null completed row uses verified 1d immediate previous close', async () => {
+  Date.now = () => FIXED_NOW_MS + 10000;
+  const data = chartResult([5700, 5710.3701171875, null], [
+    epoch('2026-01-06T09:00:00Z'), epoch('2026-01-07T09:00:00Z'), epoch('2026-01-08T09:00:00Z')
+  ], {
+    regularMarketPrice: 5759.46,
+    regularMarketPreviousClose: null,
+    exchangeTimezoneName: 'Asia/Singapore',
+    currentTradingPeriod: { regular: { end: epoch('2026-01-08T09:00:00Z') } }
+  });
+  const fallback = response({ chart: { result: [{ meta: { chartPreviousClose: 5744.11 } }] } });
+  const { res, calls } = await requestQuote('sti-trailing-null', data, fallback, '^STI');
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 2);
+  assert.match(calls[1], /%5ESTI\?interval=1d&range=1d$/);
+  assert.equal(res.body.provider.dailyClosePairHasGap, false);
+  assert.equal(res.body.provider.latestDailyClose, 5710.3701171875);
+  assert.equal(res.body.provider.immediatePreviousClose, 5744.11);
+  assert.equal(res.body.provider.immediatePreviousCloseSource, 'yahooChart1d');
+});
+
+test('ordinary SG equity with trailing null and no regular previous close is unaffected', async () => {
+  const data = chartResult([10, 10.2, null], [
+    epoch('2026-01-06T09:00:00Z'), epoch('2026-01-07T09:00:00Z'), epoch('2026-01-08T09:00:00Z')
+  ], {
+    regularMarketPreviousClose: null,
+    exchangeTimezoneName: 'Asia/Singapore',
+    currentTradingPeriod: { regular: { end: epoch('2026-01-08T09:00:00Z') } }
+  });
+  const { res, calls } = await requestQuote('ordinary-sg-equity', data, undefined, 'D05.SI');
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(res.body.provider.dailyClosePairHasGap, false);
+  assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseSource, null);
+});
+
+test('invalid STI 1d verification is rejected while the base quote succeeds', async () => {
+  Date.now = () => FIXED_NOW_MS + 12000;
+  const data = chartResult([5700, 5710.3701171875, null], [
+    epoch('2026-01-06T09:00:00Z'), epoch('2026-01-07T09:00:00Z'), epoch('2026-01-08T09:00:00Z')
+  ], {
+    regularMarketPreviousClose: null,
+    exchangeTimezoneName: 'Asia/Singapore',
+    currentTradingPeriod: { regular: { end: epoch('2026-01-08T09:00:00Z') } }
+  });
+  const fallback = response({ chart: { result: [{ meta: { chartPreviousClose: -1 } }] } });
+  const { res, calls } = await requestQuote('sti-invalid-fallback', data, fallback, '^STI');
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 2);
+  assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseSource, null);
+});
+
+test('missing STI 1d verification is rejected while the base quote succeeds', async () => {
+  Date.now = () => FIXED_NOW_MS + 14000;
+  const data = chartResult([5700, 5710.3701171875, null], [
+    epoch('2026-01-06T09:00:00Z'), epoch('2026-01-07T09:00:00Z'), epoch('2026-01-08T09:00:00Z')
+  ], {
+    regularMarketPreviousClose: null,
+    exchangeTimezoneName: 'Asia/Singapore',
+    currentTradingPeriod: { regular: { end: epoch('2026-01-08T09:00:00Z') } }
+  });
+  const fallback = response({ chart: { result: [{ meta: {} }] } });
+  const { res, calls } = await requestQuote('sti-missing-fallback', data, fallback, '^STI');
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 2);
+  assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseSource, null);
+});

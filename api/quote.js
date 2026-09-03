@@ -199,7 +199,7 @@ module.exports = async function handler(req, res) {
     const hasValidRegularMarketPreviousClose = Number.isFinite(meta.regularMarketPreviousClose)
       && meta.regularMarketPreviousClose > 0;
     const shouldVerifyImmediatePreviousClose = dailyClosePairHasGap
-      || (cacheKey === '^HSI' && !hasValidRegularMarketPreviousClose);
+      || ((cacheKey === '^HSI' || cacheKey === '^STI') && !hasValidRegularMarketPreviousClose);
 
     let immediatePreviousClose = null;
     let immediatePreviousCloseSource = null;
