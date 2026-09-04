@@ -28,6 +28,15 @@ function exchangeDateKey(epochSeconds, timeZone) {
   }
 }
 
+function previousWeekdayDateKey(dateKey) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey || '')) return null;
+  const date = new Date(`${dateKey}T00:00:00Z`);
+  do {
+    date.setUTCDate(date.getUTCDate() - 1);
+  } while (date.getUTCDay() === 0 || date.getUTCDay() === 6);
+  return date.toISOString().slice(0, 10);
+}
+
 function isCompletedDailyObservation(timestamp, meta, nowSeconds) {
   if (!Number.isFinite(timestamp)) return false;
   const timeZone = meta.exchangeTimezoneName;
@@ -192,27 +201,60 @@ module.exports = async function handler(req, res) {
     const previousDailyObservation = dailyObservations.length >= 2
       ? dailyObservations[dailyObservations.length - 2]
       : null;
-    const dailyClosePairHasGap = !!(latestDailyObservation && previousDailyObservation
-      && completedDailyRows.some(row => !row.validClose
-        && row.index > previousDailyObservation.index
-        && row.index < latestDailyObservation.index));
+    let missingCompletedDailyRow = null;
+    if (latestDailyObservation && previousDailyObservation) {
+      for (const row of completedDailyRows) {
+        if (!row.validClose
+            && row.index > previousDailyObservation.index
+            && row.index < latestDailyObservation.index) {
+          missingCompletedDailyRow = row;
+        }
+      }
+    }
+    const dailyClosePairHasGap = !!missingCompletedDailyRow;
     const hasValidRegularMarketPreviousClose = Number.isFinite(meta.regularMarketPreviousClose)
       && meta.regularMarketPreviousClose > 0;
     const shouldVerifyImmediatePreviousClose = dailyClosePairHasGap
       || ((cacheKey === '^HSI' || cacheKey === '^STI') && !hasValidRegularMarketPreviousClose);
 
     let immediatePreviousClose = null;
+    let immediatePreviousCloseTime = null;
     let immediatePreviousCloseSource = null;
     if (shouldVerifyImmediatePreviousClose) {
       try {
-        const fallbackUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=1d`;
+        const currentExchangeDate = exchangeDateKey(nowSeconds, meta.exchangeTimezoneName);
+        const regularEndDate = exchangeDateKey(
+          meta.currentTradingPeriod?.regular?.end,
+          meta.exchangeTimezoneName
+        );
+        const latestDailyDate = exchangeDateKey(
+          latestDailyObservation?.time,
+          meta.exchangeTimezoneName
+        );
+        const verificationAnchorDate = regularEndDate === currentExchangeDate
+          ? currentExchangeDate
+          : latestDailyDate;
+        const expectedPreviousDate = missingCompletedDailyRow
+          ? exchangeDateKey(timestamps[missingCompletedDailyRow.index], meta.exchangeTimezoneName)
+          : previousWeekdayDateKey(verificationAnchorDate);
+        const fallbackUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`;
         const fallbackResponse = await fetch(fallbackUrl, { headers: HEADERS });
-        if (fallbackResponse.ok) {
+        if (fallbackResponse.ok && expectedPreviousDate) {
           const fallbackData = await fallbackResponse.json();
-          const fallbackPreviousClose = fallbackData.chart?.result?.[0]?.meta?.chartPreviousClose;
-          if (Number.isFinite(fallbackPreviousClose) && fallbackPreviousClose > 0) {
-            immediatePreviousClose = fallbackPreviousClose;
-            immediatePreviousCloseSource = 'yahooChart1d';
+          const fallbackResult = fallbackData.chart?.result?.[0];
+          const fallbackTimestamps = fallbackResult?.timestamp || [];
+          const fallbackCloses = fallbackResult?.indicators?.quote?.[0]?.close || [];
+          for (let i = fallbackTimestamps.length - 1; i >= 0; i--) {
+            const fallbackTimestamp = fallbackTimestamps[i];
+            const fallbackClose = fallbackCloses[i];
+            if (exchangeDateKey(fallbackTimestamp, meta.exchangeTimezoneName) === expectedPreviousDate
+                && isCompletedDailyObservation(fallbackTimestamp, meta, nowSeconds)
+                && Number.isFinite(fallbackClose) && fallbackClose > 0) {
+              immediatePreviousClose = fallbackClose;
+              immediatePreviousCloseTime = fallbackTimestamp;
+              immediatePreviousCloseSource = 'yahooChart5d';
+              break;
+            }
           }
         }
       } catch(e) {}
@@ -305,6 +347,7 @@ module.exports = async function handler(req, res) {
         previousDailyCloseTime: previousDailyObservation?.time ?? null,
         dailyClosePairHasGap,
         immediatePreviousClose,
+        immediatePreviousCloseTime,
         immediatePreviousCloseSource,
         latestChartTimestamp
       }

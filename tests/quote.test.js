@@ -52,7 +52,7 @@ async function requestQuote(name, baseData, fallbackResult, symbol = `TEST-${nam
   const calls = [];
   global.fetch = async url => {
     calls.push(url);
-    if (url.includes('range=1d')) {
+    if (url.includes('range=5d')) {
       if (fallbackResult instanceof Error) throw fallbackResult;
       return fallbackResult || response({}, false, 500);
     }
@@ -82,18 +82,19 @@ test('normal consecutive observations need no fallback and preserve legacy field
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });
 
-test('null completed-session row triggers verified 1d previous close', async () => {
+test('null completed-session row triggers date-verified 5d previous close', async () => {
   const data = chartResult([100, null, 110], [
     epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
   ]);
-  const fallback = response({ chart: { result: [{ meta: { chartPreviousClose: 107 } }] } });
+  const fallback = response(chartResult([107], [epoch('2026-01-06T21:00:00Z')]));
   const { res, calls } = await requestQuote('gap', data, fallback);
   assert.equal(res.statusCode, 200);
   assert.equal(calls.length, 2);
-  assert.match(calls[1], /interval=1d&range=1d$/);
+  assert.match(calls[1], /interval=1d&range=5d$/);
   assert.equal(res.body.provider.dailyClosePairHasGap, true);
   assert.equal(res.body.provider.immediatePreviousClose, 107);
-  assert.equal(res.body.provider.immediatePreviousCloseSource, 'yahooChart1d');
+  assert.equal(res.body.provider.immediatePreviousCloseTime, epoch('2026-01-06T21:00:00Z'));
+  assert.equal(res.body.provider.immediatePreviousCloseSource, 'yahooChart5d');
   assert.deepEqual(
     { price: res.body.price, prev: res.body.prev, change: res.body.change },
     { price: 110, prev: 100, change: 10 }
@@ -139,7 +140,7 @@ test('current incomplete null row is not a gap', async () => {
   assert.equal(res.body.provider.dailyClosePairHasGap, false);
 });
 
-test('1d fallback failure preserves the base quote', async () => {
+test('5d fallback failure preserves the base quote', async () => {
   const data = chartResult([100, null, 110], [
     epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
   ]);
@@ -150,38 +151,54 @@ test('1d fallback failure preserves the base quote', async () => {
   assert.equal(res.body.prev, 100);
   assert.equal(res.body.provider.dailyClosePairHasGap, true);
   assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, null);
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });
 
-test('invalid 1d chartPreviousClose is safely unavailable', async () => {
+test('invalid aligned 5d close is safely unavailable', async () => {
   const data = chartResult([100, null, 110], [
     epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
   ]);
-  const fallback = response({ chart: { result: [{ meta: { chartPreviousClose: -1 } }] } });
+  const fallback = response(chartResult([-1], [epoch('2026-01-06T21:00:00Z')]));
   const { res } = await requestQuote('invalid-fallback', data, fallback);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.provider.dailyClosePairHasGap, true);
   assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, null);
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });
 
-test('HSI without regularMarketPreviousClose verifies 1d even without a detected gap', async () => {
-  Date.now = () => FIXED_NOW_MS + 2000;
-  const data = chartResult([100, 105, 110], [
-    epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
-  ], { regularMarketPreviousClose: null });
-  const fallback = response({ chart: { result: [{ meta: { chartPreviousClose: 107 } }] } });
+test('HSI recovers the timestamped expected previous session from 5d', async () => {
+  Date.now = () => Date.parse('2026-09-04T04:00:00Z');
+  const data = chartResult([25566.990234375, 25329.73046875, 25311.2109375], [
+    epoch('2026-08-31T01:30:00Z'), epoch('2026-09-01T01:30:00Z'), epoch('2026-09-02T01:30:00Z')
+  ], {
+    marketState: 'REGULAR',
+    regularMarketPrice: 25737.60,
+    regularMarketPreviousClose: null,
+    exchangeTimezoneName: 'Asia/Hong_Kong',
+    currentTradingPeriod: { regular: { end: epoch('2026-09-04T08:00:00Z') } }
+  });
+  const fallback = response(chartResult(
+    [25329.73046875, 25311.2109375, 25213.310546875, 25737.599609375],
+    [
+      epoch('2026-09-01T01:30:00Z'), epoch('2026-09-02T01:30:00Z'),
+      epoch('2026-09-03T01:30:00Z'), epoch('2026-09-04T01:30:00Z')
+    ],
+    { exchangeTimezoneName: 'Asia/Hong_Kong' }
+  ));
   const { res, calls } = await requestQuote('hsi-missing-previous', data, fallback, '^HSI');
   assert.equal(res.statusCode, 200);
   assert.equal(calls.length, 2);
-  assert.match(calls[1], /%5EHSI\?interval=1d&range=1d$/);
+  assert.match(calls[1], /%5EHSI\?interval=1d&range=5d$/);
   assert.equal(res.body.provider.dailyClosePairHasGap, false);
-  assert.equal(res.body.provider.immediatePreviousClose, 107);
-  assert.equal(res.body.provider.immediatePreviousCloseSource, 'yahooChart1d');
+  assert.equal(res.body.provider.immediatePreviousClose, 25213.310546875);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, 1788399000);
+  assert.equal(res.body.provider.immediatePreviousCloseSource, 'yahooChart5d');
 });
 
 test('HSI with valid regularMarketPreviousClose and no gap makes no targeted request', async () => {
-  Date.now = () => FIXED_NOW_MS + 4000;
+  Date.now = () => Date.parse('2026-09-04T04:00:02Z');
   const data = chartResult([100, 105, 110], [
     epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
   ]);
@@ -190,6 +207,7 @@ test('HSI with valid regularMarketPreviousClose and no gap makes no targeted req
   assert.equal(calls.length, 1);
   assert.equal(res.body.provider.dailyClosePairHasGap, false);
   assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, null);
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });
 
@@ -202,11 +220,12 @@ test('non-HSI without regularMarketPreviousClose and no gap remains single-reque
   assert.equal(calls.length, 1);
   assert.equal(res.body.provider.dailyClosePairHasGap, false);
   assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, null);
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });
 
 test('failed targeted HSI verification preserves base quote without immediate metadata', async () => {
-  Date.now = () => FIXED_NOW_MS + 6000;
+  Date.now = () => Date.parse('2026-09-04T04:00:04Z');
   const data = chartResult([100, 105, 110], [
     epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
   ], { regularMarketPreviousClose: null });
@@ -218,26 +237,28 @@ test('failed targeted HSI verification preserves base quote without immediate me
   assert.equal(res.body.price, 110);
   assert.equal(res.body.provider.dailyClosePairHasGap, false);
   assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, null);
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });
 
-test('invalid targeted HSI chartPreviousClose preserves base quote without immediate metadata', async () => {
-  Date.now = () => FIXED_NOW_MS + 8000;
+test('invalid targeted HSI 5d close preserves base quote without immediate metadata', async () => {
+  Date.now = () => Date.parse('2026-09-04T04:00:06Z');
   const data = chartResult([100, 105, 110], [
     epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
   ], { regularMarketPreviousClose: 0 });
-  const fallback = response({ chart: { result: [{ meta: { chartPreviousClose: 0 } }] } });
+  const fallback = response(chartResult([0], [epoch('2026-01-07T21:00:00Z')]));
   const { res, calls } = await requestQuote('hsi-invalid-fallback', data, fallback, '^HSI');
   assert.equal(res.statusCode, 200);
   assert.equal(calls.length, 2);
   assert.equal(res.body.price, 110);
   assert.equal(res.body.provider.dailyClosePairHasGap, false);
   assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, null);
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });
 
-test('STI trailing null completed row uses verified 1d immediate previous close', async () => {
-  Date.now = () => FIXED_NOW_MS + 10000;
+test('STI trailing null completed row uses date-verified 5d immediate previous close', async () => {
+  Date.now = () => Date.parse('2026-01-08T04:00:00Z');
   const data = chartResult([5700, 5710.3701171875, null], [
     epoch('2026-01-06T09:00:00Z'), epoch('2026-01-07T09:00:00Z'), epoch('2026-01-08T09:00:00Z')
   ], {
@@ -246,15 +267,19 @@ test('STI trailing null completed row uses verified 1d immediate previous close'
     exchangeTimezoneName: 'Asia/Singapore',
     currentTradingPeriod: { regular: { end: epoch('2026-01-08T09:00:00Z') } }
   });
-  const fallback = response({ chart: { result: [{ meta: { chartPreviousClose: 5744.11 } }] } });
+  const fallback = response(chartResult([5755.36, 5710.37, 5744.11, null], [
+    epoch('2026-01-05T09:00:00Z'), epoch('2026-01-06T09:00:00Z'),
+    epoch('2026-01-07T09:00:00Z'), epoch('2026-01-08T09:00:00Z')
+  ], { exchangeTimezoneName: 'Asia/Singapore' }));
   const { res, calls } = await requestQuote('sti-trailing-null', data, fallback, '^STI');
   assert.equal(res.statusCode, 200);
   assert.equal(calls.length, 2);
-  assert.match(calls[1], /%5ESTI\?interval=1d&range=1d$/);
+  assert.match(calls[1], /%5ESTI\?interval=1d&range=5d$/);
   assert.equal(res.body.provider.dailyClosePairHasGap, false);
   assert.equal(res.body.provider.latestDailyClose, 5710.3701171875);
   assert.equal(res.body.provider.immediatePreviousClose, 5744.11);
-  assert.equal(res.body.provider.immediatePreviousCloseSource, 'yahooChart1d');
+  assert.equal(res.body.provider.immediatePreviousCloseTime, epoch('2026-01-07T09:00:00Z'));
+  assert.equal(res.body.provider.immediatePreviousCloseSource, 'yahooChart5d');
 });
 
 test('ordinary SG equity with trailing null and no regular previous close is unaffected', async () => {
@@ -270,10 +295,41 @@ test('ordinary SG equity with trailing null and no regular previous close is una
   assert.equal(calls.length, 1);
   assert.equal(res.body.provider.dailyClosePairHasGap, false);
   assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, null);
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });
 
-test('invalid STI 1d verification is rejected while the base quote succeeds', async () => {
+test('ordinary HK equity without a gap remains outside targeted verification', async () => {
+  const data = chartResult([430, 433, null], [
+    epoch('2026-01-06T01:30:00Z'), epoch('2026-01-07T01:30:00Z'), epoch('2026-01-08T01:30:00Z')
+  ], {
+    regularMarketPreviousClose: null,
+    exchangeTimezoneName: 'Asia/Hong_Kong',
+    currentTradingPeriod: { regular: { end: epoch('2026-01-08T08:00:00Z') } }
+  });
+  const { res, calls } = await requestQuote('ordinary-hk-equity', data, undefined, '0700.HK');
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, null);
+  assert.equal(res.body.provider.immediatePreviousCloseSource, null);
+});
+
+test('5d verification keeps timestamp and close indexes aligned', async () => {
+  const data = chartResult([100, null, 110], [
+    epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z'), epoch('2026-01-07T21:00:00Z')
+  ]);
+  const fallback = response(chartResult([999, 107], [
+    epoch('2026-01-05T21:00:00Z'), epoch('2026-01-06T21:00:00Z')
+  ]));
+  const { res } = await requestQuote('aligned-fallback', data, fallback);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.provider.immediatePreviousClose, 107);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, epoch('2026-01-06T21:00:00Z'));
+  assert.equal(res.body.provider.immediatePreviousCloseSource, 'yahooChart5d');
+});
+
+test('invalid STI 5d verification is rejected while the base quote succeeds', async () => {
   Date.now = () => FIXED_NOW_MS + 12000;
   const data = chartResult([5700, 5710.3701171875, null], [
     epoch('2026-01-06T09:00:00Z'), epoch('2026-01-07T09:00:00Z'), epoch('2026-01-08T09:00:00Z')
@@ -282,15 +338,18 @@ test('invalid STI 1d verification is rejected while the base quote succeeds', as
     exchangeTimezoneName: 'Asia/Singapore',
     currentTradingPeriod: { regular: { end: epoch('2026-01-08T09:00:00Z') } }
   });
-  const fallback = response({ chart: { result: [{ meta: { chartPreviousClose: -1 } }] } });
+  const fallback = response(chartResult([-1], [epoch('2026-01-07T09:00:00Z')], {
+    exchangeTimezoneName: 'Asia/Singapore'
+  }));
   const { res, calls } = await requestQuote('sti-invalid-fallback', data, fallback, '^STI');
   assert.equal(res.statusCode, 200);
   assert.equal(calls.length, 2);
   assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, null);
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });
 
-test('missing STI 1d verification is rejected while the base quote succeeds', async () => {
+test('missing expected STI 5d row is rejected while the base quote succeeds', async () => {
   Date.now = () => FIXED_NOW_MS + 14000;
   const data = chartResult([5700, 5710.3701171875, null], [
     epoch('2026-01-06T09:00:00Z'), epoch('2026-01-07T09:00:00Z'), epoch('2026-01-08T09:00:00Z')
@@ -299,10 +358,13 @@ test('missing STI 1d verification is rejected while the base quote succeeds', as
     exchangeTimezoneName: 'Asia/Singapore',
     currentTradingPeriod: { regular: { end: epoch('2026-01-08T09:00:00Z') } }
   });
-  const fallback = response({ chart: { result: [{ meta: {} }] } });
+  const fallback = response(chartResult([5700], [epoch('2026-01-05T09:00:00Z')], {
+    exchangeTimezoneName: 'Asia/Singapore'
+  }));
   const { res, calls } = await requestQuote('sti-missing-fallback', data, fallback, '^STI');
   assert.equal(res.statusCode, 200);
   assert.equal(calls.length, 2);
   assert.equal(res.body.provider.immediatePreviousClose, null);
+  assert.equal(res.body.provider.immediatePreviousCloseTime, null);
   assert.equal(res.body.provider.immediatePreviousCloseSource, null);
 });
