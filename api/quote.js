@@ -60,7 +60,6 @@ function getVerifiedDailyObservation(data, expectedDate, meta, nowSeconds) {
     const timestamp = timestamps[i];
     const close = closes[i];
     if (exchangeDateKey(timestamp, meta.exchangeTimezoneName) === expectedDate
-        && isCompletedDailyObservation(timestamp, meta, nowSeconds)
         && Number.isFinite(close) && close > 0) {
       return { close, time: timestamp };
     }
