@@ -261,73 +261,21 @@ module.exports = async function handler(req, res) {
             try {
               const fallbackUrl = `https://${attempt.host}/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`;
               const fallbackResponse = await fetch(fallbackUrl, { headers: HEADERS });
-              if (!fallbackResponse.ok) {
-                console.info('[quote.previous-close-verification]', {
-                  symbol: sym,
-                  source: attempt.source,
-                  expectedPreviousDate,
-                  httpStatus: fallbackResponse.status,
-                  requestFailure: null,
-                  returnedDates: [],
-                  expectedDateFound: false,
-                  accepted: false,
-                  selectedClose: null,
-                  selectedTimestamp: null,
-                  rejectionReason: 'http_error'
-                });
-                continue;
-              }
+              if (!fallbackResponse.ok) continue;
               const fallbackData = await fallbackResponse.json();
-              const fallbackResult = fallbackData.chart?.result?.[0];
-              const fallbackTimestamps = fallbackResult?.timestamp || [];
-              const returnedDates = [...new Set(fallbackTimestamps
-                .map(timestamp => exchangeDateKey(timestamp, meta.exchangeTimezoneName))
-                .filter(Boolean))];
-              const expectedDateFound = returnedDates.includes(expectedPreviousDate);
               const verifiedObservation = getVerifiedDailyObservation(
                 fallbackData,
                 expectedPreviousDate,
                 meta,
                 nowSeconds
               );
-              console.info('[quote.previous-close-verification]', {
-                symbol: sym,
-                source: attempt.source,
-                expectedPreviousDate,
-                httpStatus: fallbackResponse.status,
-                requestFailure: null,
-                returnedDates,
-                expectedDateFound,
-                accepted: !!verifiedObservation,
-                selectedClose: verifiedObservation?.close ?? null,
-                selectedTimestamp: verifiedObservation?.time ?? null,
-                rejectionReason: verifiedObservation
-                  ? null
-                  : (fallbackResult
-                    ? (expectedDateFound ? 'expected_row_invalid_or_incomplete' : 'expected_date_missing')
-                    : 'missing_chart_result')
-              });
               if (verifiedObservation) {
                 immediatePreviousClose = verifiedObservation.close;
                 immediatePreviousCloseTime = verifiedObservation.time;
                 immediatePreviousCloseSource = attempt.source;
                 break;
               }
-            } catch(e) {
-              console.info('[quote.previous-close-verification]', {
-                symbol: sym,
-                source: attempt.source,
-                expectedPreviousDate,
-                httpStatus: null,
-                requestFailure: e?.name || 'Error',
-                returnedDates: [],
-                expectedDateFound: false,
-                accepted: false,
-                selectedClose: null,
-                selectedTimestamp: null,
-                rejectionReason: 'request_or_parse_failure'
-              });
-            }
+            } catch(e) {}
           }
         }
       } catch(e) {}
