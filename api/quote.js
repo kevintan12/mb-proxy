@@ -52,6 +52,22 @@ function isCompletedDailyObservation(timestamp, meta, nowSeconds) {
     && nowSeconds >= regularEnd;
 }
 
+function getVerifiedDailyObservation(data, expectedDate, meta, nowSeconds) {
+  const result = data.chart?.result?.[0];
+  const timestamps = result?.timestamp || [];
+  const closes = result?.indicators?.quote?.[0]?.close || [];
+  for (let i = timestamps.length - 1; i >= 0; i--) {
+    const timestamp = timestamps[i];
+    const close = closes[i];
+    if (exchangeDateKey(timestamp, meta.exchangeTimezoneName) === expectedDate
+        && isCompletedDailyObservation(timestamp, meta, nowSeconds)
+        && Number.isFinite(close) && close > 0) {
+      return { close, time: timestamp };
+    }
+  }
+  return null;
+}
+
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -237,24 +253,30 @@ module.exports = async function handler(req, res) {
         const expectedPreviousDate = missingCompletedDailyRow
           ? exchangeDateKey(timestamps[missingCompletedDailyRow.index], meta.exchangeTimezoneName)
           : previousWeekdayDateKey(verificationAnchorDate);
-        const fallbackUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`;
-        const fallbackResponse = await fetch(fallbackUrl, { headers: HEADERS });
-        if (fallbackResponse.ok && expectedPreviousDate) {
-          const fallbackData = await fallbackResponse.json();
-          const fallbackResult = fallbackData.chart?.result?.[0];
-          const fallbackTimestamps = fallbackResult?.timestamp || [];
-          const fallbackCloses = fallbackResult?.indicators?.quote?.[0]?.close || [];
-          for (let i = fallbackTimestamps.length - 1; i >= 0; i--) {
-            const fallbackTimestamp = fallbackTimestamps[i];
-            const fallbackClose = fallbackCloses[i];
-            if (exchangeDateKey(fallbackTimestamp, meta.exchangeTimezoneName) === expectedPreviousDate
-                && isCompletedDailyObservation(fallbackTimestamp, meta, nowSeconds)
-                && Number.isFinite(fallbackClose) && fallbackClose > 0) {
-              immediatePreviousClose = fallbackClose;
-              immediatePreviousCloseTime = fallbackTimestamp;
-              immediatePreviousCloseSource = 'yahooChart5d';
-              break;
-            }
+        if (expectedPreviousDate) {
+          const verificationAttempts = [
+            { host: 'query1.finance.yahoo.com', source: 'yahooChart5dQuery1' },
+            { host: 'query2.finance.yahoo.com', source: 'yahooChart5dQuery2' }
+          ];
+          for (const attempt of verificationAttempts) {
+            try {
+              const fallbackUrl = `https://${attempt.host}/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`;
+              const fallbackResponse = await fetch(fallbackUrl, { headers: HEADERS });
+              if (!fallbackResponse.ok) continue;
+              const fallbackData = await fallbackResponse.json();
+              const verifiedObservation = getVerifiedDailyObservation(
+                fallbackData,
+                expectedPreviousDate,
+                meta,
+                nowSeconds
+              );
+              if (verifiedObservation) {
+                immediatePreviousClose = verifiedObservation.close;
+                immediatePreviousCloseTime = verifiedObservation.time;
+                immediatePreviousCloseSource = attempt.source;
+                break;
+              }
+            } catch(e) {}
           }
         }
       } catch(e) {}
