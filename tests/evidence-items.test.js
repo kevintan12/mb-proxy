@@ -4,7 +4,8 @@ const assert = require('node:assert/strict');
 const {
   EVIDENCE_ITEM_KEYS,
   createEvidenceItem,
-  validateEvidenceItemInput
+  validateEvidenceItemInput,
+  validateEvidenceItem
 } = require('../lib/evidence-items');
 
 function validInput(overrides = {}) {
@@ -132,4 +133,33 @@ test('returns deeply immutable records without retaining caller-owned references
   const validation = validateEvidenceItemInput(input);
   assert.equal(Object.isFrozen(validation), true);
   assert.equal(Object.isFrozen(validation.errors), true);
+});
+
+test('strict canonical-output validation is structural and rejects contract drift', () => {
+  const canonical = createEvidenceItem(validInput({symbols: ['AAPL']}));
+  assert.equal(validateEvidenceItem(canonical).valid, true);
+  assert.equal(validateEvidenceItem(JSON.parse(JSON.stringify(canonical))).valid, true);
+
+  const spoofed = JSON.parse(JSON.stringify(canonical));
+  spoofed.provenance.publisher = 'Spoofed publisher';
+  assert.ok(validateEvidenceItem(spoofed).errors.includes('altered or spoofed provenance'));
+
+  const missingProvenance = JSON.parse(JSON.stringify(canonical));
+  missingProvenance.provenance = null;
+  assert.equal(validateEvidenceItem(missingProvenance).valid, false);
+
+  const wrongShape = {...JSON.parse(JSON.stringify(canonical)), extra: true};
+  assert.ok(validateEvidenceItem(wrongShape).errors.includes('invalid canonical property shape or order'));
+
+  const hiddenShape = JSON.parse(JSON.stringify(canonical));
+  Object.defineProperty(hiddenShape, 'hidden', {value: true});
+  assert.ok(validateEvidenceItem(hiddenShape).errors.includes('invalid canonical property shape or order'));
+
+  const wrongMarket = JSON.parse(JSON.stringify(canonical));
+  wrongMarket.market = 'SG';
+  assert.equal(validateEvidenceItem(wrongMarket).valid, false);
+
+  const nonCanonical = JSON.parse(JSON.stringify(canonical));
+  nonCanonical.title = ` ${nonCanonical.title}`;
+  assert.ok(validateEvidenceItem(nonCanonical).errors.includes('non-canonical title'));
 });
