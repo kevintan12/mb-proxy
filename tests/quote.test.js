@@ -4,7 +4,12 @@ const assert = require('node:assert/strict');
 const handler = require('../api/quote');
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
-const {createClaudeAnalysisInput} = require('../lib/claude-analysis-contract');
+const {createCompletedRegularSession, createThreeSessionSnapshot} = require('../lib/three-session-snapshot');
+const {
+  REPORT_HEADER,
+  REPORT_SECTION_NAMES,
+  createClaudeAnalysisInput
+} = require('../lib/claude-analysis-contract');
 
 const REAL_DATE_NOW = Date.now;
 const REAL_FETCH = global.fetch;
@@ -65,9 +70,57 @@ function claudeAnalysisInput() {
     canonicalUrl: 'https://www.reuters.com/markets/example',
     publishedAt: '2026-09-06T08:00:00Z'
   });
-  return createClaudeAnalysisInput({
-    evidenceCollection: createEvidenceCollection({market: 'SG', items: [item]})
+  const session = createCompletedRegularSession({
+    market: 'SG', sessionDate: '2026-09-04', open: 5700, high: 5800, low: 5650,
+    close: 5747, previousClose: 5710, volume: null, asOf: '2026-09-04T17:00:00+08:00',
+    sourceId: 'sg.yahoo-finance', validationState: 'VALIDATED'
   });
+  const snapshot = createThreeSessionSnapshot({
+    market: 'SG', symbol: '^STI', instrumentName: 'Straits Times Index', instrumentType: 'INDEX',
+    currency: 'SGD', marketState: 'CLOSED', completedSessions: [session], currentOverlay: null
+  });
+  return createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'SG', generatedAt: '2026-09-06T18:00:00+08:00',
+      userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [{
+      market: 'SG',
+      marketContext: {
+        exchangeTimezone: 'Asia/Singapore', marketState: 'CLOSED',
+        primaryCompletedSessionDate: '2026-09-04', includesCurrentOverlay: false,
+        calendarContext: 'Weekend; latest completed session remains applicable.'
+      },
+      telemetry: {benchmarkSnapshots: [snapshot], stockSnapshots: []},
+      evidenceCollection: createEvidenceCollection({market: 'SG', items: [item]}),
+      evidenceContext: {
+        materialEvents: ['e1'], authoritativeFacts: [], principalCatalysts: ['e1'],
+        supportingEvidence: ['e1'], conflictingEvidence: [], subsequentDevelopments: [],
+        unresolvedGaps: [], furtherReadings: []
+      }
+    }],
+    portfolioContext: {myStocks: [], watchlist: []}
+  });
+}
+
+function claudeAnalysisOutput(input) {
+  return {
+    status: 'NORMAL',
+    reportContext: {
+      header: REPORT_HEADER, selectedScope: 'SG', generatedAt: input.analysisRequest.generatedAt,
+      userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF', markets: ['SG']
+    },
+    sections: REPORT_SECTION_NAMES.map((name, index) => ({
+      name,
+      content: index === 10 ? null : 'Supported analysis.',
+      evidenceRefs: index === 10 ? [] : ['e1'],
+      telemetryRefs: index === 10 ? [] : ['t1'],
+      uncertainties: []
+    })),
+    evidenceReferences: ['e1'],
+    furtherReadings: [],
+    evidenceGaps: []
+  };
 }
 
 async function requestQuote(
@@ -101,23 +154,21 @@ test('structured Claude route returns validated analysis with one server-owned r
   const previousKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = 'test-key';
   const calls = [];
+  const input = claudeAnalysisInput();
+  const output = claudeAnalysisOutput(input);
   global.fetch = async (url, options) => {
     calls.push({url, options});
     return {
       ok: true,
       status: 200,
       async json() {
-        return {content: [{type: 'text', text: JSON.stringify({
-          status: 'NORMAL',
-          findings: [{text: 'Supported finding.', evidenceRefs: ['e1']}],
-          gaps: []
-        })}]};
+        return {content: [{type: 'text', text: JSON.stringify(output)}]};
       }
     };
   };
   try {
     const res = mockRes();
-    await handler({method: 'POST', query: {claudeAnalysis: '1'}, body: claudeAnalysisInput()}, res);
+    await handler({method: 'POST', query: {claudeAnalysis: '1'}, body: input}, res);
     assert.equal(res.statusCode, 200);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages');
@@ -125,11 +176,7 @@ test('structured Claude route returns validated analysis with one server-owned r
     assert.equal(requestBody.model, 'claude-haiku-4-5-20251001');
     assert.equal(requestBody.max_tokens, 4000);
     assert.equal(Object.hasOwn(requestBody, 'tools'), false);
-    assert.deepEqual(res.body, {result: {
-      status: 'NORMAL',
-      findings: [{text: 'Supported finding.', evidenceRefs: ['e1']}],
-      gaps: []
-    }});
+    assert.deepEqual(res.body, {result: output});
   } finally {
     if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = previousKey;
@@ -159,9 +206,10 @@ test('structured Claude route separates input, contract and upstream failures', 
       ok: true,
       status: 200,
       async json() {
-        return {content: [{type: 'text', text: JSON.stringify({
-          status: 'NORMAL', findings: [{text: 'Unsupported.', evidenceRefs: ['e2']}], gaps: []
-        })}]};
+        const input = claudeAnalysisInput();
+        const output = claudeAnalysisOutput(input);
+        output.sections[0].evidenceRefs = ['e2'];
+        return {content: [{type: 'text', text: JSON.stringify(output)}]};
       }
     });
     const contract = mockRes();

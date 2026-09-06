@@ -3,286 +3,430 @@ const assert = require('node:assert/strict');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
-const {createCompletedSessionTelemetry} = require('../lib/completed-session-telemetry');
+const {
+  createCompletedRegularSession,
+  createCurrentSessionOverlay,
+  createThreeSessionSnapshot
+} = require('../lib/three-session-snapshot');
 const {
   ANALYTICAL_STATUSES,
+  SELECTED_SCOPES,
+  REPORT_TYPES,
+  REPORT_HEADER,
+  REPORT_SECTION_NAMES,
+  REPORT_SECTION_REQUIREMENTS,
   CLAUDE_ANALYSIS_INPUT_KEYS,
-  CLAUDE_EVIDENCE_REFERENCE_KEYS,
   CLAUDE_ANALYSIS_OUTPUT_KEYS,
-  CLAUDE_FINDING_KEYS,
+  REPORT_SECTION_KEYS,
   CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA,
   createClaudeAnalysisInput,
+  validateClaudeAnalysisInput,
   validateClaudeAnalysisOutput,
   createClaudeAnalysisOutput
 } = require('../lib/claude-analysis-contract');
 
-function evidenceItem(overrides = {}) {
+const MARKET_CONFIG = {
+  US: {zone: 'America/New_York', source: 'us.yahoo-finance', news: 'us.reuters', symbol: '^GSPC'},
+  SG: {zone: 'Asia/Singapore', source: 'sg.yahoo-finance', news: 'sg.reuters', symbol: '^STI'},
+  HK: {zone: 'Asia/Hong_Kong', source: 'hk.yahoo-finance', news: 'hk.reuters', symbol: '^HSI'}
+};
+
+function evidence(market, overrides = {}) {
+  const config = MARKET_CONFIG[market];
   return createEvidenceItem({
-    sourceId: 'sg.reuters',
-    market: 'SG',
+    sourceId: config.news,
+    market,
     evidenceCategory: 'news',
-    title: 'Market update',
+    title: `${market} market update`,
     summary: 'A supported market observation.',
-    canonicalUrl: 'https://www.reuters.com/markets/example',
+    canonicalUrl: `https://www.reuters.com/markets/${market.toLowerCase()}-example`,
     publishedAt: '2026-09-06T08:00:00Z',
-    symbols: ['^STI'],
+    symbols: [config.symbol],
     ...overrides
   });
 }
 
-function analysisInput(items = [evidenceItem()]) {
+function snapshot(market, symbol = MARKET_CONFIG[market].symbol, withOverlay = false) {
+  const config = MARKET_CONFIG[market];
+  const session = createCompletedRegularSession({
+    market,
+    sessionDate: '2026-09-04',
+    open: 100,
+    high: 110,
+    low: 95,
+    close: 105,
+    previousClose: 100,
+    volume: null,
+    asOf: market === 'US' ? '2026-09-04T16:00:00-04:00' : '2026-09-04T16:00:00+08:00',
+    sourceId: config.source,
+    validationState: 'VALIDATED'
+  });
+  const currentOverlay = withOverlay ? createCurrentSessionOverlay({
+    market,
+    marketState: 'REGULAR',
+    sessionDate: '2026-09-07',
+    asOf: market === 'US' ? '2026-09-07T10:00:00-04:00' : '2026-09-07T10:00:00+08:00',
+    lastPrice: 106,
+    referenceClose: 105,
+    volume: 0,
+    sourceId: config.source,
+    validationState: 'LIVE VALIDATED'
+  }) : null;
+  return createThreeSessionSnapshot({
+    market,
+    symbol,
+    instrumentName: `${symbol} instrument`,
+    instrumentType: 'INDEX',
+    currency: market === 'US' ? 'USD' : market === 'SG' ? 'SGD' : 'HKD',
+    marketState: withOverlay ? 'REGULAR' : 'CLOSED',
+    completedSessions: [session],
+    currentOverlay
+  });
+}
+
+function marketPackage(market, {evidenceRef = 'e1', telemetrySnapshots, items} = {}) {
+  const packageItems = items || [evidence(market)];
+  const snapshots = telemetrySnapshots || [snapshot(market)];
+  return {
+    market,
+    marketContext: {
+      exchangeTimezone: MARKET_CONFIG[market].zone,
+      marketState: snapshots[0]?.marketState || 'CLOSED',
+      primaryCompletedSessionDate: snapshots.length ? '2026-09-04' : null,
+      includesCurrentOverlay: snapshots.some(item => item.currentOverlay !== null),
+      calendarContext: 'Applicable regular-session calendar is resolved by MarketBrief.'
+    },
+    telemetry: {benchmarkSnapshots: snapshots, stockSnapshots: []},
+    evidenceCollection: createEvidenceCollection({market, items: packageItems}),
+    evidenceContext: {
+      materialEvents: [evidenceRef],
+      authoritativeFacts: [],
+      principalCatalysts: [evidenceRef],
+      supportingEvidence: [evidenceRef],
+      conflictingEvidence: [],
+      subsequentDevelopments: [],
+      unresolvedGaps: [],
+      furtherReadings: []
+    }
+  };
+}
+
+function canonicalInput(overrides = {}) {
   return createClaudeAnalysisInput({
-    evidenceCollection: createEvidenceCollection({market: 'SG', items})
-  });
-}
-
-function completedSession(sessionDate, overrides = {}) {
-  return createCompletedSessionTelemetry({
-    market: 'SG',
-    symbol: '^STI',
-    sessionDate,
-    close: 5700,
-    closeTime: `${sessionDate}T09:00:00Z`,
-    sourceId: 'sg.yahoo-finance',
+    analysisRequest: {
+      selectedScope: 'SG',
+      generatedAt: '2026-09-06T18:00:00+08:00',
+      userTimezone: 'Asia/Singapore',
+      reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [marketPackage('SG')],
+    portfolioContext: {myStocks: [], watchlist: []},
     ...overrides
   });
 }
 
-function normalOutput(overrides = {}) {
+function reportContext(input) {
+  return {
+    header: REPORT_HEADER,
+    selectedScope: input.analysisRequest.selectedScope,
+    generatedAt: input.analysisRequest.generatedAt,
+    userTimezone: input.analysisRequest.userTimezone,
+    reportType: input.analysisRequest.reportType,
+    markets: input.marketPackages.map(item => item.market)
+  };
+}
+
+function sections({content = 'Supported analysis.', evidenceRefs = ['e1'], telemetryRefs = ['t1']} = {}) {
+  return REPORT_SECTION_NAMES.map((name, index) => ({
+    name,
+    content: index === REPORT_SECTION_NAMES.length - 1 ? null : content,
+    evidenceRefs: index === REPORT_SECTION_NAMES.length - 1 ? [] : evidenceRefs.slice(),
+    telemetryRefs: index === REPORT_SECTION_NAMES.length - 1 ? [] : telemetryRefs.slice(),
+    uncertainties: []
+  }));
+}
+
+function normalOutput(input, overrides = {}) {
   return {
     status: 'NORMAL',
-    findings: [{text: 'The market advanced.', evidenceRefs: ['e1']}],
-    gaps: [],
+    reportContext: reportContext(input),
+    sections: sections(),
+    evidenceReferences: ['e1'],
+    furtherReadings: [],
+    evidenceGaps: [],
     ...overrides
   };
 }
 
-test('derives deterministic evidence references from canonical collection order', () => {
-  const input = analysisInput([
-    evidenceItem({title: 'First', canonicalUrl: 'https://www.reuters.com/first'}),
-    evidenceItem({title: 'Second', canonicalUrl: 'https://www.reuters.com/second'}),
-    evidenceItem({title: 'First', canonicalUrl: 'https://www.reuters.com/first'})
+test('creates the frozen MARKET_BRIEF package with deterministic shape and requirements', () => {
+  const input = canonicalInput();
+  assert.deepEqual(SELECTED_SCOPES, ['US', 'SG', 'HK', 'ALL']);
+  assert.deepEqual(REPORT_TYPES, ['MARKET_BRIEF']);
+  assert.equal(REPORT_HEADER, 'REPORT HEADER / ANALYSIS CONTEXT');
+  assert.deepEqual(REPORT_SECTION_NAMES, [
+    'EXECUTIVE MARKET SUMMARY', 'KEY MARKET DRIVERS',
+    'WHAT DROVE / IS DRIVING THE MARKET', 'STOCKS & SECTORS IN FOCUS',
+    'MY STOCKS & WATCHLIST - MATERIAL MOVEMENTS', 'MARKET INTERPRETATION',
+    'KEY RISKS', 'OPPORTUNITIES', 'WHAT TO WATCH FOR NEXT',
+    'MARKETBRIEF TAKEAWAY', 'FURTHER READINGS'
   ]);
-
   assert.deepEqual(Object.keys(input), CLAUDE_ANALYSIS_INPUT_KEYS);
-  assert.deepEqual(input.evidence.map(entry => entry.reference), ['e1', 'e2', 'e3']);
-  assert.equal(input.evidence[0].item.title, 'First');
-  assert.equal(input.evidence[2].item.title, 'First');
-  assert.equal(input.symbol, undefined);
-  assert.deepEqual(input.completedSessions, []);
+  assert.equal(input.analysisRequest.generatedAt, '2026-09-06T10:00:00.000Z');
+  assert.equal(input.analysisRequest.reportType, 'MARKET_BRIEF');
+  assert.equal(input.marketPackages[0].evidenceContext.evidence[0].reference, 'e1');
+  assert.equal(input.marketPackages[0].telemetry.benchmarkSnapshots[0].reference, 't1');
+  assert.deepEqual(input.outputRequirements.sections, REPORT_SECTION_REQUIREMENTS);
+  assert.equal(input.outputRequirements.maximumWords, 2500);
+  assert.equal(validateClaudeAnalysisInput(input), true);
+});
+
+test('enforces selected scope and deterministic US, SG, HK ordering for ALL', () => {
+  const input = createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'ALL', generatedAt: '2026-09-06T10:00:00Z',
+      userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [
+      marketPackage('US', {evidenceRef: 'e1'}),
+      marketPackage('SG', {evidenceRef: 'e2'}),
+      marketPackage('HK', {evidenceRef: 'e3'})
+    ],
+    portfolioContext: {myStocks: [], watchlist: []}
+  });
+  assert.deepEqual(input.marketPackages.map(item => item.market), ['US', 'SG', 'HK']);
+  assert.deepEqual(input.marketPackages.flatMap(item =>
+    item.evidenceContext.evidence.map(entry => entry.reference)), ['e1', 'e2', 'e3']);
+  assert.deepEqual(input.marketPackages.flatMap(item =>
+    item.telemetry.benchmarkSnapshots.map(entry => entry.reference)), ['t1', 't2', 't3']);
+  assert.throws(() => createClaudeAnalysisInput({
+    analysisRequest: {...input.analysisRequest, generatedAt: '2026-09-06T10:00:00Z'},
+    marketPackages: [marketPackage('SG', {evidenceRef: 'e1'})],
+    portfolioContext: {myStocks: [], watchlist: []}
+  }), /selected scope/);
+});
+
+test('rejects invalid request values and caller-supplied output requirements', () => {
+  for (const override of [
+    {selectedScope: 'EU'}, {reportType: 'SEARCH_ANALYSIS'},
+    {generatedAt: '2026-09-06'}, {userTimezone: 'S.tz'}
+  ]) {
+    assert.throws(() => createClaudeAnalysisInput({
+      analysisRequest: {
+        selectedScope: 'SG', generatedAt: '2026-09-06T10:00:00Z',
+        userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF', ...override
+      },
+      marketPackages: [marketPackage('SG')],
+      portfolioContext: {myStocks: [], watchlist: []}
+    }), /request/);
+  }
+  assert.throws(() => createClaudeAnalysisInput({
+    analysisRequest: canonicalInput().analysisRequest,
+    marketPackages: [marketPackage('SG')],
+    portfolioContext: {myStocks: [], watchlist: []},
+    outputRequirements: {}
+  }), /must not be supplied/);
+  assert.throws(() => createClaudeAnalysisInput({
+    analysisRequest: canonicalInput().analysisRequest,
+    marketPackages: [marketPackage('SG')],
+    portfolioContext: {myStocks: [], watchlist: []},
+    provenance: {publisher: 'caller'}
+  }), /property shape/);
+});
+
+test('validates market/session context against canonical 8B.3 snapshots and overlays', () => {
+  const liveSnapshot = snapshot('SG', '^STI', true);
+  const input = createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'SG', generatedAt: '2026-09-07T03:00:00Z',
+      userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [marketPackage('SG', {telemetrySnapshots: [liveSnapshot]})],
+    portfolioContext: {myStocks: [], watchlist: []}
+  });
+  assert.equal(input.marketPackages[0].marketContext.includesCurrentOverlay, true);
+  assert.equal(input.marketPackages[0].telemetry.benchmarkSnapshots[0].snapshot.currentOverlay.isFinal, false);
+
+  const wrongZone = marketPackage('SG');
+  wrongZone.marketContext.exchangeTimezone = 'America/New_York';
+  assert.throws(() => createClaudeAnalysisInput({
+    analysisRequest: input.analysisRequest,
+    marketPackages: [wrongZone], portfolioContext: {myStocks: [], watchlist: []}
+  }), /market context/);
+
+  const spoofed = marketPackage('SG');
+  spoofed.telemetry.benchmarkSnapshots[0] = JSON.parse(JSON.stringify(spoofed.telemetry.benchmarkSnapshots[0]));
+  spoofed.telemetry.benchmarkSnapshots[0].completedSessions[0].provenance.publisher = 'Spoof';
+  assert.throws(() => createClaudeAnalysisInput({
+    analysisRequest: input.analysisRequest,
+    marketPackages: [spoofed], portfolioContext: {myStocks: [], watchlist: []}
+  }), /canonical/);
+});
+
+test('normalizes evidence roles and protects evidence provenance and Further Readings dates', () => {
+  const usItems = [
+    createEvidenceItem({
+      sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'market-data',
+      title: 'Yahoo session recap', canonicalUrl: 'https://finance.yahoo.com/news/session-recap',
+      publishedAt: '2026-09-04T21:00:00Z'
+    }),
+    createEvidenceItem({
+      sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news',
+      title: 'CNBC session recap', canonicalUrl: 'https://www.cnbc.com/2026/09/04/session-recap.html',
+      publishedAt: '2026-09-04T21:00:00Z'
+    })
+  ];
+  const packageInput = marketPackage('US', {items: usItems, evidenceRef: 'e1'});
+  packageInput.evidenceContext.furtherReadings = [
+    {evidenceRef: 'e1', sessionDate: '2026-09-04'},
+    {evidenceRef: 'e2', sessionDate: '2026-09-04'}
+  ];
+  const input = createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'US', generatedAt: '2026-09-06T10:00:00Z',
+      userTimezone: 'America/New_York', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}
+  });
+  assert.deepEqual(input.marketPackages[0].evidenceContext.furtherReadings.map(item => item.evidenceRef), ['e1', 'e2']);
+  assert.equal(Object.isFrozen(input.marketPackages[0].evidenceContext.evidence[0].item.provenance), true);
+
+  packageInput.evidenceContext.furtherReadings[0].sessionDate = '2026-09-03';
+  assert.throws(() => createClaudeAnalysisInput({
+    analysisRequest: input.analysisRequest,
+    marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}
+  }), /primary completed/);
+});
+
+test('keeps My Stocks and Watchlist separate with telemetry, evidence and 14-day events', () => {
+  const stockSnapshot = snapshot('SG', 'D05.SI');
+  const packageInput = marketPackage('SG');
+  packageInput.telemetry.stockSnapshots = [stockSnapshot];
+  const input = createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'SG', generatedAt: '2026-09-06T10:00:00Z',
+      userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [packageInput],
+    portfolioContext: {
+      myStocks: [{
+        market: 'SG', symbol: ' d05.si ', telemetryRefs: ['t2'], evidenceRefs: ['e1'],
+        upcomingEvents: [{
+          title: 'Results announcement', scheduledAt: '2026-09-15T09:00:00+08:00', evidenceRefs: ['e1']
+        }]
+      }],
+      watchlist: [{market: 'SG', symbol: '^STI', telemetryRefs: ['t1'], evidenceRefs: [], upcomingEvents: []}]
+    }
+  });
+  assert.equal(input.portfolioContext.myStocks[0].symbol, 'D05.SI');
+  assert.equal(input.portfolioContext.myStocks[0].upcomingEvents[0].scheduledAt, '2026-09-15T01:00:00.000Z');
+  assert.notEqual(input.portfolioContext.myStocks, input.portfolioContext.watchlist);
+
+  const late = JSON.parse(JSON.stringify(input));
+  late.portfolioContext.myStocks[0].upcomingEvents[0].scheduledAt = '2026-10-01T01:00:00.000Z';
+  assert.equal(validateClaudeAnalysisInput(late), false);
+});
+
+test('returns a deeply immutable input-independent canonical package', () => {
+  const raw = marketPackage('SG');
+  const input = createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'SG', generatedAt: '2026-09-06T10:00:00Z',
+      userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [raw], portfolioContext: {myStocks: [], watchlist: []}
+  });
+  raw.marketContext.marketState = 'MUTATED';
+  raw.evidenceContext.materialEvents.length = 0;
+  assert.equal(input.marketPackages[0].marketContext.marketState, 'CLOSED');
+  assert.deepEqual(input.marketPackages[0].evidenceContext.materialEvents, ['e1']);
   assert.equal(Object.isFrozen(input), true);
-  assert.equal(Object.isFrozen(input.evidence), true);
-  assert.equal(Object.isFrozen(input.completedSessions), true);
-  assert.equal(input.evidence.every(entry =>
-    Object.isFrozen(entry) && Object.keys(entry).join(',') === CLAUDE_EVIDENCE_REFERENCE_KEYS.join(',')), true);
+  assert.equal(Object.isFrozen(input.marketPackages), true);
+  assert.equal(Object.isFrozen(input.outputRequirements.sections[0]), true);
 });
 
-test('accepts zero to three canonical completed sessions in descending date order', () => {
-  const records = [
-    completedSession('2026-09-04', {close: 5747}),
-    completedSession('2026-09-03', {close: 5735}),
-    completedSession('2026-09-02', {close: 5720})
-  ];
-  const collection = createEvidenceCollection({market: 'SG', items: [evidenceItem()]});
-  const input = createClaudeAnalysisInput({evidenceCollection: collection, completedSessions: records});
-
-  assert.deepEqual(input.completedSessions.map(record => record.sessionDate), [
-    '2026-09-04', '2026-09-03', '2026-09-02'
-  ]);
-  assert.notEqual(input.completedSessions, records);
-  assert.notEqual(input.completedSessions[0], records[0]);
-  assert.deepEqual(input.completedSessions[0].provenance, records[0].provenance);
-  assert.notEqual(input.completedSessions[0].provenance, records[0].provenance);
-  assert.equal(Object.isFrozen(input.completedSessions), true);
-  assert.equal(input.completedSessions.every(record =>
-    Object.isFrozen(record) && Object.isFrozen(record.provenance)), true);
-});
-
-test('rejects excess, ascending, wrong-market and spoofed completed sessions', () => {
-  const collection = createEvidenceCollection({market: 'SG', items: [evidenceItem()]});
-  const fourRecords = ['04', '03', '02', '01'].map(day => completedSession(`2026-09-${day}`));
-  assert.throws(() => createClaudeAnalysisInput({
-    evidenceCollection: collection,
-    completedSessions: fourRecords
-  }), /completed sessions/);
-  assert.throws(() => createClaudeAnalysisInput({
-    evidenceCollection: collection,
-    completedSessions: [completedSession('2026-09-03'), completedSession('2026-09-04')]
-  }), /completed sessions/);
-
-  const wrongMarket = createCompletedSessionTelemetry({
-    market: 'HK', symbol: '^HSI', sessionDate: '2026-09-04', close: 25000,
-    closeTime: '2026-09-04T08:00:00Z', sourceId: 'hk.yahoo-finance'
-  });
-  assert.throws(() => createClaudeAnalysisInput({
-    evidenceCollection: collection,
-    completedSessions: [wrongMarket]
-  }), /completed sessions/);
-
-  const spoofed = JSON.parse(JSON.stringify(completedSession('2026-09-04')));
-  spoofed.provenance.publisher = 'Spoof';
-  assert.throws(() => createClaudeAnalysisInput({
-    evidenceCollection: collection,
-    completedSessions: [spoofed]
-  }), /completed sessions/);
-});
-
-test('completed-session input validation has no S.tz dependency', () => {
-  const previousS = global.S;
-  global.S = {tz: 'Pacific/Honolulu'};
-  try {
-    const input = createClaudeAnalysisInput({
-      evidenceCollection: createEvidenceCollection({market: 'SG', items: []}),
-      completedSessions: [completedSession('2026-09-04')]
-    });
-    assert.equal(input.completedSessions[0].sessionDate, '2026-09-04');
-  } finally {
-    if (previousS === undefined) delete global.S;
-    else global.S = previousS;
-  }
-});
-
-test('rejects non-canonical evidence collections and retains no caller-owned references', () => {
-  const item = evidenceItem();
-  const collection = createEvidenceCollection({market: 'SG', items: [item]});
-  const input = createClaudeAnalysisInput({evidenceCollection: collection});
-  assert.notEqual(input.evidence[0].item, item);
-  assert.notEqual(input.evidence[0].item.symbols, item.symbols);
-  assert.notEqual(input.evidence[0].item.provenance, item.provenance);
-
-  const wrongShape = {items: collection.items, market: collection.market};
-  assert.throws(() => createClaudeAnalysisInput({evidenceCollection: wrongShape}), /property shape/);
-
-  const spoofedItem = JSON.parse(JSON.stringify(item));
-  spoofedItem.provenance.publisher = 'Claude';
-  assert.throws(() => createClaudeAnalysisInput({
-    evidenceCollection: {market: 'SG', items: [spoofedItem]}
-  }), /Invalid evidence collection/);
-});
-
-test('accepts canonical NORMAL output and creates a deeply immutable copy', () => {
-  const input = analysisInput();
-  const supplied = normalOutput();
-  const validation = validateClaudeAnalysisOutput(supplied, input);
+test('accepts the exact ordered NORMAL report and returns an immutable copy', () => {
+  const input = canonicalInput();
+  const supplied = normalOutput(input);
   const output = createClaudeAnalysisOutput(supplied, input);
-
   assert.deepEqual(ANALYTICAL_STATUSES, ['NORMAL', 'DEGRADED', 'FAILED']);
-  assert.equal(validation.valid, true);
   assert.deepEqual(Object.keys(output), CLAUDE_ANALYSIS_OUTPUT_KEYS);
-  assert.deepEqual(Object.keys(output.findings[0]), CLAUDE_FINDING_KEYS);
-  assert.equal(Object.isFrozen(output), true);
-  assert.equal(Object.isFrozen(output.findings), true);
-  assert.equal(Object.isFrozen(output.findings[0]), true);
-  assert.equal(Object.isFrozen(output.findings[0].evidenceRefs), true);
-  assert.equal(Object.isFrozen(output.gaps), true);
-
-  supplied.findings[0].text = 'Mutated';
-  supplied.findings[0].evidenceRefs.push('e2');
-  assert.equal(output.findings[0].text, 'The market advanced.');
-  assert.deepEqual(output.findings[0].evidenceRefs, ['e1']);
+  assert.deepEqual(output.sections.map(section => section.name), REPORT_SECTION_NAMES);
+  assert.deepEqual(Object.keys(output.sections[0]), REPORT_SECTION_KEYS);
+  assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
+  supplied.sections[0].content = 'Mutated';
+  assert.equal(output.sections[0].content, 'Supported analysis.');
+  assert.equal(Object.isFrozen(output.sections[0].evidenceRefs), true);
 });
 
-test('accepts DEGRADED with supported findings and unresolved gaps', () => {
-  const result = validateClaudeAnalysisOutput({
-    status: 'DEGRADED',
-    findings: [{text: 'One fact is supported.', evidenceRefs: ['e1']}],
-    gaps: ['Primary disclosure was unavailable.']
-  }, analysisInput());
-  assert.equal(result.valid, true);
-});
-
-test('accepts FAILED as evidence insufficiency while keeping contract failure separate', () => {
-  const input = analysisInput([]);
-  const insufficient = validateClaudeAnalysisOutput({
-    status: 'FAILED',
-    findings: [],
-    gaps: ['No canonical evidence was supplied.']
-  }, input);
-  const malformed = validateClaudeAnalysisOutput({
-    status: 'FAILED',
-    findings: 'none',
-    gaps: []
-  }, input);
-
-  assert.equal(insufficient.valid, true);
-  assert.equal(malformed.valid, false);
-  assert.throws(() => createClaudeAnalysisOutput({
-    status: 'FAILED', findings: 'none', gaps: []
-  }, input), /Invalid Claude analysis output/);
-});
-
-test('requires every factual finding to reference supplied canonical evidence', () => {
-  const input = analysisInput();
-  for (const evidenceRefs of [[], ['e2'], [null]]) {
-    const result = validateClaudeAnalysisOutput(normalOutput({
-      findings: [{text: 'Unsupported finding.', evidenceRefs}]
-    }), input);
-    assert.equal(result.valid, false);
-  }
-  assert.equal(validateClaudeAnalysisOutput(normalOutput({
-    findings: [{text: 'Supported finding.', evidenceRefs: ['e1']}]
-  }), input).valid, true);
-});
-
-test('enforces status-specific finding and gap semantics', () => {
-  const input = analysisInput();
-  const cases = [
-    normalOutput({findings: []}),
-    normalOutput({gaps: ['Unexpected gap.']}),
-    {status: 'DEGRADED', findings: [], gaps: ['Gap.']},
-    {status: 'DEGRADED', findings: normalOutput().findings, gaps: []},
-    {status: 'FAILED', findings: normalOutput().findings, gaps: ['Failure.']},
-    {status: 'FAILED', findings: [], gaps: []},
-    {...normalOutput(), status: 'normal'}
-  ];
-  for (const output of cases) {
-    assert.equal(validateClaudeAnalysisOutput(output, input).valid, false);
-  }
-
-  const sparseFindings = normalOutput({findings: new Array(1)});
-  const sparseReferences = normalOutput({
-    findings: [{text: 'Finding.', evidenceRefs: new Array(1)}]
-  });
-  const sparseGaps = {status: 'FAILED', findings: [], gaps: new Array(1)};
-  assert.equal(validateClaudeAnalysisOutput(sparseFindings, input).valid, false);
-  assert.equal(validateClaudeAnalysisOutput(sparseReferences, input).valid, false);
-  assert.equal(validateClaudeAnalysisOutput(sparseGaps, input).valid, false);
-});
-
-test('rejects model-supplied URL, provenance and non-deterministic shapes', () => {
-  const input = analysisInput();
-  const topLevelUrl = {...normalOutput(), canonicalUrl: 'https://example.com/'};
-  const findingProvenance = normalOutput({
-    findings: [{
-      text: 'Finding.', evidenceRefs: ['e1'], provenance: {publisher: 'Claude'}
-    }]
-  });
-  const reordered = {
-    findings: normalOutput().findings,
-    status: 'NORMAL',
-    gaps: []
-  };
-
-  assert.equal(validateClaudeAnalysisOutput(topLevelUrl, input).valid, false);
-  assert.equal(validateClaudeAnalysisOutput(findingProvenance, input).valid, false);
+test('rejects reordered sections, unknown references, model URLs and mismatched context', () => {
+  const input = canonicalInput();
+  const reordered = normalOutput(input);
+  [reordered.sections[0], reordered.sections[1]] = [reordered.sections[1], reordered.sections[0]];
   assert.equal(validateClaudeAnalysisOutput(reordered, input).valid, false);
+  assert.equal(validateClaudeAnalysisOutput(normalOutput(input, {
+    sections: sections({evidenceRefs: ['e2']})
+  }), input).valid, false);
+  assert.equal(validateClaudeAnalysisOutput({...normalOutput(input), canonicalUrl: 'https://example.com/'}, input).valid, false);
+  const contextMismatch = normalOutput(input);
+  contextMismatch.reportContext.selectedScope = 'US';
+  assert.equal(validateClaudeAnalysisOutput(contextMismatch, input).valid, false);
+  const malformedReferences = normalOutput(input);
+  malformedReferences.sections[10].evidenceRefs = null;
+  assert.equal(validateClaudeAnalysisOutput(malformedReferences, input).valid, false);
+  const malformedUncertainties = normalOutput(input);
+  malformedUncertainties.sections[0].uncertainties = {text: 'not an array'};
+  assert.equal(validateClaudeAnalysisOutput(malformedUncertainties, input).valid, false);
+  const telemetryOnly = normalOutput(input);
+  telemetryOnly.sections[0].evidenceRefs = [];
+  assert.equal(validateClaudeAnalysisOutput(telemetryOnly, input).valid, false);
 });
 
-test('exports a deeply immutable JSON schema consistent with runtime status rules', () => {
-  assert.equal(Object.isFrozen(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA), true);
-  assert.equal(Object.isFrozen(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties), true);
-  assert.equal(Object.isFrozen(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.status.enum), true);
-  assert.deepEqual(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.required, CLAUDE_ANALYSIS_OUTPUT_KEYS);
-  assert.deepEqual(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.status.enum, ANALYTICAL_STATUSES);
+test('enforces NORMAL, DEGRADED and FAILED semantics separately from contract failure', () => {
+  const input = canonicalInput();
+  const degradedSections = sections();
+  degradedSections[7] = {
+    name: REPORT_SECTION_NAMES[7], content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['Opportunity evidence is incomplete.']
+  };
+  assert.equal(validateClaudeAnalysisOutput({
+    status: 'DEGRADED', reportContext: reportContext(input), sections: degradedSections,
+    evidenceReferences: ['e1'], furtherReadings: [], evidenceGaps: ['Material catalyst remains unresolved.']
+  }, input).valid, true);
+  assert.equal(validateClaudeAnalysisOutput({
+    status: 'FAILED', reportContext: reportContext(input),
+    sections: sections({content: null, evidenceRefs: [], telemetryRefs: []}),
+    evidenceReferences: [], furtherReadings: [], evidenceGaps: ['Reliable core telemetry is unavailable.']
+  }, input).valid, true);
+  assert.equal(validateClaudeAnalysisOutput({
+    status: 'FAILED', reportContext: reportContext(input), sections: sections(),
+    evidenceReferences: ['e1'], furtherReadings: [], evidenceGaps: ['Failure.']
+  }, input).valid, false);
+  assert.throws(() => createClaudeAnalysisOutput({status: 'FAILED'}, input), /Invalid Claude analysis output/);
+});
+
+test('requires Further Readings to exactly match MarketBrief-owned supplied references', () => {
+  const usItems = [createEvidenceItem({
+    sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news', title: 'Session recap',
+    canonicalUrl: 'https://www.cnbc.com/session-recap.html', publishedAt: '2026-09-04T21:00:00Z'
+  })];
+  const packageInput = marketPackage('US', {items: usItems});
+  packageInput.evidenceContext.furtherReadings = [{evidenceRef: 'e1', sessionDate: '2026-09-04'}];
+  const input = createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'US', generatedAt: '2026-09-06T10:00:00Z',
+      userTimezone: 'America/New_York', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}
+  });
+  assert.equal(validateClaudeAnalysisOutput(normalOutput(input, {furtherReadings: ['e1']}), input).valid, true);
+  assert.equal(validateClaudeAnalysisOutput(normalOutput(input, {furtherReadings: []}), input).valid, false);
+});
+
+test('exports an immutable provider schema while runtime validation remains authoritative', () => {
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.additionalProperties, false);
-  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.findings.items.additionalProperties, false);
-  assert.equal(
-    CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.findings.items.properties.text.pattern,
-    '^\\S(?:[\\s\\S]*\\S)?$'
-  );
-  assert.equal(
-    CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.gaps.items.pattern,
-    '^\\S(?:[\\s\\S]*\\S)?$'
-  );
-  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.allOf.length, 3);
+  assert.deepEqual(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.required, CLAUDE_ANALYSIS_OUTPUT_KEYS);
+  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.minItems, 11);
+  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.maxItems, 11);
+  assert.equal(Object.isFrozen(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA), true);
+  assert.equal(Object.isFrozen(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.items), true);
 });
