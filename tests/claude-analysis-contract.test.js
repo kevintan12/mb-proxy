@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
+const {createCompletedSessionTelemetry} = require('../lib/completed-session-telemetry');
 const {
   ANALYTICAL_STATUSES,
   CLAUDE_ANALYSIS_INPUT_KEYS,
@@ -35,6 +36,18 @@ function analysisInput(items = [evidenceItem()]) {
   });
 }
 
+function completedSession(sessionDate, overrides = {}) {
+  return createCompletedSessionTelemetry({
+    market: 'SG',
+    symbol: '^STI',
+    sessionDate,
+    close: 5700,
+    closeTime: `${sessionDate}T09:00:00Z`,
+    sourceId: 'sg.yahoo-finance',
+    ...overrides
+  });
+}
+
 function normalOutput(overrides = {}) {
   return {
     status: 'NORMAL',
@@ -56,10 +69,77 @@ test('derives deterministic evidence references from canonical collection order'
   assert.equal(input.evidence[0].item.title, 'First');
   assert.equal(input.evidence[2].item.title, 'First');
   assert.equal(input.symbol, undefined);
+  assert.deepEqual(input.completedSessions, []);
   assert.equal(Object.isFrozen(input), true);
   assert.equal(Object.isFrozen(input.evidence), true);
+  assert.equal(Object.isFrozen(input.completedSessions), true);
   assert.equal(input.evidence.every(entry =>
     Object.isFrozen(entry) && Object.keys(entry).join(',') === CLAUDE_EVIDENCE_REFERENCE_KEYS.join(',')), true);
+});
+
+test('accepts zero to three canonical completed sessions in descending date order', () => {
+  const records = [
+    completedSession('2026-09-04', {close: 5747}),
+    completedSession('2026-09-03', {close: 5735}),
+    completedSession('2026-09-02', {close: 5720})
+  ];
+  const collection = createEvidenceCollection({market: 'SG', items: [evidenceItem()]});
+  const input = createClaudeAnalysisInput({evidenceCollection: collection, completedSessions: records});
+
+  assert.deepEqual(input.completedSessions.map(record => record.sessionDate), [
+    '2026-09-04', '2026-09-03', '2026-09-02'
+  ]);
+  assert.notEqual(input.completedSessions, records);
+  assert.notEqual(input.completedSessions[0], records[0]);
+  assert.deepEqual(input.completedSessions[0].provenance, records[0].provenance);
+  assert.notEqual(input.completedSessions[0].provenance, records[0].provenance);
+  assert.equal(Object.isFrozen(input.completedSessions), true);
+  assert.equal(input.completedSessions.every(record =>
+    Object.isFrozen(record) && Object.isFrozen(record.provenance)), true);
+});
+
+test('rejects excess, ascending, wrong-market and spoofed completed sessions', () => {
+  const collection = createEvidenceCollection({market: 'SG', items: [evidenceItem()]});
+  const fourRecords = ['04', '03', '02', '01'].map(day => completedSession(`2026-09-${day}`));
+  assert.throws(() => createClaudeAnalysisInput({
+    evidenceCollection: collection,
+    completedSessions: fourRecords
+  }), /completed sessions/);
+  assert.throws(() => createClaudeAnalysisInput({
+    evidenceCollection: collection,
+    completedSessions: [completedSession('2026-09-03'), completedSession('2026-09-04')]
+  }), /completed sessions/);
+
+  const wrongMarket = createCompletedSessionTelemetry({
+    market: 'HK', symbol: '^HSI', sessionDate: '2026-09-04', close: 25000,
+    closeTime: '2026-09-04T08:00:00Z', sourceId: 'hk.yahoo-finance'
+  });
+  assert.throws(() => createClaudeAnalysisInput({
+    evidenceCollection: collection,
+    completedSessions: [wrongMarket]
+  }), /completed sessions/);
+
+  const spoofed = JSON.parse(JSON.stringify(completedSession('2026-09-04')));
+  spoofed.provenance.publisher = 'Spoof';
+  assert.throws(() => createClaudeAnalysisInput({
+    evidenceCollection: collection,
+    completedSessions: [spoofed]
+  }), /completed sessions/);
+});
+
+test('completed-session input validation has no S.tz dependency', () => {
+  const previousS = global.S;
+  global.S = {tz: 'Pacific/Honolulu'};
+  try {
+    const input = createClaudeAnalysisInput({
+      evidenceCollection: createEvidenceCollection({market: 'SG', items: []}),
+      completedSessions: [completedSession('2026-09-04')]
+    });
+    assert.equal(input.completedSessions[0].sessionDate, '2026-09-04');
+  } finally {
+    if (previousS === undefined) delete global.S;
+    else global.S = previousS;
+  }
 });
 
 test('rejects non-canonical evidence collections and retains no caller-owned references', () => {

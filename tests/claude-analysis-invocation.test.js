@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
+const {createCompletedSessionTelemetry} = require('../lib/completed-session-telemetry');
 const {
   CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA,
   createClaudeAnalysisInput
@@ -17,7 +18,7 @@ const {
   invokeClaudeAnalysis
 } = require('../lib/claude-analysis-invocation');
 
-function canonicalInput() {
+function canonicalInput(completedSessions = []) {
   const item = createEvidenceItem({
     sourceId: 'sg.reuters',
     market: 'SG',
@@ -27,7 +28,8 @@ function canonicalInput() {
     publishedAt: '2026-09-06T08:00:00Z'
   });
   return createClaudeAnalysisInput({
-    evidenceCollection: createEvidenceCollection({market: 'SG', items: [item]})
+    evidenceCollection: createEvidenceCollection({market: 'SG', items: [item]}),
+    completedSessions
   });
 }
 
@@ -52,7 +54,11 @@ function normalOutput(overrides = {}) {
 }
 
 test('builds a deterministic server-owned request without tools or web search', () => {
-  const input = canonicalInput();
+  const session = createCompletedSessionTelemetry({
+    market: 'SG', symbol: '^STI', sessionDate: '2026-09-04', close: 5747,
+    closeTime: '2026-09-04T09:00:00Z', sourceId: 'sg.yahoo-finance'
+  });
+  const input = canonicalInput([session]);
   const request = buildClaudeAnalysisRequest(input);
 
   assert.equal(CLAUDE_ANALYSIS_MODEL, 'claude-haiku-4-5-20251001');
@@ -60,6 +66,10 @@ test('builds a deterministic server-owned request without tools or web search', 
   assert.equal(request.model, CLAUDE_ANALYSIS_MODEL);
   assert.equal(request.max_tokens, CLAUDE_ANALYSIS_MAX_TOKENS);
   assert.deepEqual(request.messages, [{role: 'user', content: JSON.stringify(input)}]);
+  assert.deepEqual(
+    JSON.parse(request.messages[0].content).completedSessions[0],
+    JSON.parse(JSON.stringify(session))
+  );
   assert.equal(request.output_config.format.type, 'json_schema');
   assert.equal(request.output_config.format.schema, CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA);
   assert.equal(Object.hasOwn(request, 'tools'), false);
