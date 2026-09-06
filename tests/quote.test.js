@@ -2,6 +2,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const handler = require('../api/quote');
+const {createEvidenceItem} = require('../lib/evidence-items');
+const {createEvidenceCollection} = require('../lib/evidence-collections');
+const {createClaudeAnalysisInput} = require('../lib/claude-analysis-contract');
 
 const REAL_DATE_NOW = Date.now;
 const REAL_FETCH = global.fetch;
@@ -44,8 +47,27 @@ function mockRes() {
     setHeader(name, value) { this.headers[name] = value; },
     status(code) { this.statusCode = code; return this; },
     json(body) { this.body = body; return this; },
-    end() { return this; }
+    write(value) {
+      if (!this.chunks) this.chunks = [];
+      this.chunks.push(value);
+      return true;
+    },
+    end() { this.ended = true; return this; }
   };
+}
+
+function claudeAnalysisInput() {
+  const item = createEvidenceItem({
+    sourceId: 'sg.reuters',
+    market: 'SG',
+    evidenceCategory: 'news',
+    title: 'Market update',
+    canonicalUrl: 'https://www.reuters.com/markets/example',
+    publishedAt: '2026-09-06T08:00:00Z'
+  });
+  return createClaudeAnalysisInput({
+    evidenceCollection: createEvidenceCollection({market: 'SG', items: [item]})
+  });
 }
 
 async function requestQuote(
@@ -74,6 +96,116 @@ async function requestQuote(
 
 test.beforeEach(() => { Date.now = () => FIXED_NOW_MS; });
 test.afterEach(() => { Date.now = REAL_DATE_NOW; global.fetch = REAL_FETCH; });
+
+test('structured Claude route returns validated analysis with one server-owned request', async () => {
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push({url, options});
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {content: [{type: 'text', text: JSON.stringify({
+          status: 'NORMAL',
+          findings: [{text: 'Supported finding.', evidenceRefs: ['e1']}],
+          gaps: []
+        })}]};
+      }
+    };
+  };
+  try {
+    const res = mockRes();
+    await handler({method: 'POST', query: {claudeAnalysis: '1'}, body: claudeAnalysisInput()}, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages');
+    const requestBody = JSON.parse(calls[0].options.body);
+    assert.equal(requestBody.model, 'claude-haiku-4-5-20251001');
+    assert.equal(requestBody.max_tokens, 4000);
+    assert.equal(Object.hasOwn(requestBody, 'tools'), false);
+    assert.deepEqual(res.body, {result: {
+      status: 'NORMAL',
+      findings: [{text: 'Supported finding.', evidenceRefs: ['e1']}],
+      gaps: []
+    }});
+  } finally {
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+  }
+});
+
+test('structured Claude route separates input, contract and upstream failures', async () => {
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+  try {
+    let calls = 0;
+    global.fetch = async () => { calls++; return {ok: false, status: 503}; };
+    const invalidInput = mockRes();
+    await handler({method: 'POST', query: {claudeAnalysis: '1'}, body: {}}, invalidInput);
+    assert.equal(invalidInput.statusCode, 400);
+    assert.equal(invalidInput.body.error.type, 'INPUT_FAILURE');
+    assert.equal(calls, 0);
+
+    const upstream = mockRes();
+    await handler({method: 'POST', query: {claudeAnalysis: '1'}, body: claudeAnalysisInput()}, upstream);
+    assert.equal(upstream.statusCode, 502);
+    assert.equal(upstream.body.error.type, 'UPSTREAM_FAILURE');
+    assert.equal(upstream.body.error.upstreamStatus, 503);
+    assert.equal(calls, 1);
+
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        return {content: [{type: 'text', text: JSON.stringify({
+          status: 'NORMAL', findings: [{text: 'Unsupported.', evidenceRefs: ['e2']}], gaps: []
+        })}]};
+      }
+    });
+    const contract = mockRes();
+    await handler({method: 'POST', query: {claudeAnalysis: '1'}, body: claudeAnalysisInput()}, contract);
+    assert.equal(contract.statusCode, 502);
+    assert.equal(contract.body.error.type, 'CONTRACT_FAILURE');
+  } finally {
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+  }
+});
+
+test('legacy Claude proxy still forwards the caller body and streams unchanged', async () => {
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'legacy-key';
+  const callerBody = {model: 'caller-model', stream: true, messages: [{role: 'user', content: 'legacy'}]};
+  const chunks = [new Uint8Array([65]), new Uint8Array([66])];
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push({url, options});
+    let index = 0;
+    return {
+      status: 201,
+      headers: {get() { return 'text/event-stream'; }},
+      body: {getReader() { return {async read() {
+        return index < chunks.length ? {done: false, value: chunks[index++]} : {done: true};
+      }}; }}
+    };
+  };
+  try {
+    const res = mockRes();
+    await handler({method: 'POST', query: {claude: '1'}, body: callerBody}, res);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages');
+    assert.deepEqual(JSON.parse(calls[0].options.body), callerBody);
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.headers['Content-Type'], 'text/event-stream');
+    assert.deepEqual(res.chunks, chunks);
+    assert.equal(res.ended, true);
+  } finally {
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+  }
+});
 
 test('normal consecutive observations need no fallback and preserve legacy fields', async () => {
   const data = chartResult([100, 105, 110], [

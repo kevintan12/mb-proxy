@@ -1,3 +1,5 @@
+const {invokeClaudeAnalysis} = require('../lib/claude-analysis-invocation');
+
 const QUOTE_CACHE_TTL_MS = 1500;
 const QUOTE_CACHE_MAX_ENTRIES = 100;
 const quoteCache = new Map();
@@ -80,6 +82,23 @@ module.exports = async function handler(req, res) {
     'Accept-Language': 'en-US,en;q=0.9',
     'Cache-Control': 'no-cache'
   };
+
+  // ── Structured Claude analysis endpoint (POST ?claudeAnalysis=1) ─────────
+  if (req.method === 'POST' && req.query.claudeAnalysis) {
+    const invocation = await invokeClaudeAnalysis({
+      input: req.body,
+      apiKey: process.env.ANTHROPIC_API_KEY
+    });
+    if (invocation.ok) return res.status(200).json({result: invocation.output});
+    const status = invocation.type === 'INPUT_FAILURE' ? 400 : 502;
+    return res.status(status).json({
+      error: {
+        type: invocation.type,
+        message: invocation.message,
+        upstreamStatus: invocation.upstreamStatus
+      }
+    });
+  }
 
   // ── Claude proxy endpoint (POST ?claude=1) ────────────────────────────────
   if (req.method === 'POST' && req.query.claude) {
