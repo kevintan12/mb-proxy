@@ -1,4 +1,8 @@
 const {invokeClaudeAnalysis} = require('../lib/claude-analysis-invocation');
+const analysisPackageRuntime = require('../lib/analysis-package-runtime');
+const {
+  validateUsAnalysisOrchestrationRequest
+} = require('../lib/us-analysis-package-orchestration');
 
 const QUOTE_CACHE_TTL_MS = 1500;
 const QUOTE_CACHE_MAX_ENTRIES = 100;
@@ -82,6 +86,32 @@ module.exports = async function handler(req, res) {
     'Accept-Language': 'en-US,en;q=0.9',
     'Cache-Control': 'no-cache'
   };
+
+  // ── Canonical analysis package endpoint (POST ?analysisPackage=1) ────────
+  if (req.method === 'POST' && req.query.analysisPackage === '1') {
+    try {
+      validateUsAnalysisOrchestrationRequest(req.body);
+    } catch (error) {
+      return res.status(400).json({
+        error: {
+          type: 'INVALID_REQUEST',
+          message: 'Invalid analysis package request'
+        }
+      });
+    }
+    try {
+      const service = analysisPackageRuntime.getAnalysisPackageRuntime();
+      const envelope = await service.assemble(req.body);
+      return res.status(200).json(envelope);
+    } catch (error) {
+      return res.status(502).json({
+        error: {
+          type: 'PACKAGE_ASSEMBLY_FAILURE',
+          message: 'Analysis package assembly failed'
+        }
+      });
+    }
+  }
 
   // ── Structured Claude analysis endpoint (POST ?claudeAnalysis=1) ─────────
   if (req.method === 'POST' && req.query.claudeAnalysis) {

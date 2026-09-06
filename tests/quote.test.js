@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const handler = require('../api/quote');
+const analysisPackageRuntime = require('../lib/analysis-package-runtime');
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
 const {createCompletedRegularSession, createThreeSessionSnapshot} = require('../lib/three-session-snapshot');
@@ -123,6 +124,55 @@ function claudeAnalysisOutput(input) {
   };
 }
 
+function analysisPackageRequest() {
+  return {
+    benchmarkAnchors: [{market: 'US', symbol: '^RUT'}],
+    selectedScope: 'US',
+    userTimezone: 'Asia/Singapore',
+    myStocks: [],
+    watchlist: []
+  };
+}
+
+function usAnalysisPackageEnvelope() {
+  const item = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'market-data',
+    title: 'US market data', canonicalUrl: 'https://finance.yahoo.com/quote/%5ERUT/',
+    publishedAt: '2026-09-06T08:00:00Z', symbols: ['^RUT']
+  });
+  const session = createCompletedRegularSession({
+    market: 'US', sessionDate: '2026-09-04', open: 100, high: 110, low: 95,
+    close: 105, previousClose: 100, volume: null, asOf: '2026-09-04T16:00:00-04:00',
+    sourceId: 'us.yahoo-finance', validationState: 'VALIDATED'
+  });
+  const snapshot = createThreeSessionSnapshot({
+    market: 'US', symbol: '^RUT', instrumentName: 'US benchmark', instrumentType: 'INDEX',
+    currency: 'USD', marketState: 'CLOSED', completedSessions: [session], currentOverlay: null
+  });
+  return createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'US', generatedAt: '2026-09-06T10:00:00Z',
+      userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [{
+      market: 'US',
+      marketContext: {
+        exchangeTimezone: 'America/New_York', marketState: 'CLOSED',
+        primaryCompletedSessionDate: '2026-09-04', includesCurrentOverlay: false,
+        calendarContext: null
+      },
+      telemetry: {benchmarkSnapshots: [snapshot], stockSnapshots: []},
+      evidenceCollection: createEvidenceCollection({market: 'US', items: [item]}),
+      evidenceContext: {
+        materialEvents: [], authoritativeFacts: ['e1'], principalCatalysts: [],
+        supportingEvidence: ['e1'], conflictingEvidence: [], subsequentDevelopments: [],
+        unresolvedGaps: [], furtherReadings: []
+      }
+    }],
+    portfolioContext: {myStocks: [], watchlist: []}
+  });
+}
+
 async function requestQuote(
   name,
   baseData,
@@ -149,6 +199,64 @@ async function requestQuote(
 
 test.beforeEach(() => { Date.now = () => FIXED_NOW_MS; });
 test.afterEach(() => { Date.now = REAL_DATE_NOW; global.fetch = REAL_FETCH; });
+
+test('analysis package route forwards the exact body once and returns the canonical envelope directly', async () => {
+  const originalGetter = analysisPackageRuntime.getAnalysisPackageRuntime;
+  const requestBody = analysisPackageRequest();
+  const envelope = usAnalysisPackageEnvelope();
+  const calls = [];
+  analysisPackageRuntime.getAnalysisPackageRuntime = () => ({
+    async assemble(body) {
+      calls.push(body);
+      return envelope;
+    }
+  });
+  global.fetch = async () => { throw new Error('Claude or provider fetch must not run'); };
+  try {
+    const res = mockRes();
+    await handler({method: 'POST', query: {analysisPackage: '1'}, body: requestBody}, res);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0], requestBody);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body, envelope);
+    assert.equal(Object.hasOwn(res.body, 'result'), false);
+    assert.deepEqual(Object.keys(res.body), [
+      'analysisRequest', 'marketPackages', 'portfolioContext', 'outputRequirements'
+    ]);
+  } finally {
+    analysisPackageRuntime.getAnalysisPackageRuntime = originalGetter;
+  }
+});
+
+test('analysis package route separates invalid requests from sanitized assembly failures', async () => {
+  const originalGetter = analysisPackageRuntime.getAnalysisPackageRuntime;
+  let runtimeGets = 0;
+  analysisPackageRuntime.getAnalysisPackageRuntime = () => {
+    runtimeGets++;
+    return {async assemble() { throw new Error('DATABASE_URL=postgres://user:secret@example'); }};
+  };
+  try {
+    const invalid = mockRes();
+    await handler({method: 'POST', query: {analysisPackage: '1'}, body: {}}, invalid);
+    assert.equal(invalid.statusCode, 400);
+    assert.deepEqual(invalid.body, {
+      error: {type: 'INVALID_REQUEST', message: 'Invalid analysis package request'}
+    });
+    assert.equal(runtimeGets, 0);
+
+    const failure = mockRes();
+    await handler({method: 'POST', query: {analysisPackage: '1'}, body: analysisPackageRequest()}, failure);
+    assert.equal(failure.statusCode, 502);
+    assert.deepEqual(failure.body, {
+      error: {type: 'PACKAGE_ASSEMBLY_FAILURE', message: 'Analysis package assembly failed'}
+    });
+    assert.equal(JSON.stringify(failure.body).includes('postgres://'), false);
+    assert.equal(JSON.stringify(failure.body).includes('secret'), false);
+    assert.equal(runtimeGets, 1);
+  } finally {
+    analysisPackageRuntime.getAnalysisPackageRuntime = originalGetter;
+  }
+});
 
 test('structured Claude route returns validated analysis with one server-owned request', async () => {
   const previousKey = process.env.ANTHROPIC_API_KEY;
