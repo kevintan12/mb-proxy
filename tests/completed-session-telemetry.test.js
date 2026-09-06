@@ -5,7 +5,8 @@ const {
   MARKET_TIME_ZONES,
   COMPLETED_SESSION_TELEMETRY_KEYS,
   createCompletedSessionTelemetry,
-  validateCompletedSessionTelemetryInput
+  validateCompletedSessionTelemetryInput,
+  validateCompletedSessionTelemetry
 } = require('../lib/completed-session-telemetry');
 
 function validInput(overrides = {}) {
@@ -139,6 +140,34 @@ test('returns deeply immutable input-independent records', () => {
   const validation = validateCompletedSessionTelemetryInput(validInput());
   assert.equal(Object.isFrozen(validation), true);
   assert.equal(Object.isFrozen(validation.errors), true);
+});
+
+test('strictly validates canonical telemetry output without identity requirements', () => {
+  const record = createCompletedSessionTelemetry(validInput());
+  const structuralCopy = JSON.parse(JSON.stringify(record));
+  assert.equal(validateCompletedSessionTelemetry(structuralCopy).valid, true);
+
+  const spoofed = JSON.parse(JSON.stringify(record));
+  spoofed.provenance.publisher = 'Spoof';
+  assert.equal(validateCompletedSessionTelemetry(spoofed).valid, false);
+
+  const nonCanonical = JSON.parse(JSON.stringify(record));
+  nonCanonical.symbol = ' d05.si ';
+  assert.equal(validateCompletedSessionTelemetry(nonCanonical).valid, false);
+
+  const wrongOrder = {
+    symbol: record.symbol,
+    market: record.market,
+    sessionDate: record.sessionDate,
+    close: record.close,
+    closeTime: record.closeTime,
+    sourceId: record.sourceId,
+    provenance: {...record.provenance}
+  };
+  const result = validateCompletedSessionTelemetry(wrongOrder);
+  assert.equal(result.valid, false);
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.errors), true);
 });
 
 test('uses fixed exchange IANA zones and never depends on global S.tz', () => {
