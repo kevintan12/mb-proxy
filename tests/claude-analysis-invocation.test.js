@@ -21,11 +21,16 @@ const {
   invokeClaudeAnalysis
 } = require('../lib/claude-analysis-invocation');
 
-function canonicalInput() {
+function canonicalInput({includeSecondEvidence = false} = {}) {
   const item = createEvidenceItem({
     sourceId: 'sg.reuters', market: 'SG', evidenceCategory: 'news', title: 'Market update',
     canonicalUrl: 'https://www.reuters.com/markets/example', publishedAt: '2026-09-06T08:00:00Z'
   });
+  const evidenceItems = [item];
+  if (includeSecondEvidence) evidenceItems.push(createEvidenceItem({
+    sourceId: 'sg.cna', market: 'SG', evidenceCategory: 'news', title: 'Second market update',
+    canonicalUrl: 'https://www.channelnewsasia.com/business/example', publishedAt: '2026-09-06T09:00:00Z'
+  }));
   const session = createCompletedRegularSession({
     market: 'SG', sessionDate: '2026-09-04', open: 5700, high: 5800, low: 5650,
     close: 5747, previousClose: 5710, volume: null, asOf: '2026-09-04T17:00:00+08:00',
@@ -48,7 +53,7 @@ function canonicalInput() {
         calendarContext: 'Weekend; latest completed session remains applicable.'
       },
       telemetry: {benchmarkSnapshots: [snapshot], stockSnapshots: []},
-      evidenceCollection: createEvidenceCollection({market: 'SG', items: [item]}),
+      evidenceCollection: createEvidenceCollection({market: 'SG', items: evidenceItems}),
       evidenceContext: {
         materialEvents: ['e1'], authoritativeFacts: [], principalCatalysts: ['e1'],
         supportingEvidence: ['e1'], conflictingEvidence: [], subsequentDevelopments: [],
@@ -197,6 +202,40 @@ test('accepts valid NORMAL, DEGRADED and FAILED structured reports with one requ
   assert.deepEqual(CLAUDE_ANALYSIS_RESULT_TYPES, [
     'SUCCESS', 'INPUT_FAILURE', 'UPSTREAM_FAILURE', 'CONTRACT_FAILURE'
   ]);
+});
+
+test('derives top-level evidenceReferences from section first-use order', async () => {
+  const input = canonicalInput({includeSecondEvidence: true});
+  const output = normalOutput(input);
+  output.sections[0].evidenceRefs = ['e2', 'e1'];
+  output.sections[1].evidenceRefs = ['e2'];
+  output.evidenceReferences = ['e1', 'e2'];
+
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+  });
+
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.evidenceReferences, ['e2', 'e1']);
+  assert.deepEqual(result.output.sections[0].evidenceRefs, ['e2', 'e1']);
+  assert.deepEqual(result.output.sections[1].evidenceRefs, ['e2']);
+});
+
+test('still rejects missing, extra or invalid section-level evidenceRefs', async () => {
+  const missing = normalOutput(canonicalInput());
+  delete missing.sections[0].evidenceRefs;
+  const extra = normalOutput(canonicalInput());
+  extra.sections[0].evidenceRefs = ['e1', 'e2'];
+  const invalid = normalOutput(canonicalInput());
+  invalid.sections[0].evidenceRefs = 'e1';
+
+  for (const output of [missing, extra, invalid]) {
+    const result = await invokeClaudeAnalysis({
+      input: canonicalInput(), apiKey: 'test-key',
+      fetchImpl: async () => anthropicResponse(output)
+    });
+    assert.equal(result.type, 'CONTRACT_FAILURE');
+  }
 });
 
 test('rejects non-canonical input before invoking Anthropic', async () => {
