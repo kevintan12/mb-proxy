@@ -134,6 +134,21 @@ test('gives Claude explicit validator-sensitive Section 5 and Further Readings i
   }
 });
 
+test('gives Claude the exact top-level evidenceGaps status relationship', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'The top-level evidenceGaps array controls report status',
+    'NORMAL is permitted only when top-level evidenceGaps is exactly []',
+    'any non-empty top-level evidenceGaps array prohibits NORMAL',
+    'Section uncertainties are separate',
+    'input evidenceContext.unresolvedGaps does not automatically determine output status',
+    'Material unresolved gaps requiring supported analysis must use DEGRADED',
+    'Use FAILED when the reliable analytical foundation is insufficient and return no normal-analysis content'
+  ]) {
+    assert.equal(system.includes(requirement), true, requirement);
+  }
+});
+
 test('provider schema is derived without weakening authoritative runtime validation', () => {
   assert.deepEqual(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.required, CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.required);
   assert.equal(Object.hasOwn(
