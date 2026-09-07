@@ -169,6 +169,27 @@ test('gives Claude the exact section uncertainty canonicality requirements', () 
   }
 });
 
+test('gives Claude plain-language and locked movement presentation instructions', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'Write for an informed layperson, not a professional market analyst',
+    'Use clear everyday English and avoid unnecessary finance jargon',
+    'If a financial term is genuinely useful, explain it briefly in plain language',
+    'Preserve analytical depth: simplify wording, not reasoning',
+    'Apple fell $8.24 (2.51%) to $319.97.',
+    'Apple gained $3.25 (1.00%) to $328.21.',
+    'S&P 500 fell by 29.11 points (0.38%) to 7,718.60.',
+    'S&P 500 gained 81.11 points (1.06%) to 7,747.71.',
+    'absolute movement first, percentage in brackets second, and resulting price or level last',
+    'Do not omit absolute movement when the package supplies it',
+    'incorporate it naturally into the section prose and explain what is unknown and why it matters',
+    'Do not write implementation-style labels such as "Uncertainty:" inside the prose',
+    'continue to provide the structured uncertainties arrays separately'
+  ]) {
+    assert.equal(system.includes(requirement), true, requirement);
+  }
+});
+
 test('provider schema is derived without weakening authoritative runtime validation', () => {
   assert.deepEqual(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.required, CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.required);
   assert.equal(Object.hasOwn(
