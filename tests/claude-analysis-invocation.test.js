@@ -154,6 +154,21 @@ test('gives Claude the exact top-level evidenceGaps status relationship', () => 
   }
 });
 
+test('gives Claude the exact section uncertainty canonicality requirements', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'Every section uncertainties entry must be a plain string',
+    'non-empty after trimming',
+    'already trimmed',
+    'unique within that section',
+    'Do not use blank strings, whitespace-only strings, placeholders, or duplicates',
+    'use [] when a section has no uncertainty',
+    'For a DEGRADED section with content: null, include at least one genuine uncertainty'
+  ]) {
+    assert.equal(system.includes(requirement), true, requirement);
+  }
+});
+
 test('provider schema is derived without weakening authoritative runtime validation', () => {
   assert.deepEqual(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.required, CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.required);
   assert.equal(Object.hasOwn(
