@@ -12,6 +12,8 @@ const {
   ANALYTICAL_STATUSES,
   SELECTED_SCOPES,
   REPORT_TYPES,
+  INITIATING_LISTS,
+  EMPTY_INITIATING_LIST_CONTENT,
   REPORT_HEADER,
   REPORT_SECTION_NAMES,
   REPORT_SECTION_REQUIREMENTS,
@@ -115,6 +117,7 @@ function canonicalInput(overrides = {}) {
   return createClaudeAnalysisInput({
     analysisRequest: {
       selectedScope: 'SG',
+      initiatingList: 'myStocks',
       generatedAt: '2026-09-06T18:00:00+08:00',
       userTimezone: 'Asia/Singapore',
       reportType: 'MARKET_BRIEF'
@@ -136,12 +139,13 @@ function reportContext(input) {
   };
 }
 
-function sections({content = 'Supported analysis.', evidenceRefs = ['e1'], telemetryRefs = ['t1']} = {}) {
+function sections({content = 'Supported analysis.', evidenceRefs = ['e1'], telemetryRefs = ['t1'], initiatingList = 'myStocks'} = {}) {
   return REPORT_SECTION_NAMES.map((name, index) => ({
     name,
-    content: index === REPORT_SECTION_NAMES.length - 1 ? null : content,
-    evidenceRefs: index === REPORT_SECTION_NAMES.length - 1 ? [] : evidenceRefs.slice(),
-    telemetryRefs: index === REPORT_SECTION_NAMES.length - 1 ? [] : telemetryRefs.slice(),
+    content: index === REPORT_SECTION_NAMES.length - 1 ? null
+      : index === 4 ? EMPTY_INITIATING_LIST_CONTENT[initiatingList] : content,
+    evidenceRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 4 ? [] : evidenceRefs.slice(),
+    telemetryRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 4 ? [] : telemetryRefs.slice(),
     uncertainties: []
   }));
 }
@@ -150,7 +154,7 @@ function normalOutput(input, overrides = {}) {
   return {
     status: 'NORMAL',
     reportContext: reportContext(input),
-    sections: sections(),
+    sections: sections({initiatingList: input.analysisRequest.initiatingList}),
     evidenceReferences: ['e1'],
     furtherReadings: [],
     evidenceGaps: [],
@@ -162,6 +166,7 @@ test('creates the frozen MARKET_BRIEF package with deterministic shape and requi
   const input = canonicalInput();
   assert.deepEqual(SELECTED_SCOPES, ['US', 'SG', 'HK', 'ALL']);
   assert.deepEqual(REPORT_TYPES, ['MARKET_BRIEF']);
+  assert.deepEqual(INITIATING_LISTS, ['myStocks', 'watchlist']);
   assert.equal(REPORT_HEADER, 'REPORT HEADER / ANALYSIS CONTEXT');
   assert.deepEqual(REPORT_SECTION_NAMES, [
     'EXECUTIVE MARKET SUMMARY', 'KEY MARKET DRIVERS',
@@ -173,6 +178,7 @@ test('creates the frozen MARKET_BRIEF package with deterministic shape and requi
   assert.deepEqual(Object.keys(input), CLAUDE_ANALYSIS_INPUT_KEYS);
   assert.equal(input.analysisRequest.generatedAt, '2026-09-06T10:00:00.000Z');
   assert.equal(input.analysisRequest.reportType, 'MARKET_BRIEF');
+  assert.equal(input.analysisRequest.initiatingList, 'myStocks');
   assert.equal(input.marketPackages[0].evidenceContext.evidence[0].reference, 'e1');
   assert.equal(input.marketPackages[0].telemetry.benchmarkSnapshots[0].reference, 't1');
   assert.deepEqual(input.outputRequirements.sections, REPORT_SECTION_REQUIREMENTS);
@@ -183,7 +189,7 @@ test('creates the frozen MARKET_BRIEF package with deterministic shape and requi
 test('enforces selected scope and deterministic US, SG, HK ordering for ALL', () => {
   const input = createClaudeAnalysisInput({
     analysisRequest: {
-      selectedScope: 'ALL', generatedAt: '2026-09-06T10:00:00Z',
+      selectedScope: 'ALL', initiatingList: 'myStocks', generatedAt: '2026-09-06T10:00:00Z',
       userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
     },
     marketPackages: [
@@ -207,12 +213,12 @@ test('enforces selected scope and deterministic US, SG, HK ordering for ALL', ()
 
 test('rejects invalid request values and caller-supplied output requirements', () => {
   for (const override of [
-    {selectedScope: 'EU'}, {reportType: 'SEARCH_ANALYSIS'},
+    {selectedScope: 'EU'}, {initiatingList: 'other'}, {reportType: 'SEARCH_ANALYSIS'},
     {generatedAt: '2026-09-06'}, {userTimezone: 'S.tz'}
   ]) {
     assert.throws(() => createClaudeAnalysisInput({
       analysisRequest: {
-        selectedScope: 'SG', generatedAt: '2026-09-06T10:00:00Z',
+        selectedScope: 'SG', initiatingList: 'myStocks', generatedAt: '2026-09-06T10:00:00Z',
         userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF', ...override
       },
       marketPackages: [marketPackage('SG')],
@@ -237,7 +243,7 @@ test('validates market/session context against canonical 8B.3 snapshots and over
   const liveSnapshot = snapshot('SG', '^STI', true);
   const input = createClaudeAnalysisInput({
     analysisRequest: {
-      selectedScope: 'SG', generatedAt: '2026-09-07T03:00:00Z',
+      selectedScope: 'SG', initiatingList: 'myStocks', generatedAt: '2026-09-07T03:00:00Z',
       userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
     },
     marketPackages: [marketPackage('SG', {telemetrySnapshots: [liveSnapshot]})],
@@ -282,7 +288,7 @@ test('normalizes evidence roles and protects evidence provenance and Further Rea
   ];
   const input = createClaudeAnalysisInput({
     analysisRequest: {
-      selectedScope: 'US', generatedAt: '2026-09-06T10:00:00Z',
+      selectedScope: 'US', initiatingList: 'myStocks', generatedAt: '2026-09-06T10:00:00Z',
       userTimezone: 'America/New_York', reportType: 'MARKET_BRIEF'
     },
     marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}
@@ -303,7 +309,7 @@ test('keeps My Stocks and Watchlist separate with telemetry, evidence and 14-day
   packageInput.telemetry.stockSnapshots = [stockSnapshot];
   const input = createClaudeAnalysisInput({
     analysisRequest: {
-      selectedScope: 'SG', generatedAt: '2026-09-06T10:00:00Z',
+      selectedScope: 'SG', initiatingList: 'myStocks', generatedAt: '2026-09-06T10:00:00Z',
       userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
     },
     marketPackages: [packageInput],
@@ -326,11 +332,133 @@ test('keeps My Stocks and Watchlist separate with telemetry, evidence and 14-day
   assert.equal(validateClaudeAnalysisInput(late), false);
 });
 
+function portfolioScopedInput(initiatingList) {
+  const packageInput = marketPackage('SG', {
+    telemetrySnapshots: [snapshot('SG'), snapshot('SG', 'D05.SI')],
+    items: [
+      evidence('SG'),
+      evidence('SG', {
+        title: 'D05 market update',
+        canonicalUrl: 'https://www.reuters.com/markets/d05-example',
+        symbols: ['D05.SI']
+      }),
+      evidence('SG', {
+        title: 'D05 upcoming event',
+        canonicalUrl: 'https://www.reuters.com/markets/d05-event',
+        symbols: ['D05.SI']
+      }),
+      evidence('SG', {
+        title: 'STI upcoming event',
+        canonicalUrl: 'https://www.reuters.com/markets/sti-event'
+      })
+    ]
+  });
+  return createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'SG', initiatingList, generatedAt: '2026-09-06T10:00:00Z',
+      userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [packageInput],
+    portfolioContext: {
+      myStocks: [{
+        market: 'SG', symbol: 'D05.SI', telemetryRefs: ['t2'], evidenceRefs: ['e2'],
+        upcomingEvents: [{
+          title: 'D05 results', scheduledAt: '2026-09-15T01:00:00Z', evidenceRefs: ['e3']
+        }]
+      }],
+      watchlist: [{
+        market: 'SG', symbol: '^STI', telemetryRefs: ['t1'], evidenceRefs: ['e1'],
+        upcomingEvents: [{
+          title: 'STI review', scheduledAt: '2026-09-15T02:00:00Z', evidenceRefs: ['e4']
+        }]
+      }]
+    }
+  });
+}
+
+test('limits Section 5 references to the initiating list without changing portfolio membership', () => {
+  const input = portfolioScopedInput('myStocks');
+  const valid = normalOutput(input);
+  valid.sections[4] = {
+    name: REPORT_SECTION_NAMES[4], content: 'D05 moved materially.',
+    evidenceRefs: ['e2'], telemetryRefs: ['t2'], uncertainties: []
+  };
+  valid.evidenceReferences = ['e1', 'e2'];
+  assert.equal(validateClaudeAnalysisOutput(valid, input).valid, true);
+  assert.deepEqual(input.portfolioContext.myStocks.map(item => item.symbol), ['D05.SI']);
+  assert.deepEqual(input.portfolioContext.watchlist.map(item => item.symbol), ['^STI']);
+
+  const wrongList = JSON.parse(JSON.stringify(valid));
+  wrongList.sections[4].evidenceRefs = ['e1'];
+  wrongList.sections[4].telemetryRefs = ['t1'];
+  wrongList.evidenceReferences = ['e1'];
+  const validation = validateClaudeAnalysisOutput(wrongList, input);
+  assert.equal(validation.valid, false);
+  assert.match(validation.errors.join(' '), /initiating list/);
+
+  const watchlistInput = portfolioScopedInput('watchlist');
+  const watchlistOutput = normalOutput(watchlistInput);
+  watchlistOutput.sections[4] = {
+    name: REPORT_SECTION_NAMES[4], content: 'The STI moved materially.',
+    evidenceRefs: ['e1'], telemetryRefs: ['t1'], uncertainties: []
+  };
+  assert.equal(validateClaudeAnalysisOutput(watchlistOutput, watchlistInput).valid, true);
+  watchlistOutput.sections[4].evidenceRefs = ['e2'];
+  watchlistOutput.sections[4].telemetryRefs = ['t2'];
+  watchlistOutput.evidenceReferences = ['e1', 'e2'];
+  assert.equal(validateClaudeAnalysisOutput(watchlistOutput, watchlistInput).valid, false);
+});
+
+test('allows only initiating-list upcoming-event evidence in Section 5', () => {
+  const input = portfolioScopedInput('myStocks');
+  const output = normalOutput(input);
+  output.sections[4] = {
+    name: REPORT_SECTION_NAMES[4], content: 'D05 has a relevant upcoming event.',
+    evidenceRefs: ['e3'], telemetryRefs: ['t2'], uncertainties: []
+  };
+  output.evidenceReferences = ['e1', 'e3'];
+  assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
+
+  output.sections[4].evidenceRefs = ['e4'];
+  output.evidenceReferences = ['e1', 'e4'];
+  const validation = validateClaudeAnalysisOutput(output, input);
+  assert.equal(validation.valid, false);
+  assert.match(validation.errors.join(' '), /initiating list/);
+});
+
+test('requires the deterministic empty-list Section 5 statement without downgrade or substitution', () => {
+  const input = createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'SG', initiatingList: 'watchlist', generatedAt: '2026-09-06T10:00:00Z',
+      userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [marketPackage('SG')],
+    portfolioContext: {
+      myStocks: [{
+        market: 'SG', symbol: '^STI', telemetryRefs: ['t1'], evidenceRefs: ['e1'], upcomingEvents: []
+      }],
+      watchlist: []
+    }
+  });
+  const output = normalOutput(input);
+  assert.equal(output.sections[4].content, 'No securities are configured in Watchlist.');
+  assert.deepEqual(output.sections[4].evidenceRefs, []);
+  assert.deepEqual(output.sections[4].telemetryRefs, []);
+  assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
+
+  const substituted = JSON.parse(JSON.stringify(output));
+  substituted.sections[4] = {
+    name: REPORT_SECTION_NAMES[4], content: 'The other list moved.',
+    evidenceRefs: ['e1'], telemetryRefs: ['t1'], uncertainties: []
+  };
+  assert.equal(validateClaudeAnalysisOutput(substituted, input).valid, false);
+});
+
 test('returns a deeply immutable input-independent canonical package', () => {
   const raw = marketPackage('SG');
   const input = createClaudeAnalysisInput({
     analysisRequest: {
-      selectedScope: 'SG', generatedAt: '2026-09-06T10:00:00Z',
+      selectedScope: 'SG', initiatingList: 'myStocks', generatedAt: '2026-09-06T10:00:00Z',
       userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
     },
     marketPackages: [raw], portfolioContext: {myStocks: [], watchlist: []}
@@ -413,7 +541,7 @@ test('requires Further Readings to exactly match MarketBrief-owned supplied refe
   packageInput.evidenceContext.furtherReadings = [{evidenceRef: 'e1', sessionDate: '2026-09-04'}];
   const input = createClaudeAnalysisInput({
     analysisRequest: {
-      selectedScope: 'US', generatedAt: '2026-09-06T10:00:00Z',
+      selectedScope: 'US', initiatingList: 'myStocks', generatedAt: '2026-09-06T10:00:00Z',
       userTimezone: 'America/New_York', reportType: 'MARKET_BRIEF'
     },
     marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}

@@ -9,6 +9,7 @@ const {createCompletedRegularSession, createThreeSessionSnapshot} = require('../
 const {
   REPORT_HEADER,
   REPORT_SECTION_NAMES,
+  EMPTY_INITIATING_LIST_CONTENT,
   createClaudeAnalysisInput
 } = require('../lib/claude-analysis-contract');
 
@@ -82,7 +83,7 @@ function claudeAnalysisInput() {
   });
   return createClaudeAnalysisInput({
     analysisRequest: {
-      selectedScope: 'SG', generatedAt: '2026-09-06T18:00:00+08:00',
+      selectedScope: 'SG', initiatingList: 'myStocks', generatedAt: '2026-09-06T18:00:00+08:00',
       userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
     },
     marketPackages: [{
@@ -113,9 +114,10 @@ function claudeAnalysisOutput(input) {
     },
     sections: REPORT_SECTION_NAMES.map((name, index) => ({
       name,
-      content: index === 10 ? null : 'Supported analysis.',
-      evidenceRefs: index === 10 ? [] : ['e1'],
-      telemetryRefs: index === 10 ? [] : ['t1'],
+      content: index === 10 ? null : index === 4
+        ? EMPTY_INITIATING_LIST_CONTENT.myStocks : 'Supported analysis.',
+      evidenceRefs: index === 10 || index === 4 ? [] : ['e1'],
+      telemetryRefs: index === 10 || index === 4 ? [] : ['t1'],
       uncertainties: []
     })),
     evidenceReferences: ['e1'],
@@ -128,6 +130,7 @@ function analysisPackageRequest() {
   return {
     benchmarkAnchors: [{market: 'US', symbol: '^RUT'}],
     selectedScope: 'US',
+    initiatingList: 'myStocks',
     userTimezone: 'Asia/Singapore',
     myStocks: [],
     watchlist: []
@@ -151,7 +154,7 @@ function usAnalysisPackageEnvelope() {
   });
   return createClaudeAnalysisInput({
     analysisRequest: {
-      selectedScope: 'US', generatedAt: '2026-09-06T10:00:00Z',
+      selectedScope: 'US', initiatingList: 'myStocks', generatedAt: '2026-09-06T10:00:00Z',
       userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
     },
     marketPackages: [{

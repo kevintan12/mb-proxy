@@ -8,6 +8,7 @@ const {
   CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA,
   REPORT_HEADER,
   REPORT_SECTION_NAMES,
+  EMPTY_INITIATING_LIST_CONTENT,
   createClaudeAnalysisInput
 } = require('../lib/claude-analysis-contract');
 const {
@@ -36,7 +37,7 @@ function canonicalInput() {
   });
   return createClaudeAnalysisInput({
     analysisRequest: {
-      selectedScope: 'SG', generatedAt: '2026-09-06T18:00:00+08:00',
+      selectedScope: 'SG', initiatingList: 'myStocks', generatedAt: '2026-09-06T18:00:00+08:00',
       userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF'
     },
     marketPackages: [{
@@ -68,9 +69,9 @@ function reportContext(input) {
 function sections(content = 'Supported analysis.') {
   return REPORT_SECTION_NAMES.map((name, index) => ({
     name,
-    content: index === 10 ? null : content,
-    evidenceRefs: index === 10 || content === null ? [] : ['e1'],
-    telemetryRefs: index === 10 || content === null ? [] : ['t1'],
+    content: index === 10 ? null : index === 4 ? EMPTY_INITIATING_LIST_CONTENT.myStocks : content,
+    evidenceRefs: index === 10 || index === 4 || content === null ? [] : ['e1'],
+    telemetryRefs: index === 10 || index === 4 || content === null ? [] : ['t1'],
     uncertainties: []
   }));
 }
@@ -99,6 +100,7 @@ test('builds one deterministic server-owned request with the full package and no
   assert.equal(request.model, CLAUDE_ANALYSIS_MODEL);
   assert.equal(request.max_tokens, CLAUDE_ANALYSIS_MAX_TOKENS);
   assert.deepEqual(request.messages, [{role: 'user', content: JSON.stringify(input)}]);
+  assert.equal(JSON.parse(request.messages[0].content).analysisRequest.initiatingList, 'myStocks');
   assert.equal(JSON.parse(request.messages[0].content).marketPackages[0].telemetry.benchmarkSnapshots[0].reference, 't1');
   assert.equal(request.output_config.format.type, 'json_schema');
   assert.equal(request.output_config.format.schema, CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA);

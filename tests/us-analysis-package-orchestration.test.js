@@ -17,6 +17,7 @@ function request(selectedScope = 'US', overrides = {}) {
   return {
     benchmarkAnchors: [{market: 'US', symbol: '^RUT'}],
     selectedScope,
+    initiatingList: 'myStocks',
     userTimezone: 'Asia/Singapore',
     myStocks: [],
     watchlist: [],
@@ -136,6 +137,7 @@ test('assembles a canonical US package with supplied benchmarks and deterministi
 
   assert.equal(validateClaudeAnalysisInput(output), true);
   assert.equal(output.analysisRequest.generatedAt, GENERATED_AT);
+  assert.equal(output.analysisRequest.initiatingList, 'myStocks');
   assert.equal(output.analysisRequest.userTimezone, 'Asia/Singapore');
   assert.deepEqual(calls.factories, [GENERATED_AT]);
   assert.deepEqual(calls.telemetry, [
@@ -213,7 +215,7 @@ test('rejects overlap between supplied anchors and either portfolio list before 
 
 test('requires non-empty normalized US anchors without any backend symbol assumption', async () => {
   assert.deepEqual(ORCHESTRATION_REQUEST_KEYS, [
-    'benchmarkAnchors', 'selectedScope', 'userTimezone', 'myStocks', 'watchlist'
+    'benchmarkAnchors', 'selectedScope', 'initiatingList', 'userTimezone', 'myStocks', 'watchlist'
   ]);
   assert.deepEqual(BENCHMARK_ANCHOR_KEYS, ['market', 'symbol']);
   for (const benchmarkAnchors of [[], [{market: 'SG', symbol: '^STI'}], [{market: 'US', symbol: '0700.HK'}]]) {

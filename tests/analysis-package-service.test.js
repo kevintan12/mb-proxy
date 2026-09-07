@@ -25,6 +25,7 @@ const MARKET_CONFIG = {
 function request(selectedScope = 'SG', overrides = {}) {
   return {
     selectedScope,
+    initiatingList: 'myStocks',
     userTimezone: 'Asia/Singapore',
     myStocks: [],
     watchlist: [],
@@ -118,17 +119,21 @@ function service(acquireAnalysisMaterial = async context => acquiredMaterial(con
 }
 
 test('canonicalizes and assembles US, SG, HK and ALL scopes with exact frozen shapes', async () => {
-  assert.deepEqual(ANALYSIS_PACKAGE_REQUEST_KEYS, ['selectedScope', 'userTimezone', 'myStocks', 'watchlist']);
+  assert.deepEqual(ANALYSIS_PACKAGE_REQUEST_KEYS, [
+    'selectedScope', 'initiatingList', 'userTimezone', 'myStocks', 'watchlist'
+  ]);
   assert.deepEqual(ANALYSIS_PACKAGE_MEMBERSHIP_KEYS, ['market', 'symbol']);
   for (const scope of ['US', 'SG', 'HK', 'ALL']) {
     const canonical = canonicalizeAnalysisPackageRequest(request(scope.toLowerCase()));
     assert.equal(canonical.selectedScope, scope);
+    assert.equal(canonical.initiatingList, 'myStocks');
     assert.equal(Object.isFrozen(canonical), true);
     const output = await service().assemble(request(scope.toLowerCase()));
     assert.deepEqual(output.marketPackages.map(item => item.market),
       scope === 'ALL' ? ['US', 'SG', 'HK'] : [scope]);
   }
   assert.throws(() => canonicalizeAnalysisPackageRequest(request('EU')), /selectedScope/);
+  assert.throws(() => canonicalizeAnalysisPackageRequest(request('US', {initiatingList: 'other'})), /initiatingList/);
   assert.throws(() => canonicalizeAnalysisPackageRequest({...request(), extra: true}), /shape/);
 });
 
@@ -214,6 +219,7 @@ test('returns a complete canonical envelope with server-derived fields', async (
   assert.equal(validateClaudeAnalysisInput(output), true);
   assert.equal(output.analysisRequest.generatedAt, FIXED_NOW);
   assert.equal(output.analysisRequest.reportType, 'MARKET_BRIEF');
+  assert.equal(output.analysisRequest.initiatingList, 'myStocks');
   assert.equal(output.analysisRequest.userTimezone, 'UTC');
   assert.equal(output.outputRequirements.header, 'REPORT HEADER / ANALYSIS CONTEXT');
   assert.equal(output.outputRequirements.sections.length, 11);
