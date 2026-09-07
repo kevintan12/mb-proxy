@@ -109,6 +109,31 @@ test('builds one deterministic server-owned request with the full package and no
   assert.equal(Object.isFrozen(request), true);
 });
 
+test('gives Claude explicit validator-sensitive Section 5 and Further Readings instructions', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'determine the initiating list from analysisRequest.initiatingList',
+    'if it is myStocks, use only portfolioContext.myStocks',
+    'if it is watchlist, use only portfolioContext.watchlist',
+    "initiating list's direct evidenceRefs",
+    "initiating security's upcomingEvents[].evidenceRefs",
+    'only telemetryRefs belonging to securities in that initiating list',
+    'Never use securities, evidenceRefs, or telemetryRefs from the non-initiating list',
+    'No securities are configured in My Stocks.',
+    'No securities are configured in Watchlist.',
+    'Section 5 evidenceRefs, telemetryRefs, and uncertainties must all be empty arrays',
+    'Section 11 must be exactly {"name":"FURTHER READINGS","content":null,"evidenceRefs":[],"telemetryRefs":[],"uncertainties":[]}',
+    'MarketBrief resolves and renders Further Readings separately',
+    "evidenceRef values from each market package's evidenceContext.furtherReadings",
+    'If none are supplied, top-level furtherReadings must be []',
+    'scanning sections in report order',
+    "each section's evidenceRefs in listed order",
+    'adding each evidence reference only once at its first appearance'
+  ]) {
+    assert.equal(system.includes(requirement), true, requirement);
+  }
+});
+
 test('provider schema is derived without weakening authoritative runtime validation', () => {
   assert.deepEqual(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.required, CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.required);
   assert.equal(Object.hasOwn(
