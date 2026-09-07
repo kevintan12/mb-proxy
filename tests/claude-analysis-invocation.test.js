@@ -115,7 +115,10 @@ test('provider schema is derived without weakening authoritative runtime validat
     CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.evidenceGaps.items, 'minLength'
   ), false);
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.evidenceGaps.items.minLength, 1);
-  assert.equal(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sections.minItems, 11);
+  assert.equal(Object.hasOwn(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sections, 'minItems'), false);
+  assert.equal(Object.hasOwn(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sections, 'maxItems'), false);
+  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.minItems, 11);
+  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.maxItems, 11);
 });
 
 test('accepts valid NORMAL, DEGRADED and FAILED structured reports with one request each', async () => {
@@ -174,13 +177,23 @@ test('classifies malformed or contract-invalid structured reports as CONTRACT_FA
       async json() { return {content: [{type: 'text', text: '{bad json'}]}; }
     })
   });
-  const wrongOrder = normalOutput(input);
-  [wrongOrder.sections[0], wrongOrder.sections[1]] = [wrongOrder.sections[1], wrongOrder.sections[0]];
-  const invalid = await invokeClaudeAnalysis({
-    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(wrongOrder)
-  });
   assert.equal(malformed.type, 'CONTRACT_FAILURE');
-  assert.equal(invalid.type, 'CONTRACT_FAILURE');
+
+  const missing = normalOutput(input);
+  missing.sections.pop();
+  const extra = normalOutput(input);
+  extra.sections.push({...extra.sections[10]});
+  const renamed = normalOutput(input);
+  renamed.sections[0].name = 'RENAMED SECTION';
+  const reordered = normalOutput(input);
+  [reordered.sections[0], reordered.sections[1]] = [reordered.sections[1], reordered.sections[0]];
+
+  for (const output of [missing, extra, renamed, reordered]) {
+    const invalid = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+    });
+    assert.equal(invalid.type, 'CONTRACT_FAILURE');
+  }
 });
 
 test('rejects model-supplied URLs, provenance and unknown references', async () => {
