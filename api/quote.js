@@ -1,5 +1,7 @@
 const {invokeClaudeAnalysis} = require('../lib/claude-analysis-invocation');
+const {createHash, timingSafeEqual} = require('node:crypto');
 const analysisPackageRuntime = require('../lib/analysis-package-runtime');
+const newsMaterialityRuntime = require('../lib/news-materiality-runtime');
 const {
   validateUsAnalysisOrchestrationRequest
 } = require('../lib/us-analysis-package-orchestration');
@@ -7,6 +9,18 @@ const {
 const QUOTE_CACHE_TTL_MS = 1500;
 const QUOTE_CACHE_MAX_ENTRIES = 100;
 const quoteCache = new Map();
+
+function isAuthorizedNewsMaterialityRequest(req) {
+  const expected = process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN;
+  const authorization = req.headers?.authorization;
+  if (typeof expected !== 'string' || !expected.trim()
+      || typeof authorization !== 'string') return false;
+  const match = /^Bearer ([^\s]+)$/i.exec(authorization);
+  if (!match) return false;
+  const suppliedDigest = createHash('sha256').update(match[1], 'utf8').digest();
+  const expectedDigest = createHash('sha256').update(expected, 'utf8').digest();
+  return timingSafeEqual(suppliedDigest, expectedDigest);
+}
 
 function pruneQuoteCache(now) {
   for (const [key, entry] of quoteCache) {
@@ -86,6 +100,43 @@ module.exports = async function handler(req, res) {
     'Accept-Language': 'en-US,en;q=0.9',
     'Cache-Control': 'no-cache'
   };
+
+  // ── CNBC news materiality measurement (POST ?newsMateriality=1) ──────────
+  if (req.method === 'POST' && req.query.newsMateriality === '1') {
+    if (!isAuthorizedNewsMaterialityRequest(req)) {
+      return res.status(401).json({
+        error: {type: 'UNAUTHORIZED', message: 'Unauthorized'}
+      });
+    }
+    if (!newsMaterialityRuntime.validateNewsMaterialityRequest(req.body)) {
+      return res.status(400).json({
+        error: {type: 'INVALID_REQUEST', message: 'Invalid news materiality request'}
+      });
+    }
+    let result;
+    try {
+      result = await newsMaterialityRuntime.getNewsMaterialityRuntime().measure(req.body);
+    } catch (error) {
+      result = {ok: false, type: 'MATERIALITY_PROVIDER_FAILURE'};
+    }
+    if (result.ok) {
+      return res.status(200).json({
+        candidateCount: result.candidateCount,
+        useCount: result.useCount,
+        skipCount: result.skipCount,
+        materialityCounts: result.materialityCounts
+      });
+    }
+    const failures = {
+      CANDIDATE_ACQUISITION_FAILURE: [502, 'CNBC news candidate acquisition failed'],
+      MATERIALITY_PROVIDER_FAILURE: [502, 'News materiality provider request failed'],
+      MATERIALITY_CONTRACT_FAILURE: [502, 'News materiality output failed validation'],
+      MATERIALITY_REQUEST_TOO_LARGE: [413, 'News materiality request exceeds provisional size limit']
+    };
+    const [status, message] = failures[result.type]
+      || [502, 'News materiality measurement failed'];
+    return res.status(status).json({error: {type: result.type || 'MATERIALITY_PROVIDER_FAILURE', message}});
+  }
 
   // ── Canonical analysis package endpoint (POST ?analysisPackage=1) ────────
   if (req.method === 'POST' && req.query.analysisPackage === '1') {
