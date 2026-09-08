@@ -12,8 +12,9 @@ const {
 const {
   createPostgresThreeSessionSnapshotRepository
 } = require('../lib/postgres-three-session-snapshot-repository');
+const {createCompletedRegularSession} = require('../lib/three-session-snapshot');
 
-function fakeDatabase() {
+function fakeDatabase({failOnClientSql} = {}) {
   const poolCalls = [];
   const clientCalls = [];
   const instances = [];
@@ -31,6 +32,9 @@ function fakeDatabase() {
       return {
         query: async (text, parameters) => {
           clientCalls.push({text, parameters});
+          if (failOnClientSql && text.includes(failOnClientSql)) {
+            throw new Error('postgresql://user:secret@db.example/app');
+          }
           return {rows: []};
         },
         release: () => { released += 1; }
@@ -134,6 +138,36 @@ test('adapter directly satisfies the existing generic repository boundary', asyn
   const result = await repository.listLatest({market: 'SG', symbol: '^STI'});
   assert.deepEqual(result, []);
   assert.match(database.poolCalls[0].text, /three_session_snapshot_sessions/);
+});
+
+test('batched snapshot write/read failures roll back and release the one transaction client', async () => {
+  const canonicalSession = createCompletedRegularSession({
+    market: 'SG', sessionDate: '2026-09-04', open: 5700, high: 5800, low: 5650,
+    close: 5747, previousClose: 5710, volume: null,
+    asOf: '2026-09-04T09:00:00Z', sourceId: 'sg.yahoo-finance',
+    validationState: 'VALIDATED'
+  });
+  for (const failOnClientSql of [
+    'INSERT INTO three_session_snapshot_sessions',
+    'SELECT market, symbol, session_date'
+  ]) {
+    const database = fakeDatabase({failOnClientSql});
+    const runtime = createPostgresRuntime({
+      environment: {DATABASE_URL: 'postgresql://user:secret@db.example/app'},
+      PoolClass: database.Pool,
+      attachDatabasePool: null
+    });
+    const repository = createPostgresThreeSessionSnapshotRepository(runtime);
+
+    await assert.rejects(repository.upsertSnapshot({
+      market: 'SG', symbol: '^STI', sessions: [canonicalSession]
+    }), error => error.code === 'POSTGRES_OPERATION_FAILED');
+    assert.equal(database.clientCalls[0].text, 'BEGIN');
+    assert.equal(database.clientCalls.at(-1).text, 'ROLLBACK');
+    assert.equal(database.clientCalls.some(call => call.text === 'COMMIT'), false);
+    assert.equal(database.released(), 1);
+    assert.equal(database.instances.length, 1);
+  }
 });
 
 test('runtime wiring contains no Neon-specific imports or environment names', () => {

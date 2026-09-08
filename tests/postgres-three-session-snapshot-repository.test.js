@@ -21,6 +21,7 @@ function createMemoryPostgres() {
   let records = new Map();
   const calls = [];
   let failOn = null;
+  let transactions = 0;
   const key = (market, symbol, date) => `${market}|${symbol}|${date}`;
 
   async function execute(sql, parameters, scope) {
@@ -63,6 +64,7 @@ function createMemoryPostgres() {
     calls,
     query: (sql, parameters) => execute(sql, parameters, 'read'),
     transaction: async callback => {
+      transactions += 1;
       const before = new Map([...records].map(([recordKey, value]) => [recordKey, {...value}]));
       try {
         return await callback((sql, parameters) => execute(sql, parameters, 'transaction'));
@@ -72,6 +74,7 @@ function createMemoryPostgres() {
       }
     },
     rows: () => [...records.values()].map(row => ({...row})),
+    transactionCount: () => transactions,
     failNextOn(fragment) { failOn = fragment; },
     clearFailure() { failOn = null; }
   };
@@ -94,6 +97,60 @@ test('validates canonical input before transaction and uses parameterized SQL', 
   const count = database.calls.length;
   await assert.rejects(repository.upsert({market: 'SG', symbol: '^STI', session: spoofed}), /Invalid canonical/);
   assert.equal(database.calls.length, count);
+});
+
+test('batches one symbol snapshot into one lock, all writes, one prune and transactional readback', async () => {
+  const database = createMemoryPostgres();
+  const repository = createPostgresThreeSessionSnapshotRepository(database);
+  const sessions = [session('02'), session('03'), session('04')];
+  const result = await repository.upsertSnapshot({
+    market: ' sg ', symbol: ' ^sti ', sessions
+  });
+
+  assert.equal(database.transactionCount(), 1);
+  assert.deepEqual(database.calls.map(call => {
+    if (call.sql.includes('pg_advisory_xact_lock')) return 'lock';
+    if (call.sql.startsWith('INSERT INTO')) return 'upsert';
+    if (call.sql.startsWith('DELETE FROM')) return 'prune';
+    if (call.sql.startsWith('SELECT market')) return 'read';
+    return 'unexpected';
+  }), ['lock', 'upsert', 'upsert', 'upsert', 'prune', 'read']);
+  assert.equal(database.calls.every(call => call.scope === 'transaction'), true);
+  assert.deepEqual(result.map(item => item.sessionDate), [
+    '2026-09-02', '2026-09-03', '2026-09-04'
+  ]);
+  assert.equal(Object.isFrozen(result), true);
+});
+
+test('validates an entire batched snapshot before opening its transaction', async () => {
+  const database = createMemoryPostgres();
+  const repository = createPostgresThreeSessionSnapshotRepository(database);
+  const spoofed = JSON.parse(JSON.stringify(session('03')));
+  spoofed.provenance.publisher = 'Spoof';
+
+  await assert.rejects(repository.upsertSnapshot({
+    market: 'SG', symbol: '^STI', sessions: [session('02'), spoofed]
+  }), /Invalid canonical/);
+  assert.equal(database.transactionCount(), 0);
+  assert.equal(database.calls.length, 0);
+});
+
+test('rolls back all batched writes when a write, prune or readback fails', async () => {
+  for (const failure of [
+    'INSERT INTO three_session_snapshot_sessions',
+    'DELETE FROM three_session_snapshot_sessions',
+    'SELECT market, symbol, session_date'
+  ]) {
+    const database = createMemoryPostgres();
+    const repository = createPostgresThreeSessionSnapshotRepository(database);
+    await repository.upsert({market: 'SG', symbol: '^STI', session: session('01')});
+    const before = database.rows();
+    database.failNextOn(failure);
+    await assert.rejects(repository.upsertSnapshot({
+      market: 'SG', symbol: '^STI', sessions: [session('02'), session('03')]
+    }), /forced/);
+    assert.deepEqual(database.rows(), before);
+  }
 });
 
 test('persists primitive facts only and replaces a complete same-session row', async () => {

@@ -40,13 +40,9 @@ function repositoryDouble({listed, failOn} = {}) {
   const calls = [];
   return {
     calls,
-    async upsert(value) {
-      calls.push({method: 'upsert', value});
-      if (failOn === 'upsert') throw new Error('database://user:secret@host');
-    },
-    async listLatest(value) {
-      calls.push({method: 'listLatest', value});
-      if (failOn === 'listLatest') throw new Error('database://user:secret@host');
+    async upsertSnapshot(value) {
+      calls.push({method: 'upsertSnapshot', value});
+      if (failOn === 'upsertSnapshot') throw new Error('database://user:secret@host');
       return listed;
     }
   };
@@ -58,13 +54,12 @@ test('persists completed sessions oldest to newest, then reads and reconstructs 
   const service = createRuntimeThreeSessionSnapshotRepository({repository});
   const result = await service.persistSnapshot(input);
 
-  assert.deepEqual(repository.calls.map(call => call.method), [
-    'upsert', 'upsert', 'upsert', 'listLatest'
-  ]);
-  assert.deepEqual(repository.calls.slice(0, 3).map(call => call.value.session.sessionDate), [
+  assert.deepEqual(repository.calls.map(call => call.method), ['upsertSnapshot']);
+  assert.deepEqual(repository.calls[0].value.sessions.map(item => item.sessionDate), [
     '2026-09-02', '2026-09-03', '2026-09-04'
   ]);
-  assert.deepEqual(repository.calls[3].value, {market: 'SG', symbol: '^STI'});
+  assert.deepEqual(repository.calls[0].value.market, 'SG');
+  assert.deepEqual(repository.calls[0].value.symbol, '^STI');
   assert.equal(validateThreeSessionSnapshot(result).valid, true);
   assert.notEqual(result, input);
   assert.equal(Object.isFrozen(result), true);
@@ -75,10 +70,8 @@ test('never persists the runtime overlay and reattaches it only against the stor
   const input = snapshot();
   const repository = repositoryDouble({listed: input.completedSessions});
   const result = await createRuntimeThreeSessionSnapshotRepository({repository}).persistSnapshot(input);
-  for (const call of repository.calls.filter(item => item.method === 'upsert')) {
-    assert.deepEqual(Object.keys(call.value), ['market', 'symbol', 'session']);
-    assert.equal(call.value.currentOverlay, undefined);
-  }
+  assert.deepEqual(Object.keys(repository.calls[0].value), ['market', 'symbol', 'sessions']);
+  assert.equal(repository.calls[0].value.currentOverlay, undefined);
   assert.deepEqual(result.currentOverlay, input.currentOverlay);
 
   const overlayWithoutHistory = createCurrentSessionOverlay({
@@ -153,7 +146,7 @@ test('rejects missing, altered and non-contiguous persisted history', async () =
 });
 
 test('fails closed and sanitizes deterministic write/read failures', async () => {
-  for (const failOn of ['upsert', 'listLatest']) {
+  for (const failOn of ['upsertSnapshot']) {
     const input = snapshot();
     const repository = repositoryDouble({listed: input.completedSessions, failOn});
     await assert.rejects(
