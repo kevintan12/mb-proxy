@@ -323,6 +323,22 @@ test('gives Claude the exact top-level evidenceGaps status relationship', () => 
   }
 });
 
+test('gives Claude evidence-bound Section 9 fallback instructions', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'For Section 9 WHAT TO WATCH FOR NEXT',
+    'any non-null content must contain at least one valid supplied evidenceRef',
+    'every factual or watch-next statement must be grounded in supplied evidence',
+    'Do not invent scheduled events, catalysts, dates, earnings, macro releases, or forward-looking developments',
+    'If the supplied package does not support a meaningful Section 9, set content to null',
+    'where that absence is a material unresolved gap, use DEGRADED',
+    'include at least one genuine section uncertainty',
+    'add the corresponding material evidence gap to the top-level evidenceGaps array'
+  ]) {
+    assert.equal(system.includes(requirement), true, requirement);
+  }
+});
+
 test('gives Claude the exact section uncertainty canonicality requirements', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
