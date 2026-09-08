@@ -184,6 +184,36 @@ test('assembles a canonical US package with supplied benchmarks and deterministi
   ]);
 });
 
+test('reports sanitized non-negative timings for existing package stages', async () => {
+  const diagnostics = [];
+  const {service} = harness({onDiagnostics(value) { diagnostics.push(value); }});
+  const output = await service.assemble(request('US', {
+    myStocks: [{market: 'US', symbol: 'MSFT'}]
+  }));
+
+  assert.equal(validateClaudeAnalysisInput(output), true);
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(Object.keys(diagnostics[0]), ['timing']);
+  assert.deepEqual(Object.keys(diagnostics[0].timing), [
+    'yahooTelemetryAcquisitionMs',
+    'postgresPersistenceReadbackMs',
+    'yahooMarketDataEvidenceAcquisitionMs',
+    'federalReserveEvidenceAcquisitionMs',
+    'packageAssemblyFinalizationMs',
+    'packageRuntimeTotalMs'
+  ]);
+  for (const elapsed of Object.values(diagnostics[0].timing)) {
+    assert.equal(typeof elapsed, 'number');
+    assert.equal(Number.isFinite(elapsed), true);
+    assert.equal(elapsed >= 0, true);
+  }
+  assert.equal(Object.isFrozen(diagnostics[0]), true);
+  assert.equal(Object.isFrozen(diagnostics[0].timing), true);
+  const serialized = JSON.stringify(diagnostics[0]);
+  assert.equal(serialized.includes('MSFT'), false);
+  assert.equal(serialized.includes('Federal Reserve policy statement'), false);
+});
+
 test('supports an empty portfolio without fabricating stock or event context', async () => {
   const {service, calls} = harness();
   const output = await service.assemble(request());

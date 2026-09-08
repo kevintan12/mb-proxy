@@ -121,9 +121,11 @@ test('reports deterministic sanitized request sizes and provider usage on succes
   const canonicalPackage = JSON.parse(request.messages[0].content);
   const diagnostics = [];
   let sentBody;
+  let monotonicTime = 0;
   const result = await invokeClaudeAnalysis({
     input,
     apiKey: 'test-key',
+    monotonicNow: () => monotonicTime++,
     onDiagnostics(value) { diagnostics.push(value); },
     fetchImpl: async (url, options) => {
       sentBody = options.body;
@@ -141,7 +143,8 @@ test('reports deterministic sanitized request sizes and provider usage on succes
               nested: {tokens: 9}
             }
           };
-        }
+        },
+        headers: {get(name) { return name === 'request-id' ? 'req_test_123' : null; }}
       });
     }
   });
@@ -151,6 +154,7 @@ test('reports deterministic sanitized request sizes and provider usage on succes
   assert.equal(diagnostics.length, 1);
   assert.deepEqual(diagnostics[0], {
     model: CLAUDE_ANALYSIS_MODEL,
+    requestId: 'req_test_123',
     requestSize: {
       systemPromptBytes: Buffer.byteLength(request.system, 'utf8'),
       canonicalPackageBytes: Buffer.byteLength(request.messages[0].content, 'utf8'),
@@ -164,6 +168,12 @@ test('reports deterministic sanitized request sizes and provider usage on succes
       providerSchemaBytes: Buffer.byteLength(JSON.stringify(request.output_config.format.schema), 'utf8'),
       completeRequestBodyBytes: Buffer.byteLength(serializedRequest, 'utf8')
     },
+    timing: {
+      anthropicFetchMs: 1,
+      responseBodyReadParseMs: 1,
+      marketBriefValidationMs: 1,
+      invocationTotalMs: 7
+    },
     usage: {
       input_tokens: 123,
       output_tokens: 45,
@@ -176,6 +186,7 @@ test('reports deterministic sanitized request sizes and provider usage on succes
   assert.equal(sentBody.split(encodedCanonicalPackage).length - 1, 1);
   assert.equal(Object.isFrozen(diagnostics[0]), true);
   assert.equal(Object.isFrozen(diagnostics[0].requestSize), true);
+  assert.equal(Object.isFrozen(diagnostics[0].timing), true);
   assert.equal(Object.isFrozen(diagnostics[0].usage), true);
   const serializedDiagnostics = JSON.stringify(diagnostics[0]);
   assert.equal(serializedDiagnostics.includes('亚洲 market update'), false);
@@ -205,8 +216,13 @@ test('reports request sizes and optional usage on later contract failure', async
 
   assert.equal(result.type, 'CONTRACT_FAILURE');
   assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].requestId, null);
   assert.deepEqual(diagnostics[0].usage, {input_tokens: 321});
   assert.equal(Number.isInteger(diagnostics[0].requestSize.completeRequestBodyBytes), true);
+  for (const elapsed of Object.values(diagnostics[0].timing)) {
+    assert.equal(typeof elapsed, 'number');
+    assert.equal(elapsed >= 0, true);
+  }
 });
 
 test('gives Claude explicit validator-sensitive Section 5 and Further Readings instructions', () => {
