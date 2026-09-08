@@ -323,6 +323,20 @@ test('gives Claude the exact top-level evidenceGaps status relationship', () => 
   }
 });
 
+test('gives Claude the global NORMAL null-section status rule', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'NORMAL requires non-null content for every analytical section, Sections 1-10',
+    'If any analytical section in Sections 1-10 is null, NORMAL must not be used',
+    'If a section is null because material evidence is unavailable, status must be DEGRADED',
+    'that null section must include a genuine section uncertainty',
+    'the corresponding material evidence gap must be included in the top-level evidenceGaps array',
+    'Section 11 FURTHER READINGS remains the required null placeholder and does not force DEGRADED'
+  ]) {
+    assert.equal(system.includes(requirement), true, requirement);
+  }
+});
+
 test('gives Claude evidence-bound Section 9 fallback instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
@@ -330,8 +344,7 @@ test('gives Claude evidence-bound Section 9 fallback instructions', () => {
     'any non-null content must contain at least one valid supplied evidenceRef',
     'every factual or watch-next statement must be grounded in supplied evidence',
     'Do not invent scheduled events, catalysts, dates, earnings, macro releases, or forward-looking developments',
-    'If the supplied package does not support a meaningful Section 9, set content to null',
-    'where that absence is a material unresolved gap, use DEGRADED',
+    'If the supplied package does not support a meaningful Section 9, set content to null and status to DEGRADED',
     'include at least one genuine section uncertainty',
     'add the corresponding material evidence gap to the top-level evidenceGaps array'
   ]) {
