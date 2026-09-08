@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "api/quote.js": {
+      "regions": ["sin1"]
+    }
+  },
   "rewrites": [
     {
       "source": "/api/(.*)",
