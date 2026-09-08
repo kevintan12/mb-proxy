@@ -117,7 +117,10 @@ module.exports = async function handler(req, res) {
   if (req.method === 'POST' && req.query.claudeAnalysis) {
     const invocation = await invokeClaudeAnalysis({
       input: req.body,
-      apiKey: process.env.ANTHROPIC_API_KEY
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      onDiagnostics(diagnostics) {
+        console.info('[claude-analysis.invocation]', JSON.stringify(diagnostics));
+      }
     });
     if (invocation.ok) return res.status(200).json({result: invocation.output});
     const status = invocation.type === 'INPUT_FAILURE' ? 400 : 502;

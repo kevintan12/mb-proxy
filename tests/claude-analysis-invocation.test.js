@@ -21,9 +21,9 @@ const {
   invokeClaudeAnalysis
 } = require('../lib/claude-analysis-invocation');
 
-function canonicalInput({includeSecondEvidence = false} = {}) {
+function canonicalInput({includeSecondEvidence = false, evidenceTitle = 'Market update'} = {}) {
   const item = createEvidenceItem({
-    sourceId: 'sg.reuters', market: 'SG', evidenceCategory: 'news', title: 'Market update',
+    sourceId: 'sg.reuters', market: 'SG', evidenceCategory: 'news', title: evidenceTitle,
     canonicalUrl: 'https://www.reuters.com/markets/example', publishedAt: '2026-09-06T08:00:00Z'
   });
   const evidenceItems = [item];
@@ -112,6 +112,101 @@ test('builds one deterministic server-owned request with the full package and no
   assert.equal(Object.hasOwn(request, 'tools'), false);
   assert.equal(JSON.stringify(request).includes('web_search'), false);
   assert.equal(Object.isFrozen(request), true);
+});
+
+test('reports deterministic sanitized request sizes and provider usage on success', async () => {
+  const input = canonicalInput({evidenceTitle: '亚洲 market update'});
+  const request = buildClaudeAnalysisRequest(input);
+  const serializedRequest = JSON.stringify(request);
+  const canonicalPackage = JSON.parse(request.messages[0].content);
+  const diagnostics = [];
+  let sentBody;
+  const result = await invokeClaudeAnalysis({
+    input,
+    apiKey: 'test-key',
+    onDiagnostics(value) { diagnostics.push(value); },
+    fetchImpl: async (url, options) => {
+      sentBody = options.body;
+      return anthropicResponse(normalOutput(input), {
+        async json() {
+          return {
+            content: [{type: 'text', text: JSON.stringify(normalOutput(input))}],
+            usage: {
+              input_tokens: 123,
+              output_tokens: 45,
+              cache_creation_input_tokens: 6,
+              cache_read_input_tokens: 7,
+              future_numeric_counter: 8,
+              service_tier: 'standard',
+              nested: {tokens: 9}
+            }
+          };
+        }
+      });
+    }
+  });
+
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(sentBody, serializedRequest);
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(diagnostics[0], {
+    model: CLAUDE_ANALYSIS_MODEL,
+    requestSize: {
+      systemPromptBytes: Buffer.byteLength(request.system, 'utf8'),
+      canonicalPackageBytes: Buffer.byteLength(request.messages[0].content, 'utf8'),
+      telemetryBytes: Buffer.byteLength(JSON.stringify(
+        canonicalPackage.marketPackages.map(item => item.telemetry)
+      ), 'utf8'),
+      evidenceContextBytes: Buffer.byteLength(JSON.stringify(
+        canonicalPackage.marketPackages.map(item => item.evidenceContext)
+      ), 'utf8'),
+      portfolioContextBytes: Buffer.byteLength(JSON.stringify(canonicalPackage.portfolioContext), 'utf8'),
+      providerSchemaBytes: Buffer.byteLength(JSON.stringify(request.output_config.format.schema), 'utf8'),
+      completeRequestBodyBytes: Buffer.byteLength(serializedRequest, 'utf8')
+    },
+    usage: {
+      input_tokens: 123,
+      output_tokens: 45,
+      cache_creation_input_tokens: 6,
+      cache_read_input_tokens: 7,
+      future_numeric_counter: 8
+    }
+  });
+  const encodedCanonicalPackage = JSON.stringify(request.messages[0].content);
+  assert.equal(sentBody.split(encodedCanonicalPackage).length - 1, 1);
+  assert.equal(Object.isFrozen(diagnostics[0]), true);
+  assert.equal(Object.isFrozen(diagnostics[0].requestSize), true);
+  assert.equal(Object.isFrozen(diagnostics[0].usage), true);
+  const serializedDiagnostics = JSON.stringify(diagnostics[0]);
+  assert.equal(serializedDiagnostics.includes('亚洲 market update'), false);
+  assert.equal(serializedDiagnostics.includes('^STI'), false);
+  assert.equal(serializedDiagnostics.includes('Analyze only'), false);
+  assert.equal(serializedDiagnostics.includes('test-key'), false);
+});
+
+test('reports request sizes and optional usage on later contract failure', async () => {
+  const input = canonicalInput();
+  const invalidOutput = normalOutput(input);
+  invalidOutput.sections[0].evidenceRefs = ['e2'];
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input,
+    apiKey: 'test-key',
+    onDiagnostics(value) { diagnostics.push(value); },
+    fetchImpl: async () => anthropicResponse(invalidOutput, {
+      async json() {
+        return {
+          content: [{type: 'text', text: JSON.stringify(invalidOutput)}],
+          usage: {input_tokens: 321, service_tier: 'standard'}
+        };
+      }
+    })
+  });
+
+  assert.equal(result.type, 'CONTRACT_FAILURE');
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(diagnostics[0].usage, {input_tokens: 321});
+  assert.equal(Number.isInteger(diagnostics[0].requestSize.completeRequestBodyBytes), true);
 });
 
 test('gives Claude explicit validator-sensitive Section 5 and Further Readings instructions', () => {
