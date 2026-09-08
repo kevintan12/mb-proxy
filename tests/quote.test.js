@@ -333,6 +333,31 @@ test('structured Claude route separates input, contract and upstream failures', 
   }
 });
 
+test('structured Claude route returns a distinct oversized-request failure', async () => {
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+  const input = JSON.parse(JSON.stringify(claudeAnalysisInput()));
+  input.marketPackages[0].evidenceContext.evidence[0].item.summary = 'x'.repeat(140000);
+  let calls = 0;
+  global.fetch = async () => { calls++; };
+  try {
+    const res = mockRes();
+    await handler({method: 'POST', query: {claudeAnalysis: '1'}, body: input}, res);
+    assert.equal(res.statusCode, 413);
+    assert.deepEqual(res.body, {
+      error: {
+        type: 'REQUEST_TOO_LARGE',
+        message: 'Claude request exceeds provisional size limit',
+        upstreamStatus: null
+      }
+    });
+    assert.equal(calls, 0);
+  } finally {
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+  }
+});
+
 test('legacy Claude proxy still forwards the caller body and streams unchanged', async () => {
   const previousKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = 'legacy-key';

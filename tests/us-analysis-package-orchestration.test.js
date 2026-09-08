@@ -8,7 +8,8 @@ const {
   BENCHMARK_ANCHOR_KEYS,
   FEDERAL_RESERVE_UNAVAILABLE_GAP,
   ORCHESTRATION_REQUEST_KEYS,
-  createUsAnalysisPackageOrchestrationService
+  createUsAnalysisPackageOrchestrationService,
+  validateUsAnalysisOrchestrationRequest
 } = require('../lib/us-analysis-package-orchestration');
 
 const GENERATED_AT = '2026-09-06T10:00:00.000Z';
@@ -212,6 +213,15 @@ test('reports sanitized non-negative timings for existing package stages', async
   const serialized = JSON.stringify(diagnostics[0]);
   assert.equal(serialized.includes('MSFT'), false);
   assert.equal(serialized.includes('Federal Reserve policy statement'), false);
+});
+
+test('keeps portfolio membership validation independent of the Claude byte guard', () => {
+  const memberships = Array.from({length: 50}, (_, index) => ({
+    market: 'US',
+    symbol: `STOCK${index + 1}`
+  }));
+  const result = validateUsAnalysisOrchestrationRequest(request('US', {myStocks: memberships}));
+  assert.equal(result.canonicalRequest.myStocks.length, 50);
 });
 
 test('supports an empty portfolio without fabricating stock or event context', async () => {

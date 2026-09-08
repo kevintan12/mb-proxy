@@ -123,7 +123,9 @@ module.exports = async function handler(req, res) {
       }
     });
     if (invocation.ok) return res.status(200).json({result: invocation.output});
-    const status = invocation.type === 'INPUT_FAILURE' ? 400 : 502;
+    const status = invocation.type === 'INPUT_FAILURE'
+      ? 400
+      : invocation.type === 'REQUEST_TOO_LARGE' ? 413 : 502;
     return res.status(status).json({
       error: {
         type: invocation.type,

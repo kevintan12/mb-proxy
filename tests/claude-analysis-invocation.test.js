@@ -14,6 +14,7 @@ const {
 const {
   CLAUDE_ANALYSIS_MODEL,
   CLAUDE_ANALYSIS_MAX_TOKENS,
+  CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES,
   CLAUDE_MESSAGES_URL,
   CLAUDE_ANALYSIS_RESULT_TYPES,
   CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA,
@@ -21,10 +22,15 @@ const {
   invokeClaudeAnalysis
 } = require('../lib/claude-analysis-invocation');
 
-function canonicalInput({includeSecondEvidence = false, evidenceTitle = 'Market update'} = {}) {
+function canonicalInput({
+  includeSecondEvidence = false,
+  evidenceTitle = 'Market update',
+  evidenceSummary
+} = {}) {
   const item = createEvidenceItem({
     sourceId: 'sg.reuters', market: 'SG', evidenceCategory: 'news', title: evidenceTitle,
-    canonicalUrl: 'https://www.reuters.com/markets/example', publishedAt: '2026-09-06T08:00:00Z'
+    canonicalUrl: 'https://www.reuters.com/markets/example', publishedAt: '2026-09-06T08:00:00Z',
+    ...(evidenceSummary === undefined ? {} : {summary: evidenceSummary})
   });
   const evidenceItems = [item];
   if (includeSecondEvidence) evidenceItems.push(createEvidenceItem({
@@ -112,6 +118,58 @@ test('builds one deterministic server-owned request with the full package and no
   assert.equal(Object.hasOwn(request, 'tools'), false);
   assert.equal(JSON.stringify(request).includes('web_search'), false);
   assert.equal(Object.isFrozen(request), true);
+});
+
+function canonicalInputAtRequestSize(targetBytes) {
+  const minimum = canonicalInput({evidenceSummary: 'x'});
+  const minimumBytes = Buffer.byteLength(JSON.stringify(buildClaudeAnalysisRequest(minimum)), 'utf8');
+  assert.equal(minimumBytes <= targetBytes, true);
+  const input = canonicalInput({evidenceSummary: 'x'.repeat(targetBytes - minimumBytes + 1)});
+  assert.equal(Buffer.byteLength(JSON.stringify(buildClaudeAnalysisRequest(input)), 'utf8'), targetBytes);
+  return input;
+}
+
+test('accepts the provisional request-size boundary and rejects one byte above without fetch', async () => {
+  const boundaryInput = canonicalInputAtRequestSize(
+    CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES
+  );
+  let boundaryFetches = 0;
+  const boundary = await invokeClaudeAnalysis({
+    input: boundaryInput,
+    apiKey: 'test-key',
+    fetchImpl: async () => {
+      boundaryFetches++;
+      return anthropicResponse(normalOutput(boundaryInput));
+    }
+  });
+  assert.equal(boundary.type, 'SUCCESS', boundary.message);
+  assert.equal(boundaryFetches, 1);
+
+  const oversizedInput = canonicalInputAtRequestSize(
+    CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES + 1
+  );
+  const diagnostics = [];
+  let oversizedFetches = 0;
+  const oversized = await invokeClaudeAnalysis({
+    input: oversizedInput,
+    apiKey: 'test-key',
+    onDiagnostics(value) { diagnostics.push(value); },
+    fetchImpl: async () => { oversizedFetches++; }
+  });
+  assert.equal(oversized.type, 'REQUEST_TOO_LARGE');
+  assert.equal(oversized.message, 'Claude request exceeds provisional size limit');
+  assert.equal(oversized.upstreamStatus, null);
+  assert.equal(oversizedFetches, 0);
+  assert.deepEqual(diagnostics, [{
+    model: CLAUDE_ANALYSIS_MODEL,
+    completeRequestBodyBytes: CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES + 1,
+    limitBytes: CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES,
+    providerInvocationSkipped: true
+  }]);
+  assert.equal(JSON.stringify(diagnostics).includes('xxxxx'), false);
+  assert.deepEqual(CLAUDE_ANALYSIS_RESULT_TYPES, [
+    'SUCCESS', 'INPUT_FAILURE', 'REQUEST_TOO_LARGE', 'UPSTREAM_FAILURE', 'CONTRACT_FAILURE'
+  ]);
 });
 
 test('reports deterministic sanitized request sizes and provider usage on success', async () => {
@@ -347,7 +405,7 @@ test('accepts valid NORMAL, DEGRADED and FAILED structured reports with one requ
     assert.equal(result.output.status, output.status);
   }
   assert.deepEqual(CLAUDE_ANALYSIS_RESULT_TYPES, [
-    'SUCCESS', 'INPUT_FAILURE', 'UPSTREAM_FAILURE', 'CONTRACT_FAILURE'
+    'SUCCESS', 'INPUT_FAILURE', 'REQUEST_TOO_LARGE', 'UPSTREAM_FAILURE', 'CONTRACT_FAILURE'
   ]);
 });
 
