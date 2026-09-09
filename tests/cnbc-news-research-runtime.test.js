@@ -79,3 +79,41 @@ test('uses the one bounds bundle at every composed stage and does not invoke fin
   }
   assert.doesNotMatch(source, /invokeClaudeAnalysis|claude-analysis-invocation|analysis-package-service/);
 });
+
+test('forwards sanitized selected-article failure diagnostics through production composition', async () => {
+  const diagnostics = [];
+  const calls = [];
+  const service = createCnbcNewsResearchRuntime({
+    apiKey: 'server-key',
+    onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async (url, options) => {
+      calls.push({url, options});
+      if (url.includes('search.cnbc.com')) {
+        return {
+          ok: true, status: 200, headers: {get: () => null},
+          async text() { return rss(); }
+        };
+      }
+      if (url === 'https://api.anthropic.com/v1/messages') {
+        return {
+          ok: true, status: 200, headers: {get: () => null},
+          async json() {
+            return {content: [{type: 'text', text: JSON.stringify({selections: [{
+              reference: 'c1', decision: 'USE', category: 'news', materiality: 'HIGH',
+              reason: 'Material market development.'
+            }]})}]};
+          }
+        };
+      }
+      return {ok: false, status: 403, headers: {get: () => 'text/html'}};
+    }
+  });
+  const result = await service.researchNews({horizons});
+  assert.equal(result.type, 'ARTICLE_RETRIEVAL_FAILURE');
+  assert.equal(calls.length, 3);
+  assert.deepEqual(diagnostics.find(item => item.stage === 'cnbcSelectedArticleRetrieval'), {
+    stage: 'cnbcSelectedArticleRetrieval',
+    failedCandidateReference: 'c1',
+    failureType: 'HTTP_FAILURE'
+  });
+});

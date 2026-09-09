@@ -8,6 +8,7 @@ const {
   createNewsEvidenceCandidateCollection
 } = require('../lib/news-evidence-candidates');
 const {
+  CNBC_ARTICLE_ACQUISITION_DIAGNOSTIC_FAILURE_TYPES,
   CNBC_SELECTED_ARTICLE_RETRIEVAL_RESULT_TYPES,
   createCnbcSelectedArticleRetrievalOrchestrationService
 } = require('../lib/cnbc-selected-article-retrieval-orchestration');
@@ -79,11 +80,12 @@ function articleFor(item, overrides = {}) {
   };
 }
 
-function serviceWith(acquireArticleContent) {
+function serviceWith(acquireArticleContent, onDiagnostics) {
   return createCnbcSelectedArticleRetrievalOrchestrationService({
     articleContentAcquisition: {acquireArticleContent},
     candidateBounds,
-    articleRetrievalBounds
+    articleRetrievalBounds,
+    onDiagnostics
   });
 }
 
@@ -263,6 +265,103 @@ test('fails the whole orchestration when any selected article retrieval fails', 
     message: 'CNBC selected article retrieval failed'
   });
   assert.equal(Object.hasOwn(result, 'retrievedArticles'), false);
+});
+
+test('emits only the allowlisted adapter subtype and exact failed cN before failure', async () => {
+  assert.deepEqual(CNBC_ARTICLE_ACQUISITION_DIAGNOSTIC_FAILURE_TYPES, [
+    'INVALID_INPUT',
+    'TIMEOUT',
+    'NETWORK_FAILURE',
+    'HTTP_FAILURE',
+    'INVALID_PAGE',
+    'EXTRACTION_FAILURE',
+    'HORIZON_MISMATCH',
+    'CONTENT_TOO_LARGE'
+  ]);
+  for (const code of CNBC_ARTICLE_ACQUISITION_DIAGNOSTIC_FAILURE_TYPES) {
+    const diagnostics = [];
+    const error = new Error(
+      'private https://www.cnbc.com/article title article content provider response stack prompt credential'
+    );
+    error.code = code;
+    const result = await serviceWith(async () => { throw error; }, value => diagnostics.push(value))
+      .retrieveSelectedArticles({
+        candidateCollection: collection(),
+        selections: selections(['SKIP', 'USE', 'SKIP'])
+      });
+    assert.deepEqual(result, {
+      ok: false,
+      type: 'ARTICLE_RETRIEVAL_FAILURE',
+      message: 'CNBC selected article retrieval failed'
+    });
+    assert.deepEqual(diagnostics, [{
+      stage: 'cnbcSelectedArticleRetrieval',
+      failedCandidateReference: 'c2',
+      failureType: code
+    }]);
+    const serialized = JSON.stringify(diagnostics);
+    for (const forbidden of ['https://', 'title', 'article content', 'provider response', 'stack', 'prompt', 'credential']) {
+      assert.equal(serialized.includes(forbidden), false);
+    }
+  }
+});
+
+test('maps an unrecognized exception to one sanitized UNKNOWN_FAILURE diagnostic', async () => {
+  const diagnostics = [];
+  const error = new Error('private upstream details');
+  error.code = 'PRIVATE_PROVIDER_CODE';
+  const result = await serviceWith(async () => { throw error; }, value => diagnostics.push(value))
+    .retrieveSelectedArticles({
+      candidateCollection: collection(),
+      selections: selections(['USE', 'SKIP', 'SKIP'])
+    });
+  assert.deepEqual(result, {
+    ok: false,
+    type: 'ARTICLE_RETRIEVAL_FAILURE',
+    message: 'CNBC selected article retrieval failed'
+  });
+  assert.deepEqual(diagnostics, [{
+    stage: 'cnbcSelectedArticleRetrieval',
+    failedCandidateReference: 'c1',
+    failureType: 'UNKNOWN_FAILURE'
+  }]);
+  assert.equal(JSON.stringify(diagnostics).includes('PRIVATE_PROVIDER_CODE'), false);
+  assert.equal(JSON.stringify(diagnostics).includes('private upstream details'), false);
+});
+
+test('emits ARTICLE_CONTRACT_FAILURE only when acquired output fails validation', async () => {
+  const diagnostics = [];
+  const result = await serviceWith(
+    async ({candidate: item}) => articleFor(item, {articleText: ''}),
+    value => diagnostics.push(value)
+  ).retrieveSelectedArticles({
+    candidateCollection: collection(),
+    selections: selections(['USE', 'SKIP', 'SKIP'])
+  });
+  assert.deepEqual(result, {
+    ok: false,
+    type: 'ARTICLE_CONTRACT_FAILURE',
+    message: 'CNBC retrieved article failed validation'
+  });
+  assert.deepEqual(diagnostics, [{
+    stage: 'cnbcSelectedArticleRetrieval',
+    failedCandidateReference: 'c1',
+    failureType: 'ARTICLE_CONTRACT_FAILURE'
+  }]);
+});
+
+test('successful retrieval emits no failure diagnostic and remains unchanged', async () => {
+  const diagnostics = [];
+  const result = await serviceWith(
+    async ({candidate: item}) => articleFor(item),
+    value => diagnostics.push(value)
+  ).retrieveSelectedArticles({
+    candidateCollection: collection(),
+    selections: selections(['SKIP', 'USE', 'SKIP'])
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.retrievedArticles.map(article => article.reference), ['c2']);
+  assert.deepEqual(diagnostics, []);
 });
 
 test('rejects malformed, out-of-horizon and oversized retrieved article results', async () => {
