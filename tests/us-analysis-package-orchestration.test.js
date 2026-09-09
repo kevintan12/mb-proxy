@@ -3,9 +3,17 @@ const assert = require('node:assert/strict');
 const {createCompletedRegularSession, createThreeSessionSnapshot} = require('../lib/three-session-snapshot');
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
+const {
+  createNewsEvidenceCandidate,
+  createNewsEvidenceCandidateCollection
+} = require('../lib/news-evidence-candidates');
+const {
+  CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS
+} = require('../lib/cnbc-news-research-runtime');
 const {validateClaudeAnalysisInput} = require('../lib/claude-analysis-contract');
 const {
   BENCHMARK_ANCHOR_KEYS,
+  CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
   FEDERAL_RESERVE_UNAVAILABLE_GAP,
   ORCHESTRATION_REQUEST_KEYS,
   createUsAnalysisPackageOrchestrationService,
@@ -27,6 +35,19 @@ function request(selectedScope = 'US', overrides = {}) {
 }
 
 function snapshot(symbol) {
+  const previousSession = createCompletedRegularSession({
+    market: 'US',
+    sessionDate: '2026-09-03',
+    open: 95,
+    high: 102,
+    low: 94,
+    close: 100,
+    previousClose: 96,
+    volume: 900,
+    asOf: '2026-09-03T16:00:00-04:00',
+    sourceId: 'us.yahoo-finance',
+    validationState: 'VALIDATED'
+  });
   const session = createCompletedRegularSession({
     market: 'US',
     sessionDate: '2026-09-04',
@@ -47,9 +68,89 @@ function snapshot(symbol) {
     instrumentType: symbol.startsWith('^') ? 'INDEX' : 'EQUITY',
     currency: 'USD',
     marketState: 'CLOSED',
-    completedSessions: [session],
+    completedSessions: [previousSession, session],
     currentOverlay: null
   });
+}
+
+function cnbcCandidate(reference, horizon) {
+  const number = reference.slice(1);
+  const publishedAt = new Date(
+    (Date.parse(horizon.startsAtExclusive) + Date.parse(horizon.endsAtInclusive)) / 2
+  ).toISOString();
+  return createNewsEvidenceCandidate({
+    reference,
+    horizon,
+    sourceId: 'us.cnbc',
+    market: 'US',
+    evidenceCategory: 'news',
+    title: `CNBC market news item ${number}`,
+    summary: `CNBC candidate summary item ${number}.`,
+    extract: null,
+    canonicalUrl: `https://www.cnbc.com/2026/09/04/item-${number}.html`,
+    publishedAt,
+    symbols: []
+  }, {bounds: CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS.candidateBounds});
+}
+
+function cnbcResearchSuccess(horizons, classifications = []) {
+  const candidates = classifications.map((classification, index) => cnbcCandidate(
+    `c${index + 1}`,
+    horizons.find(horizon => horizon.classification === classification)
+  ));
+  const candidateCollection = createNewsEvidenceCandidateCollection({
+    market: 'US',
+    candidates
+  }, {bounds: CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS.candidateBounds});
+  const selections = candidates.map(candidate => ({
+    reference: candidate.reference,
+    decision: 'USE',
+    category: 'news',
+    materiality: 'HIGH',
+    reason: 'Material market development.'
+  }));
+  const retrievedArticles = candidates.map(candidate => ({
+    reference: candidate.reference,
+    sourceId: candidate.sourceId,
+    canonicalUrl: candidate.canonicalUrl,
+    publishedAt: candidate.publishedAt,
+    updatedAt: null,
+    title: candidate.title,
+    articleText: `Bounded CNBC article content item ${candidate.reference.slice(1)}.`,
+    provenance: candidate.provenance
+  }));
+  const constructedEvidence = candidates.map((candidate, index) => ({
+    candidateReference: candidate.reference,
+    horizon: candidate.horizon,
+    selection: selections[index],
+    evidenceItem: createEvidenceItem({
+      sourceId: candidate.sourceId,
+      market: candidate.market,
+      evidenceCategory: candidate.evidenceCategory,
+      title: candidate.title,
+      summary: retrievedArticles[index].articleText,
+      canonicalUrl: candidate.canonicalUrl,
+      publishedAt: candidate.publishedAt,
+      symbols: candidate.symbols
+    })
+  }));
+  return {ok: true, type: 'SUCCESS', candidateCollection, selections, retrievedArticles, constructedEvidence};
+}
+
+function cnbcAllSkipSuccess(horizons) {
+  const candidateCollection = createNewsEvidenceCandidateCollection({
+    market: 'US', candidates: [cnbcCandidate('c1', horizons[0])]
+  }, {bounds: CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS.candidateBounds});
+  return {
+    ok: true,
+    type: 'SUCCESS',
+    candidateCollection,
+    selections: [{
+      reference: 'c1', decision: 'SKIP', category: 'news', materiality: 'LOW', reason: 'Not material.'
+    }],
+    retrievedArticles: [],
+    constructedEvidence: []
+  };
 }
 
 function yahooEvidence(symbol, publishedAt = '2026-09-05T20:00:00Z') {
@@ -89,7 +190,7 @@ function fedEvidence(publishedAt = '2026-09-05T18:00:00Z') {
 }
 
 function harness(overrides = {}) {
-  const calls = {factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0};
+  const calls = {factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0, cnbc: []};
   const dependencies = {
     createTelemetryAcquisition: ({generatedAt}) => {
       calls.factories.push(generatedAt);
@@ -116,6 +217,12 @@ function harness(overrides = {}) {
       async acquireEvidence() {
         calls.fed++;
         return fedEvidence();
+      }
+    },
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        calls.cnbc.push(horizons);
+        return cnbcAllSkipSuccess(horizons);
       }
     },
     now: () => new Date(GENERATED_AT),
@@ -151,6 +258,19 @@ test('assembles a canonical US package with supplied benchmarks and deterministi
   assert.deepEqual(calls.persistence, ['^RUT', '^DJI', 'MSFT', 'AAPL', 'NVDA']);
   assert.deepEqual(calls.yahoo, ['^RUT', '^DJI', 'MSFT', 'AAPL', 'NVDA']);
   assert.equal(calls.fed, 1);
+  assert.equal(calls.cnbc.length, 1);
+  assert.deepEqual(calls.cnbc[0], [
+    {
+      classification: 'COMPLETED_SESSION',
+      startsAtExclusive: '2026-09-03T20:00:00.000Z',
+      endsAtInclusive: '2026-09-04T20:00:00.000Z'
+    },
+    {
+      classification: 'SUBSEQUENT_DEVELOPMENT',
+      startsAtExclusive: '2026-09-04T20:00:00.000Z',
+      endsAtInclusive: GENERATED_AT
+    }
+  ]);
 
   const marketPackage = output.marketPackages[0];
   assert.deepEqual(marketPackage.telemetry.benchmarkSnapshots.map(item => [item.reference, item.snapshot.symbol]), [
@@ -200,6 +320,7 @@ test('reports sanitized non-negative timings for existing package stages', async
     'postgresPersistenceReadbackMs',
     'yahooMarketDataEvidenceAcquisitionMs',
     'federalReserveEvidenceAcquisitionMs',
+    'cnbcNewsResearchMs',
     'packageAssemblyFinalizationMs',
     'packageRuntimeTotalMs'
   ]);
@@ -249,8 +370,86 @@ test('rejects overlap between supplied anchors and either portfolio list before 
   for (const membership of cases) {
     const {service, calls} = harness();
     await assert.rejects(service.assemble(request('US', membership)), /cannot be portfolio membership/);
-    assert.deepEqual(calls, {factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0});
+    assert.deepEqual(calls, {factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0, cnbc: []});
   }
+});
+
+test('integrates completed and subsequent CNBC evidence after Yahoo and Fed with package-owned refs', async () => {
+  let researchCalls = 0;
+  const {service} = harness({
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        researchCalls++;
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT']);
+      }
+    }
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.equal(validateClaudeAnalysisInput(output), true);
+  assert.equal(researchCalls, 1);
+  assert.deepEqual(context.evidence.map(entry => [entry.reference, entry.item.sourceId]), [
+    ['e1', 'us.yahoo-finance'],
+    ['e2', 'us.federal-reserve'],
+    ['e3', 'us.federal-reserve'],
+    ['e4', 'us.cnbc'],
+    ['e5', 'us.cnbc']
+  ]);
+  assert.deepEqual(context.supportingEvidence, ['e1', 'e2', 'e3', 'e4']);
+  assert.deepEqual(context.subsequentDevelopments, ['e5']);
+  assert.deepEqual(context.principalCatalysts, []);
+  assert.equal(JSON.stringify(output).includes('c1'), false);
+  assert.equal(JSON.stringify(output).includes('c2'), false);
+});
+
+test('CNBC all-SKIP adds no evidence or gap', async () => {
+  const {service} = harness();
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
+  assert.deepEqual(context.unresolvedGaps, []);
+});
+
+test('every CNBC stage failure degrades to one deterministic package gap', async () => {
+  for (const type of [
+    'CANDIDATE_ACQUISITION_FAILURE',
+    'MATERIALITY_PROVIDER_FAILURE',
+    'MATERIALITY_CONTRACT_FAILURE',
+    'MATERIALITY_REQUEST_TOO_LARGE',
+    'ARTICLE_RETRIEVAL_FAILURE',
+    'EVIDENCE_CONSTRUCTION_FAILURE'
+  ]) {
+    const diagnostics = [];
+    const {service} = harness({
+      cnbcNewsResearch: {async researchNews() { return {ok: false, type}; }},
+      onDiagnostics(value) { diagnostics.push(value); }
+    });
+    const output = await service.assemble(request());
+    const context = output.marketPackages[0].evidenceContext;
+    assert.equal(validateClaudeAnalysisInput(output), true);
+    assert.deepEqual(context.unresolvedGaps, [CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP]);
+    assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
+    assert.equal(diagnostics.some(item => item.failureType === type), true);
+  }
+});
+
+test('unavailable or inconsistent canonical benchmark boundaries degrade CNBC only', async () => {
+  const oneSession = createThreeSessionSnapshot({
+    market: 'US', symbol: '^RUT', instrumentName: 'benchmark', instrumentType: 'INDEX',
+    currency: 'USD', marketState: 'CLOSED',
+    completedSessions: [snapshot('^RUT').completedSessions[1]], currentOverlay: null
+  });
+  let researchCalls = 0;
+  const {service} = harness({
+    createTelemetryAcquisition: () => ({async acquireSnapshot() { return oneSession; }}),
+    cnbcNewsResearch: {async researchNews() { researchCalls++; }}
+  });
+  const output = await service.assemble(request());
+  assert.equal(researchCalls, 0);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
+    CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP
+  ]);
+  assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
 test('requires non-empty normalized US anchors without any backend symbol assumption', async () => {

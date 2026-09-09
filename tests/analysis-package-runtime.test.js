@@ -21,7 +21,7 @@ test('runtime composer exposes a frozen US orchestration service without eager d
   assert.equal(databaseCalls, 0);
 });
 
-test('runtime composition uses only the approved production components and does not invoke Claude', () => {
+test('runtime composition includes bounded CNBC research but not final Claude synthesis', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'analysis-package-runtime.js'), 'utf8');
   for (const component of [
     'getPostgresRuntime',
@@ -29,7 +29,8 @@ test('runtime composition uses only the approved production components and does 
     'createYahooTelemetryAcquisitionService',
     'createYahooMarketDataEvidenceAcquisitionService',
     'createFederalReserveMonetaryPolicyEvidenceAcquisitionService',
+    'createCnbcNewsResearchRuntime',
     'createUsAnalysisPackageOrchestrationService'
   ]) assert.match(source, new RegExp(component));
-  assert.doesNotMatch(source, /invokeClaude|claudeAnalysis|ANTHROPIC/);
+  assert.doesNotMatch(source, /invokeClaudeAnalysis|claude-analysis-invocation/);
 });
