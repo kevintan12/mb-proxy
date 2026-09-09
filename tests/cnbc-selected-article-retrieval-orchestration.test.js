@@ -294,15 +294,70 @@ test('emits only the allowlisted adapter subtype and exact failed cN before fail
       type: 'ARTICLE_RETRIEVAL_FAILURE',
       message: 'CNBC selected article retrieval failed'
     });
-    assert.deepEqual(diagnostics, [{
+    const expectedDiagnostic = {
       stage: 'cnbcSelectedArticleRetrieval',
       failedCandidateReference: 'c2',
       failureType: code
-    }]);
+    };
+    if (code === 'CONTENT_TOO_LARGE') {
+      expectedDiagnostic.sizeFailureType = 'UNKNOWN_SIZE_FAILURE';
+    }
+    assert.deepEqual(diagnostics, [expectedDiagnostic]);
     const serialized = JSON.stringify(diagnostics);
     for (const forbidden of ['https://', 'title', 'article content', 'provider response', 'stack', 'prompt', 'credential']) {
       assert.equal(serialized.includes(forbidden), false);
     }
+  }
+});
+
+test('emits only recognized size subtypes for CONTENT_TOO_LARGE failures', async () => {
+  for (const sizeFailureType of [
+    'TITLE_TOO_LARGE',
+    'RESPONSE_TOO_LARGE',
+    'ARTICLE_TEXT_TOO_LARGE',
+    'RESULT_TOO_LARGE'
+  ]) {
+    const diagnostics = [];
+    const error = new Error('private size details 999999 https://www.cnbc.com/private');
+    error.code = 'CONTENT_TOO_LARGE';
+    error.sizeFailureType = sizeFailureType;
+    const result = await serviceWith(async () => { throw error; }, value => diagnostics.push(value))
+      .retrieveSelectedArticles({
+        candidateCollection: collection(),
+        selections: selections(['USE', 'SKIP', 'SKIP'])
+      });
+    assert.deepEqual(result, {
+      ok: false,
+      type: 'ARTICLE_RETRIEVAL_FAILURE',
+      message: 'CNBC selected article retrieval failed'
+    });
+    assert.deepEqual(diagnostics, [{
+      stage: 'cnbcSelectedArticleRetrieval',
+      failedCandidateReference: 'c1',
+      failureType: 'CONTENT_TOO_LARGE',
+      sizeFailureType
+    }]);
+    assert.doesNotMatch(JSON.stringify(diagnostics), /999999|https:\/\/|private size details/);
+  }
+});
+
+test('maps missing or unrecognized size subtypes to UNKNOWN_SIZE_FAILURE', async () => {
+  for (const sizeFailureType of [undefined, 'PRIVATE_SIZE_CODE']) {
+    const diagnostics = [];
+    const error = new Error('private size failure');
+    error.code = 'CONTENT_TOO_LARGE';
+    if (sizeFailureType !== undefined) error.sizeFailureType = sizeFailureType;
+    await serviceWith(async () => { throw error; }, value => diagnostics.push(value))
+      .retrieveSelectedArticles({
+        candidateCollection: collection(),
+        selections: selections(['USE', 'SKIP', 'SKIP'])
+      });
+    assert.deepEqual(diagnostics, [{
+      stage: 'cnbcSelectedArticleRetrieval',
+      failedCandidateReference: 'c1',
+      failureType: 'CONTENT_TOO_LARGE',
+      sizeFailureType: 'UNKNOWN_SIZE_FAILURE'
+    }]);
   }
 });
 

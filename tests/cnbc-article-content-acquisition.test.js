@@ -77,6 +77,12 @@ function assertCode(code) {
   return error => error instanceof CnbcArticleContentAcquisitionError && error.code === code;
 }
 
+function assertSizeFailure(sizeFailureType) {
+  return error => error instanceof CnbcArticleContentAcquisitionError
+    && error.code === 'CONTENT_TOO_LARGE'
+    && error.sizeFailureType === sizeFailureType;
+}
+
 test('extracts bounded CNBC JSON-LD article content with deterministic immutable identity', async () => {
   const input = candidate();
   const original = JSON.stringify(input);
@@ -251,21 +257,30 @@ test('rejects declared and actual response bodies over the caller bound', async 
       headers: {get: name => name === 'content-type' ? 'text/html' : name === 'content-length' ? '10001' : null}
     })
   });
-  await assert.rejects(declared.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}), assertCode('CONTENT_TOO_LARGE'));
+  await assert.rejects(
+    declared.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}),
+    assertSizeFailure('RESPONSE_TOO_LARGE')
+  );
 
   const oversized = articleHtml({articleBody: 'x'}).padEnd(10001, ' ');
   const actual = createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(oversized)});
-  await assert.rejects(actual.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}), assertCode('CONTENT_TOO_LARGE'));
+  await assert.rejects(
+    actual.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}),
+    assertSizeFailure('RESPONSE_TOO_LARGE')
+  );
 });
 
 test('rejects oversized title, extracted text and total result atomically', async () => {
   const cases = [
-    [{...retrievalBounds, maxTitleBytes: 5}, articleHtml()],
-    [{...retrievalBounds, maxArticleTextBytes: 5}, articleHtml()],
-    [{...retrievalBounds, maxResultBytes: 10}, articleHtml()]
+    [{...retrievalBounds, maxTitleBytes: 5}, articleHtml(), 'TITLE_TOO_LARGE'],
+    [{...retrievalBounds, maxArticleTextBytes: 5}, articleHtml(), 'ARTICLE_TEXT_TOO_LARGE'],
+    [{...retrievalBounds, maxResultBytes: 10}, articleHtml(), 'RESULT_TOO_LARGE']
   ];
-  for (const [bounds, html] of cases) {
+  for (const [bounds, html, sizeFailureType] of cases) {
     const service = createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(html)});
-    await assert.rejects(service.acquireArticleContent({candidate: candidate(), bounds}), assertCode('CONTENT_TOO_LARGE'));
+    await assert.rejects(
+      service.acquireArticleContent({candidate: candidate(), bounds}),
+      assertSizeFailure(sizeFailureType)
+    );
   }
 });
