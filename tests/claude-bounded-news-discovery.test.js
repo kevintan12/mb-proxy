@@ -1,0 +1,241 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+const {
+  CLAUDE_BOUNDED_NEWS_DISCOVERY_MODEL,
+  CLAUDE_BOUNDED_NEWS_DISCOVERY_MAX_USES,
+  CLAUDE_BOUNDED_NEWS_DISCOVERY_MAX_RESULTS_INSPECTED,
+  CLAUDE_BOUNDED_NEWS_DISCOVERY_PROVISIONAL_MAX_REQUEST_BYTES,
+  CLAUDE_MESSAGES_URL,
+  SYSTEM_PROMPT,
+  buildClaudeBoundedNewsDiscoveryRequest,
+  assertRequestWithinLimit,
+  createClaudeBoundedNewsDiscoveryService
+} = require('../lib/claude-bounded-news-discovery');
+
+const context = Object.freeze({targetSessionDate: '2026-09-09'});
+
+function searchResult(url, title = 'Stock market today: US stocks close after the session') {
+  return {type: 'web_search_result', url, title, encrypted_content: 'not returned by MarketBrief'};
+}
+
+function response(results, overrides = {}) {
+  return {
+    ok: true,
+    status: 200,
+    headers: {get: name => name === 'request-id' ? 'req_search_123' : null},
+    async json() {
+      return {
+        content: [{
+          type: 'web_search_tool_result',
+          tool_use_id: 'srvtoolu_1',
+          content: results
+        }, {type: 'text', text: 'Search completed.'}],
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          server_tool_use: {web_search_requests: 1},
+          service_tier: 'standard'
+        }
+      };
+    },
+    ...overrides
+  };
+}
+
+function service(fetchImpl, options = {}) {
+  return createClaudeBoundedNewsDiscoveryService({apiKey: 'secret', fetchImpl, ...options});
+}
+
+test('builds the exact fixed Yahoo completed-session discovery profile', () => {
+  const request = buildClaudeBoundedNewsDiscoveryRequest(context);
+  assert.equal(request.model, CLAUDE_BOUNDED_NEWS_DISCOVERY_MODEL);
+  assert.equal(request.model, 'claude-haiku-4-5-20251001');
+  assert.equal(request.system, SYSTEM_PROMPT);
+  assert.equal(request.messages.length, 1);
+  assert.match(request.messages[0].content, /us stock market today yahoo finance 2026-09-09/);
+  assert.match(request.messages[0].content, /completed trading session 2026-09-09/);
+  assert.deepEqual(request.tools, [{
+    type: 'web_search_20250305',
+    name: 'web_search',
+    max_uses: 1,
+    allowed_domains: ['finance.yahoo.com']
+  }]);
+  assert.equal(CLAUDE_BOUNDED_NEWS_DISCOVERY_MAX_USES, 1);
+  assert.equal(CLAUDE_BOUNDED_NEWS_DISCOVERY_MAX_RESULTS_INSPECTED, 10);
+  assert.equal(Object.isFrozen(request), true);
+  assert.equal(Object.isFrozen(request.tools[0].allowed_domains), true);
+});
+
+test('rejects non-canonical context and caller-owned overrides', async () => {
+  let calls = 0;
+  const discovery = service(async () => { calls++; });
+  for (const invalid of [
+    {},
+    {targetSessionDate: '2026-02-30'},
+    {targetSessionDate: '2026-09-09', model: 'caller-model'},
+    {targetSessionDate: '2026-09-09', tools: []},
+    {targetSessionDate: '2026-09-09', allowedDomains: ['example.com']},
+    {targetSessionDate: '2026-09-09', maxUses: 99},
+    {targetSessionDate: '2026-09-09', prompt: 'caller prompt'},
+    {targetSessionDate: '2026-09-09', url: 'https://finance.yahoo.com/' }
+  ]) {
+    const result = await discovery.discoverYahooCompletedSessionRecap(invalid);
+    assert.equal(result.type, 'INPUT_FAILURE');
+  }
+  assert.equal(calls, 0);
+});
+
+test('accepts current and legacy Yahoo recap URL families and canonicalizes tracking data', async () => {
+  for (const path of [
+    '/markets/live/stock-market-today-dow-sp-500-nasdaq-live-200000001.html',
+    '/news/live/stock-market-today-dow-sp-500-nasdaq-live-200000002.html'
+  ]) {
+    let calls = 0;
+    const result = await service(async (url, options) => {
+      calls++;
+      assert.equal(url, CLAUDE_MESSAGES_URL);
+      assert.equal(options.method, 'POST');
+      assert.equal(options.headers['x-api-key'], 'secret');
+      return response([searchResult(`https://finance.yahoo.com${path}?guccounter=1#fragment`)]);
+    }).discoverYahooCompletedSessionRecap(context);
+    assert.equal(calls, 1);
+    assert.equal(result.ok, true);
+    assert.equal(result.type, 'SUCCESS');
+    assert.deepEqual(result.discovery, {
+      title: 'Stock market today: US stocks close after the session',
+      url: `https://finance.yahoo.com${path}`,
+      discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+      targetSessionDate: '2026-09-09'
+    });
+    assert.equal(Object.isFrozen(result), true);
+    assert.equal(Object.isFrozen(result.discovery), true);
+  }
+});
+
+test('rejects non-Yahoo, non-HTTPS, malformed, and unrelated Yahoo results as normal not found', async () => {
+  const results = [
+    searchResult('https://example.com/markets/live/stock-market-today-example.html'),
+    searchResult('http://finance.yahoo.com/markets/live/stock-market-today-http.html'),
+    searchResult('not a URL'),
+    searchResult('https://finance.yahoo.com/topic/stock-market-news/'),
+    searchResult('https://news.yahoo.com/markets/live/stock-market-today-wrong-host.html'),
+    searchResult('https://finance.yahoo.com:444/markets/live/stock-market-today-wrong-port.html')
+  ];
+  const result = await service(async () => response(results))
+    .discoverYahooCompletedSessionRecap(context);
+  assert.deepEqual(result, {ok: true, type: 'NOT_FOUND', discovery: null});
+});
+
+test('deduplicates results deterministically and returns the first valid canonical recap', async () => {
+  const first = 'https://finance.yahoo.com/markets/live/stock-market-today-first.html';
+  const second = 'https://finance.yahoo.com/markets/live/stock-market-today-second.html';
+  const result = await service(async () => response([
+    searchResult(`${first}?tracking=one`, 'First recap'),
+    searchResult(`${first}#duplicate`, 'Duplicate recap'),
+    searchResult(second, 'Second recap')
+  ])).discoverYahooCompletedSessionRecap(context);
+  assert.equal(result.discovery.url, first);
+  assert.equal(result.discovery.title, 'First recap');
+});
+
+test('bounds inspected search results deterministically', async () => {
+  const unrelated = Array.from({length: CLAUDE_BOUNDED_NEWS_DISCOVERY_MAX_RESULTS_INSPECTED}, (_, index) =>
+    searchResult(`https://finance.yahoo.com/news/unrelated-${index}.html`));
+  const result = await service(async () => response([
+    ...unrelated,
+    searchResult('https://finance.yahoo.com/markets/live/stock-market-today-too-late.html')
+  ])).discoverYahooCompletedSessionRecap(context);
+  assert.equal(result.type, 'NOT_FOUND');
+});
+
+test('treats an HTTP 200 search tool error as a distinct failure', async () => {
+  const result = await service(async () => response({
+    type: 'web_search_tool_result_error',
+    error_code: 'unavailable'
+  })).discoverYahooCompletedSessionRecap(context);
+  assert.deepEqual(result, {
+    ok: false,
+    type: 'SEARCH_TOOL_FAILURE',
+    message: 'Claude web search tool failed',
+    upstreamStatus: 200
+  });
+});
+
+test('rejects malformed successful envelopes without fabricating discovery', async () => {
+  const result = await service(async () => response([], {
+    async json() { return {content: [{type: 'text', text: 'No result'}], usage: {input_tokens: 1}}; }
+  })).discoverYahooCompletedSessionRecap(context);
+  assert.equal(result.type, 'CONTRACT_FAILURE');
+});
+
+test('makes one request with no retry for network and provider failures', async () => {
+  for (const fetchImpl of [
+    async () => { throw new Error('private network detail'); },
+    async () => ({ok: false, status: 429, headers: {get: () => null}})
+  ]) {
+    let calls = 0;
+    const result = await service(async (...args) => {
+      calls++;
+      return fetchImpl(...args);
+    }).discoverYahooCompletedSessionRecap(context);
+    assert.equal(result.type, 'UPSTREAM_FAILURE');
+    assert.equal(calls, 1);
+  }
+});
+
+test('enforces a fixed provisional UTF-8 request-size ceiling', () => {
+  assert.equal(CLAUDE_BOUNDED_NEWS_DISCOVERY_PROVISIONAL_MAX_REQUEST_BYTES, 16 * 1024);
+  assert.equal(assertRequestWithinLimit('x'.repeat(16 * 1024)), 16 * 1024);
+  assert.throws(
+    () => assertRequestWithinLimit('x'.repeat((16 * 1024) + 1)),
+    /exceeds provisional size limit/
+  );
+});
+
+test('captures only sanitized size, request-id, timing, usage, search-count, and fetch-count diagnostics', async () => {
+  const diagnostics = [];
+  let tick = 0;
+  const result = await service(
+    async () => response([searchResult('https://finance.yahoo.com/markets/live/stock-market-today-valid.html')]),
+    {monotonicNow: () => tick++, onDiagnostics: value => diagnostics.push(value)}
+  ).discoverYahooCompletedSessionRecap(context);
+  assert.equal(result.ok, true);
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(Object.keys(diagnostics[0]), [
+    'model', 'requestId', 'requestSize', 'timing', 'usage', 'searchRequestCount', 'fetchCount'
+  ]);
+  assert.equal(diagnostics[0].requestId, 'req_search_123');
+  assert.equal(diagnostics[0].fetchCount, 1);
+  assert.equal(diagnostics[0].searchRequestCount, 1);
+  assert.deepEqual(diagnostics[0].usage, {input_tokens: 100, output_tokens: 20});
+  for (const value of Object.values(diagnostics[0].requestSize)) {
+    assert.equal(typeof value, 'number');
+    assert.ok(value >= 0);
+  }
+  for (const value of Object.values(diagnostics[0].timing)) {
+    assert.equal(typeof value, 'number');
+    assert.ok(value >= 0);
+  }
+  const serialized = JSON.stringify(diagnostics[0]);
+  for (const forbidden of [
+    'stock-market-today-valid', 'Search completed', 'encrypted_content', 'finance.yahoo.com',
+    'secret', '2026-09-09'
+  ]) assert.equal(serialized.includes(forbidden), false);
+});
+
+test('does not retrieve articles or integrate with package or final synthesis', async () => {
+  let fetches = 0;
+  const result = await service(async url => {
+    fetches++;
+    assert.equal(url, CLAUDE_MESSAGES_URL);
+    return response([searchResult('https://finance.yahoo.com/markets/live/stock-market-today-only.html')]);
+  }).discoverYahooCompletedSessionRecap(context);
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(fetches, 1);
+  assert.deepEqual(Object.keys(result), ['ok', 'type', 'discovery']);
+  assert.deepEqual(Object.keys(result.discovery), ['title', 'url', 'discoveredVia', 'targetSessionDate']);
+  assert.equal(Object.hasOwn(result.discovery, 'publishedAt'), false);
+  assert.equal(Object.hasOwn(result.discovery, 'articleText'), false);
+  assert.equal(Object.hasOwn(result.discovery, 'evidenceRef'), false);
+});
