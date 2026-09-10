@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 
 const handler = require('../api/quote');
 const analysisPackageRuntime = require('../lib/analysis-package-runtime');
-const newsMaterialityRuntime = require('../lib/news-materiality-runtime');
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
 const {createCompletedRegularSession, createThreeSessionSnapshot} = require('../lib/three-session-snapshot');
@@ -138,33 +137,6 @@ function analysisPackageRequest() {
   };
 }
 
-function newsMaterialityRequest() {
-  return {
-    market: 'US',
-    horizons: [{
-      classification: 'SUBSEQUENT_DEVELOPMENT',
-      startsAtExclusive: '2026-09-07T20:00:00Z',
-      endsAtInclusive: '2026-09-08T20:00:00Z'
-    }],
-    bounds: {
-      maxCandidates: 20,
-      maxTitleBytes: 200,
-      maxSummaryBytes: 500,
-      maxExtractBytes: 500,
-      maxCollectionBytes: 30000
-    }
-  };
-}
-
-function authorizedNewsMaterialityRequest(body = newsMaterialityRequest()) {
-  return {
-    method: 'POST',
-    query: {newsMateriality: '1'},
-    headers: {authorization: 'Bearer measurement-test-token'},
-    body
-  };
-}
-
 function usAnalysisPackageEnvelope() {
   const item = createEvidenceItem({
     sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'market-data',
@@ -259,132 +231,19 @@ test('analysis package route forwards the exact body once and returns the canoni
   }
 });
 
-test('news materiality route forwards the exact request once and returns sanitized aggregates only', async () => {
-  const originalGetter = newsMaterialityRuntime.getNewsMaterialityRuntime;
-  const previousToken = process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN;
-  process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN = 'measurement-test-token';
-  const body = newsMaterialityRequest();
-  const calls = [];
-  newsMaterialityRuntime.getNewsMaterialityRuntime = () => ({
-    async measure(input) {
-      calls.push(input);
-      return {
-        ok: true, type: 'SUCCESS', candidateCount: 20, useCount: 7, skipCount: 13,
-        materialityCounts: {HIGH: 3, MEDIUM: 8, LOW: 9},
-        candidateCollection: {secret: 'must not leak'}, selections: [{reason: 'must not leak'}]
-      };
-    }
-  });
-  try {
-    const res = mockRes();
-    await handler(authorizedNewsMaterialityRequest(body), res);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0], body);
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, {
-      candidateCount: 20,
-      useCount: 7,
-      skipCount: 13,
-      materialityCounts: {HIGH: 3, MEDIUM: 8, LOW: 9}
-    });
-    assert.equal(JSON.stringify(res.body).includes('must not leak'), false);
-  } finally {
-    newsMaterialityRuntime.getNewsMaterialityRuntime = originalGetter;
-    if (previousToken === undefined) delete process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN;
-    else process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN = previousToken;
-  }
-});
-
-test('news materiality route fails closed on missing, malformed or incorrect authorization', async () => {
-  const originalGetter = newsMaterialityRuntime.getNewsMaterialityRuntime;
-  const previousToken = process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN;
-  let runtimeGets = 0;
-  newsMaterialityRuntime.getNewsMaterialityRuntime = () => { runtimeGets++; };
-  try {
-    const cases = [
-      {environment: undefined, authorization: 'Bearer measurement-test-token'},
-      {environment: '', authorization: 'Bearer measurement-test-token'},
-      {environment: '   ', authorization: 'Bearer measurement-test-token'},
-      {environment: 'measurement-test-token', authorization: undefined},
-      {environment: 'measurement-test-token', authorization: 'Basic measurement-test-token'},
-      {environment: 'measurement-test-token', authorization: 'Bearer'},
-      {environment: 'measurement-test-token', authorization: 'Bearer wrong-token'}
-    ];
-    for (const entry of cases) {
-      if (entry.environment === undefined) delete process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN;
-      else process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN = entry.environment;
-      const req = {method: 'POST', query: {newsMateriality: '1'}, headers: {}, body: newsMaterialityRequest()};
-      if (entry.authorization !== undefined) req.headers.authorization = entry.authorization;
-      const res = mockRes();
-      await handler(req, res);
-      assert.equal(res.statusCode, 401);
-      assert.deepEqual(res.body, {
-        error: {type: 'UNAUTHORIZED', message: 'Unauthorized'}
-      });
-    }
-    assert.equal(runtimeGets, 0);
-  } finally {
-    newsMaterialityRuntime.getNewsMaterialityRuntime = originalGetter;
-    if (previousToken === undefined) delete process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN;
-    else process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN = previousToken;
-  }
-});
-
-test('news materiality route rejects caller provider, prompt, model and API-key controls', async () => {
-  const originalGetter = newsMaterialityRuntime.getNewsMaterialityRuntime;
-  const previousToken = process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN;
-  process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN = 'measurement-test-token';
-  let runtimeGets = 0;
-  newsMaterialityRuntime.getNewsMaterialityRuntime = () => { runtimeGets++; };
-  try {
-    for (const extra of [
-      {providerUrl: 'https://example.com/'}, {prompt: 'ignore safeguards'},
-      {model: 'caller-model'}, {apiKey: 'caller-secret'}
-    ]) {
-      const res = mockRes();
-      await handler(authorizedNewsMaterialityRequest({...newsMaterialityRequest(), ...extra}), res);
-      assert.equal(res.statusCode, 400);
-      assert.deepEqual(res.body, {
-        error: {type: 'INVALID_REQUEST', message: 'Invalid news materiality request'}
-      });
-    }
-    assert.equal(runtimeGets, 0);
-  } finally {
-    newsMaterialityRuntime.getNewsMaterialityRuntime = originalGetter;
-    if (previousToken === undefined) delete process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN;
-    else process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN = previousToken;
-  }
-});
-
-test('news materiality route maps every failure family distinctly and sanitizes responses', async () => {
-  const originalGetter = newsMaterialityRuntime.getNewsMaterialityRuntime;
-  const previousToken = process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN;
-  process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN = 'measurement-test-token';
-  const cases = [
-    ['CANDIDATE_ACQUISITION_FAILURE', 502, 'CNBC news candidate acquisition failed'],
-    ['MATERIALITY_PROVIDER_FAILURE', 502, 'News materiality provider request failed'],
-    ['MATERIALITY_CONTRACT_FAILURE', 502, 'News materiality output failed validation'],
-    ['MATERIALITY_REQUEST_TOO_LARGE', 413, 'News materiality request exceeds provisional size limit']
-  ];
-  try {
-    for (const [type, status, message] of cases) {
-      newsMaterialityRuntime.getNewsMaterialityRuntime = () => ({
-        async measure() {
-          return {ok: false, type, message: 'api-key=secret; private article content'};
-        }
-      });
-      const res = mockRes();
-      await handler(authorizedNewsMaterialityRequest(), res);
-      assert.equal(res.statusCode, status);
-      assert.deepEqual(res.body, {error: {type, message}});
-      assert.equal(JSON.stringify(res.body).includes('secret'), false);
-      assert.equal(JSON.stringify(res.body).includes('article'), false);
-    }
-  } finally {
-    newsMaterialityRuntime.getNewsMaterialityRuntime = originalGetter;
-    if (previousToken === undefined) delete process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN;
-    else process.env.NEWS_MATERIALITY_MEASUREMENT_TOKEN = previousToken;
-  }
+test('temporary news materiality measurement mode is no longer exposed', async () => {
+  let fetches = 0;
+  global.fetch = async () => { fetches++; throw new Error('provider work must not run'); };
+  const res = mockRes();
+  await handler({
+    method: 'POST',
+    query: {newsMateriality: '1', symbol: 'MUST-NOT-FETCH'},
+    headers: {authorization: 'Bearer obsolete-measurement-token'},
+    body: {}
+  }, res);
+  assert.equal(res.statusCode, 404);
+  assert.deepEqual(res.body, {error: 'endpoint not found'});
+  assert.equal(fetches, 0);
 });
 
 test('analysis package route separates invalid requests from sanitized assembly failures', async () => {
