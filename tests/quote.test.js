@@ -46,6 +46,21 @@ function response(body, ok = true, status = 200) {
   return { ok, status, async json() { return body; } };
 }
 
+function anthropicDiscoveryResponse(content, usage = {
+  input_tokens: 100,
+  output_tokens: 20,
+  server_tool_use: {web_search_requests: 1}
+}) {
+  const body = {content, usage};
+  return {
+    ok: true,
+    status: 200,
+    headers: {get: name => name === 'request-id' ? 'req_yahoo_recap_123' : null},
+    async json() { return body; },
+    clone() { return {async json() { return body; }}; }
+  };
+}
+
 function mockRes() {
   return {
     statusCode: null,
@@ -244,6 +259,201 @@ test('temporary news materiality measurement mode is no longer exposed', async (
   assert.equal(res.statusCode, 404);
   assert.deepEqual(res.body, {error: 'endpoint not found'});
   assert.equal(fetches, 0);
+});
+
+test('temporary Yahoo recap discovery rejects unauthorized requests before validation or provider work', async () => {
+  const previousToken = process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+  let fetches = 0;
+  global.fetch = async () => { fetches++; throw new Error('must not run'); };
+  try {
+    for (const testCase of [
+      {environment: undefined, headers: {}},
+      {environment: '', headers: {authorization: 'Bearer supplied'}},
+      {environment: 'expected', headers: {}},
+      {environment: 'expected', headers: {authorization: 'Basic expected'}},
+      {environment: 'expected', headers: {authorization: 'Bearer wrong'}}
+    ]) {
+      if (testCase.environment === undefined) delete process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+      else process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN = testCase.environment;
+      const res = mockRes();
+      await handler({
+        method: 'POST', query: {yahooRecapDiscoveryValidation: '1'},
+        headers: testCase.headers, body: {targetSessionDate: 'invalid-before-auth'}
+      }, res);
+      assert.equal(res.statusCode, 401);
+      assert.deepEqual(res.body, {error: {type: 'UNAUTHORIZED', message: 'Unauthorized'}});
+    }
+    assert.equal(fetches, 0);
+  } finally {
+    if (previousToken === undefined) delete process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+    else process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN = previousToken;
+  }
+});
+
+test('temporary Yahoo recap discovery rejects malformed input and caller overrides before provider work', async () => {
+  const previousToken = process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+  process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN = 'validation-token';
+  let fetches = 0;
+  global.fetch = async () => { fetches++; throw new Error('must not run'); };
+  try {
+    for (const body of [
+      {},
+      {targetSessionDate: '2026-02-30'},
+      {targetSessionDate: '2026-09-09', model: 'caller-model'},
+      {targetSessionDate: '2026-09-09', tools: []},
+      {targetSessionDate: '2026-09-09', allowed_domains: ['example.com']},
+      {targetSessionDate: '2026-09-09', max_uses: 99},
+      {targetSessionDate: '2026-09-09', prompt: 'caller prompt'},
+      {targetSessionDate: '2026-09-09', url: 'https://example.com/'}
+    ]) {
+      const res = mockRes();
+      await handler({
+        method: 'POST', query: {yahooRecapDiscoveryValidation: '1'},
+        headers: {authorization: 'Bearer validation-token'}, body
+      }, res);
+      assert.equal(res.statusCode, 400);
+      assert.deepEqual(res.body, {
+        error: {type: 'INVALID_REQUEST', message: 'Invalid Yahoo recap discovery validation request'}
+      });
+    }
+    assert.equal(fetches, 0);
+  } finally {
+    if (previousToken === undefined) delete process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+    else process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN = previousToken;
+  }
+});
+
+test('temporary Yahoo recap discovery returns one normalized success and sanitized diagnostics', async () => {
+  const previousToken = process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN = 'validation-token';
+  process.env.ANTHROPIC_API_KEY = 'anthropic-secret';
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push({url, options});
+    return anthropicDiscoveryResponse([{
+      type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search',
+      input: {query: 'private search content'}
+    }, {
+      type: 'web_search_tool_result', tool_use_id: 'srvtoolu_1',
+      content: [{
+        type: 'web_search_result',
+        title: 'Stock market today: US stocks finish the session',
+        url: 'https://finance.yahoo.com/markets/live/stock-market-today-valid.html?tracking=1',
+        encrypted_content: 'private result content'
+      }]
+    }, {type: 'text', text: 'private narrative'}]);
+  };
+  try {
+    const res = mockRes();
+    await handler({
+      method: 'POST', query: {yahooRecapDiscoveryValidation: '1'},
+      headers: {authorization: 'Bearer validation-token'},
+      body: {targetSessionDate: '2026-09-09'}
+    }, res);
+    assert.equal(calls.length, 1);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body.outcome, {
+      type: 'SUCCESS',
+      targetSessionDate: '2026-09-09',
+      title: 'Stock market today: US stocks finish the session',
+      url: 'https://finance.yahoo.com/markets/live/stock-market-today-valid.html'
+    });
+    assert.equal(res.body.diagnostics.requestId, 'req_yahoo_recap_123');
+    assert.equal(typeof res.body.diagnostics.requestBytes, 'number');
+    assert.equal(typeof res.body.diagnostics.elapsedMs, 'number');
+    assert.deepEqual(res.body.diagnostics.usage, {input_tokens: 100, output_tokens: 20});
+    assert.equal(res.body.diagnostics.searchRequestCount, 1);
+    assert.equal(res.body.diagnostics.fetchCount, 1);
+    assert.deepEqual(res.body.diagnostics.observedBlockTypes, [
+      'server_tool_use', 'web_search_tool_result', 'web_search_result', 'text'
+    ]);
+    const serialized = JSON.stringify(res.body);
+    for (const secret of [
+      'validation-token', 'anthropic-secret', 'private search content',
+      'private result content', 'private narrative', 'tracking=1'
+    ]) assert.equal(serialized.includes(secret), false);
+    const request = JSON.parse(calls[0].options.body);
+    assert.deepEqual(request.tools, [{
+      type: 'web_search_20250305', name: 'web_search', max_uses: 1,
+      allowed_domains: ['finance.yahoo.com']
+    }]);
+  } finally {
+    if (previousToken === undefined) delete process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+    else process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN = previousToken;
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+  }
+});
+
+test('temporary Yahoo recap discovery returns normalized not found without content leakage', async () => {
+  const previousToken = process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN = 'validation-token';
+  process.env.ANTHROPIC_API_KEY = 'anthropic-secret';
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    return anthropicDiscoveryResponse([{
+      type: 'web_search_tool_result', tool_use_id: 'srvtoolu_1',
+      content: [{type: 'web_search_result', title: 'Unrelated', url: 'https://finance.yahoo.com/topic/news'}]
+    }]);
+  };
+  try {
+    const res = mockRes();
+    await handler({
+      method: 'POST', query: {yahooRecapDiscoveryValidation: '1'},
+      headers: {authorization: 'Bearer validation-token'},
+      body: {targetSessionDate: '2026-09-09'}
+    }, res);
+    assert.equal(calls, 1);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body.outcome, {type: 'NOT_FOUND', targetSessionDate: '2026-09-09'});
+    assert.equal(JSON.stringify(res.body).includes('Unrelated'), false);
+    assert.equal(JSON.stringify(res.body).includes('/topic/news'), false);
+  } finally {
+    if (previousToken === undefined) delete process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+    else process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN = previousToken;
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+  }
+});
+
+test('temporary Yahoo recap discovery preserves deterministic tool failures without raw content', async () => {
+  const previousToken = process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN = 'validation-token';
+  process.env.ANTHROPIC_API_KEY = 'anthropic-secret';
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    return anthropicDiscoveryResponse([{
+      type: 'web_search_tool_result', tool_use_id: 'srvtoolu_1',
+      content: {type: 'web_search_tool_result_error', error_code: 'private-provider-code'}
+    }]);
+  };
+  try {
+    const res = mockRes();
+    await handler({
+      method: 'POST', query: {yahooRecapDiscoveryValidation: '1'},
+      headers: {authorization: 'Bearer validation-token'},
+      body: {targetSessionDate: '2026-09-09'}
+    }, res);
+    assert.equal(calls, 1);
+    assert.equal(res.statusCode, 502);
+    assert.deepEqual(res.body.outcome, {
+      type: 'SEARCH_TOOL_FAILURE', targetSessionDate: '2026-09-09'
+    });
+    assert.deepEqual(res.body.diagnostics.observedBlockTypes, [
+      'web_search_tool_result', 'web_search_tool_result_error'
+    ]);
+    assert.equal(JSON.stringify(res.body).includes('private-provider-code'), false);
+  } finally {
+    if (previousToken === undefined) delete process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+    else process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN = previousToken;
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+  }
 });
 
 test('analysis package route separates invalid requests from sanitized assembly failures', async () => {

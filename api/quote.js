@@ -1,5 +1,10 @@
 const {invokeClaudeAnalysis} = require('../lib/claude-analysis-invocation');
+const {createHash, timingSafeEqual} = require('node:crypto');
 const analysisPackageRuntime = require('../lib/analysis-package-runtime');
+const {
+  buildClaudeBoundedNewsDiscoveryRequest,
+  createClaudeBoundedNewsDiscoveryService
+} = require('../lib/claude-bounded-news-discovery');
 const {
   validateUsAnalysisOrchestrationRequest
 } = require('../lib/us-analysis-package-orchestration');
@@ -7,6 +12,64 @@ const {
 const QUOTE_CACHE_TTL_MS = 1500;
 const QUOTE_CACHE_MAX_ENTRIES = 100;
 const quoteCache = new Map();
+const SAFE_ANTHROPIC_BLOCK_TYPES = new Set([
+  'server_tool_use',
+  'web_search_tool_result',
+  'web_search_result',
+  'web_search_tool_result_error',
+  'text'
+]);
+
+function isAuthorizedYahooRecapDiscoveryValidationRequest(req) {
+  const expected = process.env.YAHOO_RECAP_DISCOVERY_VALIDATION_TOKEN;
+  const authorization = req.headers?.authorization;
+  if (typeof expected !== 'string' || !expected.trim()
+      || typeof authorization !== 'string') return false;
+  const match = /^Bearer ([^\s]+)$/i.exec(authorization);
+  if (!match) return false;
+  const suppliedDigest = createHash('sha256').update(match[1], 'utf8').digest();
+  const expectedDigest = createHash('sha256').update(expected, 'utf8').digest();
+  return timingSafeEqual(suppliedDigest, expectedDigest);
+}
+
+function observedAnthropicBlockTypes(envelope) {
+  const types = [];
+  const seen = new Set();
+  function add(value) {
+    const type = SAFE_ANTHROPIC_BLOCK_TYPES.has(value) ? value : 'UNKNOWN_BLOCK_TYPE';
+    if (!seen.has(type)) {
+      seen.add(type);
+      types.push(type);
+    }
+  }
+  if (!envelope || !Array.isArray(envelope.content)) return Object.freeze(types);
+  for (const block of envelope.content) {
+    if (!block || typeof block.type !== 'string') continue;
+    add(block.type);
+    if (block.type === 'web_search_tool_result') {
+      const content = Array.isArray(block.content) ? block.content : [block.content];
+      for (const item of content) {
+        if (item && typeof item.type === 'string') add(item.type);
+      }
+    }
+  }
+  return Object.freeze(types);
+}
+
+function yahooRecapDiscoveryDiagnostics(diagnostics, blockTypes) {
+  const usage = diagnostics?.usage && typeof diagnostics.usage === 'object'
+    ? Object.freeze({...diagnostics.usage})
+    : Object.freeze({});
+  return Object.freeze({
+    requestId: diagnostics?.requestId ?? null,
+    requestBytes: diagnostics?.requestSize?.completeRequestBodyBytes ?? null,
+    elapsedMs: diagnostics?.timing?.invocationTotalMs ?? null,
+    usage,
+    searchRequestCount: diagnostics?.searchRequestCount ?? null,
+    fetchCount: diagnostics?.fetchCount ?? 0,
+    observedBlockTypes: blockTypes
+  });
+}
 
 function pruneQuoteCache(now) {
   for (const [key, entry] of quoteCache) {
@@ -89,6 +152,61 @@ module.exports = async function handler(req, res) {
 
   if (req.method === 'POST' && req.query.newsMateriality === '1') {
     return res.status(404).json({error: 'endpoint not found'});
+  }
+
+  // TEMPORARY: remove immediately after one Production Yahoo recap discovery validation.
+  if (req.method === 'POST' && req.query.yahooRecapDiscoveryValidation === '1') {
+    if (!isAuthorizedYahooRecapDiscoveryValidationRequest(req)) {
+      return res.status(401).json({
+        error: {type: 'UNAUTHORIZED', message: 'Unauthorized'}
+      });
+    }
+    try {
+      buildClaudeBoundedNewsDiscoveryRequest(req.body);
+    } catch (error) {
+      return res.status(400).json({
+        error: {type: 'INVALID_REQUEST', message: 'Invalid Yahoo recap discovery validation request'}
+      });
+    }
+
+    let diagnostics = null;
+    let blockTypes = Object.freeze([]);
+    const discoveryFetch = async (url, options) => {
+      const upstream = await global.fetch(url, options);
+      if (upstream && typeof upstream.clone === 'function') {
+        try {
+          blockTypes = observedAnthropicBlockTypes(await upstream.clone().json());
+        } catch (error) {
+          blockTypes = Object.freeze([]);
+        }
+      }
+      return upstream;
+    };
+    const service = createClaudeBoundedNewsDiscoveryService({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      fetchImpl: discoveryFetch,
+      onDiagnostics(value) {
+        diagnostics = value;
+      }
+    });
+    const result = await service.discoverYahooCompletedSessionRecap(req.body);
+    const publicDiagnostics = yahooRecapDiscoveryDiagnostics(diagnostics, blockTypes);
+    if (result.ok) {
+      const outcome = result.type === 'SUCCESS'
+        ? Object.freeze({
+          type: result.type,
+          targetSessionDate: result.discovery.targetSessionDate,
+          title: result.discovery.title,
+          url: result.discovery.url
+        })
+        : Object.freeze({type: result.type, targetSessionDate: req.body.targetSessionDate});
+      return res.status(200).json({outcome, diagnostics: publicDiagnostics});
+    }
+    const status = result.type === 'REQUEST_TOO_LARGE' ? 413 : 502;
+    return res.status(status).json({
+      outcome: {type: result.type, targetSessionDate: req.body.targetSessionDate},
+      diagnostics: publicDiagnostics
+    });
   }
 
   // ── Canonical analysis package endpoint (POST ?analysisPackage=1) ────────
