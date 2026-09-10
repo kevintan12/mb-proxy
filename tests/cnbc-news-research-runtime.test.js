@@ -30,7 +30,7 @@ test('defines one deeply immutable production bounds bundle', () => {
       maxExtractBytes: 2048, maxCollectionBytes: 32768
     },
     articleRetrievalBounds: {
-      timeoutMs: 4000, maxResponseBytes: 524288, maxArticleTextBytes: 8192,
+      timeoutMs: 4000, maxResponseBytes: 1048576, maxArticleTextBytes: 8192,
       maxTitleBytes: 512, maxResultBytes: 12288
     },
     evidenceConstructionBounds: {
