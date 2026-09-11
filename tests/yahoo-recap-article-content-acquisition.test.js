@@ -15,6 +15,7 @@ const bounds = Object.freeze({
   timeoutMs: 4000,
   maxResponseBytes: 1258291,
   maxHeadlineBytes: 512,
+  maxPublisherNameBytes: 256,
   maxArticleTextBytes: 8192,
   maxResultBytes: 12288
 });
@@ -47,6 +48,7 @@ function article(overrides = {}) {
     datePublished: '2026-09-09T16:30:00-04:00',
     dateModified: '2026-09-09T17:00:00-04:00',
     mainEntityOfPage: {'@type': 'WebPage', '@id': canonicalUrl},
+    publisher: {'@type': 'Organization', name: 'Yahoo Finance'},
     articleBody: 'Stocks <b>rose</b> after&nbsp;new data.\nInvestors reassessed risk.',
     ...overrides
   };
@@ -83,10 +85,11 @@ function service(fetchImpl) {
 
 test('exports the explicit bound and normalized article key contracts', () => {
   assert.deepEqual(YAHOO_RECAP_ARTICLE_CONTENT_BOUND_KEYS, [
-    'timeoutMs', 'maxResponseBytes', 'maxHeadlineBytes', 'maxArticleTextBytes', 'maxResultBytes'
+    'timeoutMs', 'maxResponseBytes', 'maxHeadlineBytes', 'maxPublisherNameBytes',
+    'maxArticleTextBytes', 'maxResultBytes'
   ]);
   assert.deepEqual(YAHOO_RECAP_ARTICLE_CONTENT_KEYS, [
-    'sourceId', 'canonicalUrl', 'headline', 'publishedAt', 'updatedAt',
+    'sourceId', 'publisher', 'canonicalUrl', 'headline', 'publishedAt', 'updatedAt',
     'targetSessionDate', 'articleText'
   ]);
   assert.equal(Object.isFrozen(YAHOO_RECAP_ARTICLE_CONTENT_BOUND_KEYS), true);
@@ -109,6 +112,7 @@ test('extracts one immutable provider-owned Yahoo article result', async () => {
     type: 'SUCCESS',
     articleContent: {
       sourceId: 'us.yahoo-finance',
+      publisher: {name: 'Yahoo Finance'},
       canonicalUrl,
       headline: 'Stock market today: September 9 recap',
       publishedAt: '2026-09-09T20:30:00.000Z',
@@ -119,6 +123,68 @@ test('extracts one immutable provider-owned Yahoo article result', async () => {
   });
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.articleContent), true);
+  assert.equal(Object.isFrozen(result.articleContent.publisher), true);
+});
+
+test('preserves explicit structured publisher identity independently of Yahoo hosting', async () => {
+  const result = await service(async () => response(html(article({
+    publisher: {'@type': 'Organization', name: 'Independent Publisher'}
+  })))).acquireArticleContent(input());
+  assert.equal(result.type, 'SUCCESS');
+  assert.deepEqual(result.articleContent.publisher, {name: 'Independent Publisher'});
+  assert.equal(result.articleContent.sourceId, 'us.yahoo-finance');
+  assert.notEqual(result.articleContent.publisher.name, 'Yahoo Finance');
+});
+
+test('fails closed for missing, malformed, blank, padded, or oversized publisher metadata', async () => {
+  const cases = [
+    undefined,
+    null,
+    'Yahoo Finance',
+    [],
+    {},
+    {name: ''},
+    {name: ' Yahoo Finance'},
+    {name: 'x'.repeat(257)},
+    {alternateName: 'Yahoo Finance'}
+  ];
+  for (const publisher of cases) {
+    const value = article();
+    if (publisher === undefined) delete value.publisher;
+    else value.publisher = publisher;
+    const result = await service(async () => response(html(value))).acquireArticleContent(input());
+    assert.equal(result.type, 'INVALID_METADATA');
+    assert.equal(result.articleContent, null);
+  }
+});
+
+test('measures the publisher-name limit as 256 UTF-8 bytes', async () => {
+  const exactName = 'é'.repeat(128);
+  const accepted = await service(async () => response(html(article({
+    publisher: {name: exactName}
+  })))).acquireArticleContent(input());
+  assert.equal(Buffer.byteLength(exactName, 'utf8'), 256);
+  assert.equal(accepted.type, 'SUCCESS');
+  assert.equal(accepted.articleContent.publisher.name, exactName);
+
+  const rejected = await service(async () => response(html(article({
+    publisher: {name: `${exactName}a`}
+  })))).acquireArticleContent(input());
+  assert.equal(rejected.type, 'INVALID_METADATA');
+});
+
+test('skips an invalid-publisher body node when a later compatible publisher is valid', async () => {
+  const invalid = article({publisher: {name: ' '}, articleBody: 'Invalid publisher body.'});
+  const valid = article({
+    '@type': 'LiveBlogPosting',
+    publisher: {name: 'Third-Party Publisher'},
+    articleBody: 'Valid publisher body.'
+  });
+  const result = await service(async () => response(html([invalid, valid])))
+    .acquireArticleContent(input());
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(result.articleContent.articleText, 'Valid publisher body.');
+  assert.deepEqual(result.articleContent.publisher, {name: 'Third-Party Publisher'});
 });
 
 test('requires exact frozen discovery and validation objects before fetch', async () => {
