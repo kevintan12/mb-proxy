@@ -105,6 +105,28 @@ test('derives provenance and rejects every caller-supplied provenance value', ()
   }
 });
 
+test('preserves provider-owned publisher only for US Yahoo Finance news evidence', () => {
+  const yahooNews = createEvidenceItem({
+    sourceId: 'us.yahoo-finance',
+    market: 'US',
+    evidenceCategory: 'news',
+    title: 'US market recap',
+    summary: 'Stocks ended lower.',
+    canonicalUrl: 'https://finance.yahoo.com/markets/live/stock-market-today-example.html',
+    publishedAt: '2026-09-09T20:03:54.000Z',
+    symbols: [],
+    publisher: 'Third-Party Publisher'
+  });
+  assert.equal(yahooNews.provenance.publisher, 'Third-Party Publisher');
+  assert.equal(validateEvidenceItem(yahooNews).valid, true);
+  assert.equal(validateEvidenceItemInput({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'US market recap', canonicalUrl: 'https://finance.yahoo.com/example',
+    publishedAt: '2026-09-09T20:03:54.000Z'
+  }).valid, false);
+  assert.equal(validateEvidenceItemInput({...validInput(), publisher: 'Spoofed'}).valid, false);
+});
+
 test('canonicalizes summary and symbols defaults and copies supplied values', () => {
   const defaulted = createEvidenceItem(validInput());
   assert.equal(defaulted.summary, null);

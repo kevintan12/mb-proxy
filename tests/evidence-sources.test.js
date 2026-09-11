@@ -74,6 +74,9 @@ test('market, tier, classification and evidence filters compose', () => {
     listSources({market: 'SG', sourceCategory: 'exchange-disclosure'}).map(source => source.id),
     ['sg.sgx-sgxnet']
   );
+  assert.deepEqual(getSourceById('us.yahoo-finance').evidenceCategories, ['market-data', 'news']);
+  assert.equal(getSourceById('sg.yahoo-finance').evidenceCategories.includes('news'), false);
+  assert.equal(getSourceById('hk.yahoo-finance').evidenceCategories.includes('news'), false);
 });
 
 test('applicability market is distinct from provider-neutral source jurisdiction', () => {
