@@ -264,6 +264,111 @@ test('skips a bodyless NewsArticle and selects the later compatible LiveBlogPost
   assert.doesNotMatch(result.articleContent.articleText, /Earlier update|must not be returned/);
 });
 
+test('reconciles Sep 10-style publisher and dateModified from a compatible bodyless root', async () => {
+  const metadataRoot = article();
+  delete metadataRoot.articleBody;
+  const bodyRoot = article({
+    '@type': 'LiveBlogPosting',
+    articleBody: 'The live recap closed with gains.',
+    liveBlogUpdate: [{
+      '@type': 'BlogPosting',
+      articleBody: 'This update is not part of the root article body.'
+    }]
+  });
+  delete bodyRoot.dateModified;
+  delete bodyRoot.publisher;
+
+  const result = await service(async () => response(html([metadataRoot, bodyRoot])))
+    .acquireArticleContent(input());
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(result.articleContent.articleText, 'The live recap closed with gains.');
+  assert.equal(result.articleContent.updatedAt, '2026-09-09T21:00:00.000Z');
+  assert.deepEqual(result.articleContent.publisher, {name: 'Yahoo Finance'});
+  assert.doesNotMatch(result.articleContent.articleText, /not part of the root/);
+});
+
+test('allows identical compatible-root metadata but rejects publisher and dateModified conflicts', async () => {
+  const matching = await service(async () => response(html([
+    article({articleBody: undefined}),
+    article({'@type': 'LiveBlogPosting', articleBody: 'Selected root body.'})
+  ]))).acquireArticleContent(input());
+  assert.equal(matching.type, 'SUCCESS');
+  assert.equal(matching.articleContent.articleText, 'Selected root body.');
+
+  const publisherConflict = await service(async () => response(html([
+    article({articleBody: undefined}),
+    article({
+      '@type': 'LiveBlogPosting',
+      publisher: {name: 'Different Publisher'},
+      articleBody: 'Selected root body.'
+    })
+  ]))).acquireArticleContent(input());
+  assert.equal(publisherConflict.type, 'INVALID_METADATA');
+
+  const modifiedConflict = await service(async () => response(html([
+    article({articleBody: undefined}),
+    article({
+      '@type': 'LiveBlogPosting',
+      dateModified: '2026-09-09T17:01:00-04:00',
+      articleBody: 'Selected root body.'
+    })
+  ]))).acquireArticleContent(input());
+  assert.equal(modifiedConflict.type, 'INVALID_METADATA');
+});
+
+test('inherits metadata only from identity-compatible roots', async () => {
+  const bodyRoot = article({
+    '@type': 'LiveBlogPosting',
+    articleBody: 'Selected root body.'
+  });
+  delete bodyRoot.publisher;
+
+  for (const incompatibleMetadata of [
+    article({
+      mainEntityOfPage: {'@id': canonicalUrl.replace('example', 'other')},
+      articleBody: undefined
+    }),
+    article({headline: 'Different recap', articleBody: undefined}),
+    article({datePublished: '2026-09-09T16:31:00-04:00', articleBody: undefined})
+  ]) {
+    const result = await service(async () => response(html([incompatibleMetadata, bodyRoot])))
+      .acquireArticleContent(input());
+    assert.equal(result.type, 'INVALID_METADATA');
+  }
+});
+
+test('body-root metadata is retained only when compatible siblings do not conflict', async () => {
+  const bodyRoot = article({
+    '@type': 'LiveBlogPosting',
+    publisher: {name: 'Body Publisher'},
+    articleBody: 'Body-owned article text.'
+  });
+  const sameMetadata = article({
+    publisher: {name: 'Body Publisher'},
+    articleBody: undefined
+  });
+  const success = await service(async () => response(html([bodyRoot, sameMetadata])))
+    .acquireArticleContent(input());
+  assert.equal(success.type, 'SUCCESS');
+  assert.deepEqual(success.articleContent.publisher, {name: 'Body Publisher'});
+
+  const conflict = await service(async () => response(html([
+    bodyRoot,
+    article({publisher: {name: 'Sibling Publisher'}, articleBody: undefined})
+  ]))).acquireArticleContent(input());
+  assert.equal(conflict.type, 'INVALID_METADATA');
+});
+
+test('fails when no compatible root can supply required publisher metadata', async () => {
+  const bodyRoot = article({'@type': 'LiveBlogPosting'});
+  delete bodyRoot.publisher;
+  const bodylessRoot = article({articleBody: undefined});
+  delete bodylessRoot.publisher;
+  const result = await service(async () => response(html([bodylessRoot, bodyRoot])))
+    .acquireArticleContent(input());
+  assert.equal(result.type, 'INVALID_METADATA');
+});
+
 test('selects the first compatible body-bearing node in JSON-LD document order', async () => {
   const bodyless = article({articleBody: '   '});
   const firstBody = article({'@type': 'LiveBlogPosting', articleBody: 'First compatible body.'});
@@ -294,9 +399,12 @@ test('does not use blank LiveBlogPosting roots or concatenate liveBlogUpdate bod
     '@type': 'LiveBlogPosting',
     articleBody: '<b> </b>',
     liveBlogUpdate: [{
-      '@type': 'BlogPosting',
-      headline: 'Update body',
-      datePublished: '2026-09-09T15:00:00-04:00',
+      '@type': 'NewsArticle',
+      headline: 'Stock market today: September 9 recap',
+      datePublished: '2026-09-09T16:30:00-04:00',
+      dateModified: '2026-09-09T17:00:00-04:00',
+      mainEntityOfPage: {'@id': canonicalUrl},
+      publisher: {name: 'Yahoo Finance'},
       articleBody: 'Available only in an update.'
     }]
   });
