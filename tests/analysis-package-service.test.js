@@ -214,6 +214,40 @@ test('fails closed for acquisition failure, missing material and empty acquired 
   }).assemble(request()), /unavailable/);
 });
 
+test('reports only the sanitized fatal package-assembly stage and preserves the thrown failure', async () => {
+  const cases = [
+    'FUTURE_DATED_EVIDENCE_VALIDATION',
+    'EVIDENCE_COLLECTION_CONSTRUCTION'
+  ];
+  for (const failureStage of cases) {
+    const diagnostics = [];
+    const expected = new Error('sensitive failure detail');
+    const packageService = createAnalysisPackageService({
+      acquireAnalysisMaterial: async (context, setFailureStage) => {
+        setFailureStage(failureStage);
+        throw expected;
+      },
+      now: () => new Date(FIXED_NOW),
+      onDiagnostics(value) { diagnostics.push(value); }
+    });
+    await assert.rejects(packageService.assemble(request()), error => error === expected);
+    assert.deepEqual(diagnostics, [{stage: 'analysisPackageAssemblyFailure', failureStage}]);
+    assert.equal(Object.isFrozen(diagnostics[0]), true);
+    assert.equal(JSON.stringify(diagnostics).includes('sensitive failure detail'), false);
+  }
+
+  const diagnostics = [];
+  await assert.rejects(createAnalysisPackageService({
+    acquireAnalysisMaterial: async () => null,
+    now: () => new Date(FIXED_NOW),
+    onDiagnostics(value) { diagnostics.push(value); }
+  }).assemble(request()), /unavailable/);
+  assert.deepEqual(diagnostics, [{
+    stage: 'analysisPackageAssemblyFailure',
+    failureStage: 'ACQUIRED_MATERIAL_VALIDATION'
+  }]);
+});
+
 test('returns a complete canonical envelope with server-derived fields', async () => {
   const output = await service().assemble(request('SG', {userTimezone: 'UTC'}));
   assert.equal(validateClaudeAnalysisInput(output), true);
