@@ -283,6 +283,52 @@ test('reports request sizes and optional usage on later contract failure', async
   }
 });
 
+test('reports only sanitized Section 4 structure when populated content lacks evidence', async () => {
+  const input = canonicalInput();
+  const invalidOutput = normalOutput(input);
+  invalidOutput.sections[3].content = 'PRIVATE SECTION PROSE';
+  invalidOutput.sections[3].evidenceRefs = [];
+  invalidOutput.sections[3].telemetryRefs = ['t1'];
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input,
+    apiKey: 'test-key',
+    onDiagnostics(value) { diagnostics.push(value); },
+    fetchImpl: async () => anthropicResponse(invalidOutput, {
+      headers: {get: name => name === 'request-id' ? 'req_contract_4' : null},
+      async json() {
+        return {
+          content: [{type: 'text', text: JSON.stringify(invalidOutput)}],
+          usage: {input_tokens: 321, output_tokens: 45}
+        };
+      }
+    })
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    type: 'CONTRACT_FAILURE',
+    message: 'Invalid Claude analysis output: sections[3]: factual content requires supplied evidence',
+    upstreamStatus: 200
+  });
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(diagnostics[0].contractFailure, {
+    sectionIndex: 3,
+    sectionName: 'STOCKS & SECTORS IN FOCUS',
+    contentIsNull: false,
+    evidenceRefCount: 0,
+    telemetryRefCount: 1
+  });
+  assert.equal(diagnostics[0].requestId, 'req_contract_4');
+  assert.deepEqual(diagnostics[0].usage, {input_tokens: 321, output_tokens: 45});
+  const serialized = JSON.stringify(diagnostics[0]);
+  for (const forbidden of [
+    'PRIVATE SECTION PROSE', '亚洲 market update', '^STI', 'https://',
+    'Analyze only', 'test-key'
+  ]) assert.equal(serialized.includes(forbidden), false, forbidden);
+  assert.equal(Object.isFrozen(diagnostics[0].contractFailure), true);
+});
+
 test('gives Claude explicit validator-sensitive Section 5 and Further Readings instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [

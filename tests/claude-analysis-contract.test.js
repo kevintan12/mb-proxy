@@ -509,6 +509,21 @@ test('rejects reordered sections, unknown references, model URLs and mismatched 
   assert.equal(validateClaudeAnalysisOutput(telemetryOnly, input).valid, false);
 });
 
+test('rejects populated Section 4 with telemetry but no supplied evidence reference', () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  output.sections[3].content = 'A factual stocks and sectors assessment.';
+  output.sections[3].evidenceRefs = [];
+  output.sections[3].telemetryRefs = ['t1'];
+  assert.deepEqual(validateClaudeAnalysisOutput(output, input).errors, [
+    'sections[3]: factual content requires supplied evidence'
+  ]);
+  assert.throws(
+    () => createClaudeAnalysisOutput(output, input),
+    /^TypeError: Invalid Claude analysis output: sections\[3\]: factual content requires supplied evidence$/
+  );
+});
+
 test('enforces NORMAL, DEGRADED and FAILED semantics separately from contract failure', () => {
   const input = canonicalInput();
   const degradedSections = sections();
