@@ -53,8 +53,7 @@ test('builds the exact fixed Yahoo completed-session discovery profile', () => {
   assert.equal(request.model, 'claude-haiku-4-5-20251001');
   assert.equal(request.system, SYSTEM_PROMPT);
   assert.equal(request.messages.length, 1);
-  assert.match(request.messages[0].content, /us stock market today yahoo finance 2026-09-09/);
-  assert.match(request.messages[0].content, /completed trading session 2026-09-09/);
+  assert.equal(request.messages[0].content, 'Yahoo US stock market today September 9 2026');
   assert.deepEqual(request.tools, [{
     type: 'web_search_20250305',
     name: 'web_search',
@@ -65,6 +64,19 @@ test('builds the exact fixed Yahoo completed-session discovery profile', () => {
   assert.equal(CLAUDE_BOUNDED_NEWS_DISCOVERY_MAX_RESULTS_INSPECTED, 10);
   assert.equal(Object.isFrozen(request), true);
   assert.equal(Object.isFrozen(request.tools[0].allowed_domains), true);
+});
+
+test('formats canonical dates with full English month names and unpadded days', () => {
+  assert.equal(
+    buildClaudeBoundedNewsDiscoveryRequest({targetSessionDate: '2026-01-01'})
+      .messages[0].content,
+    'Yahoo US stock market today January 1 2026'
+  );
+  assert.equal(
+    buildClaudeBoundedNewsDiscoveryRequest({targetSessionDate: '2026-12-31'})
+      .messages[0].content,
+    'Yahoo US stock market today December 31 2026'
+  );
 });
 
 test('rejects non-canonical context and caller-owned overrides', async () => {
@@ -102,14 +114,18 @@ test('accepts current and legacy Yahoo recap URL families and canonicalizes trac
     assert.equal(calls, 1);
     assert.equal(result.ok, true);
     assert.equal(result.type, 'SUCCESS');
-    assert.deepEqual(result.discovery, {
-      title: 'Stock market today: US stocks close after the session',
-      url: `https://finance.yahoo.com${path}`,
-      discoveredVia: 'ANTHROPIC_WEB_SEARCH',
-      targetSessionDate: '2026-09-09'
-    });
+    assert.deepEqual(result.candidates, [{
+      rank: 1,
+      discovery: {
+        title: 'Stock market today: US stocks close after the session',
+        url: `https://finance.yahoo.com${path}`,
+        discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+        targetSessionDate: '2026-09-09'
+      }
+    }]);
     assert.equal(Object.isFrozen(result), true);
-    assert.equal(Object.isFrozen(result.discovery), true);
+    assert.equal(Object.isFrozen(result.candidates), true);
+    assert.equal(Object.isFrozen(result.candidates[0].discovery), true);
   }
 });
 
@@ -124,10 +140,10 @@ test('rejects non-Yahoo, non-HTTPS, malformed, and unrelated Yahoo results as no
   ];
   const result = await service(async () => response(results))
     .discoverYahooCompletedSessionRecap(context);
-  assert.deepEqual(result, {ok: true, type: 'NOT_FOUND', discovery: null});
+  assert.deepEqual(result, {ok: true, type: 'NOT_FOUND', candidates: []});
 });
 
-test('deduplicates results deterministically and returns the first valid canonical recap', async () => {
+test('deduplicates results and returns every valid canonical recap in search rank order', async () => {
   const first = 'https://finance.yahoo.com/markets/live/stock-market-today-first.html';
   const second = 'https://finance.yahoo.com/markets/live/stock-market-today-second.html';
   const result = await service(async () => response([
@@ -135,8 +151,9 @@ test('deduplicates results deterministically and returns the first valid canonic
     searchResult(`${first}#duplicate`, 'Duplicate recap'),
     searchResult(second, 'Second recap')
   ])).discoverYahooCompletedSessionRecap(context);
-  assert.equal(result.discovery.url, first);
-  assert.equal(result.discovery.title, 'First recap');
+  assert.deepEqual(result.candidates.map(candidate => candidate.discovery.url), [first, second]);
+  assert.deepEqual(result.candidates.map(candidate => candidate.rank), [1, 3]);
+  assert.equal(result.candidates[0].discovery.title, 'First recap');
 });
 
 test('bounds inspected search results deterministically', async () => {
@@ -242,12 +259,17 @@ test('emits bounded sanitized Yahoo result selection diagnostics without changin
   assert.deepEqual(result, {
     ok: true,
     type: 'SUCCESS',
-    discovery: {
+    candidates: [{rank: 3, discovery: {
       title: 'Accepted recap',
       url: accepted,
       discoveredVia: 'ANTHROPIC_WEB_SEARCH',
       targetSessionDate: '2026-09-09'
-    }
+    }}, {rank: 5, discovery: {
+      title: 'Second valid recap',
+      url: 'https://finance.yahoo.com/news/live/stock-market-today-second.html',
+      discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+      targetSessionDate: '2026-09-09'
+    }}]
   });
   assert.deepEqual(diagnostics[0], {
     stage: 'yahooRecapDiscoveryResults',
@@ -265,7 +287,7 @@ test('emits bounded sanitized Yahoo result selection diagnostics without changin
         path: '/markets/live/stock-market-today-valid.html', outcome: 'REJECTED', rejectionReason: 'DUPLICATE'},
       {rank: 5, title: 'Second valid recap',
         normalizedYahooUrl: 'https://finance.yahoo.com/news/live/stock-market-today-second.html',
-        path: '/news/live/stock-market-today-second.html', outcome: 'REJECTED', rejectionReason: 'NOT_SELECTED'},
+        path: '/news/live/stock-market-today-second.html', outcome: 'ACCEPTED', rejectionReason: null},
       {rank: 6, title: null,
         normalizedYahooUrl: 'https://finance.yahoo.com/news/live/stock-market-today-invalid-title.html',
         path: '/news/live/stock-market-today-invalid-title.html',
@@ -293,7 +315,7 @@ test('caps result diagnostics at ten in deterministic rank order while reporting
     onDiagnostics: value => diagnostics.push(value)
   }).discoverYahooCompletedSessionRecap(context);
 
-  assert.deepEqual(result, {ok: true, type: 'NOT_FOUND', discovery: null});
+  assert.deepEqual(result, {ok: true, type: 'NOT_FOUND', candidates: []});
   assert.equal(diagnostics[0].resultCount, 12);
   assert.equal(diagnostics[0].inspectedResultCount, 10);
   assert.equal(diagnostics[0].results.length, 10);
@@ -310,9 +332,12 @@ test('does not retrieve articles or integrate with package or final synthesis', 
   }).discoverYahooCompletedSessionRecap(context);
   assert.equal(result.type, 'SUCCESS');
   assert.equal(fetches, 1);
-  assert.deepEqual(Object.keys(result), ['ok', 'type', 'discovery']);
-  assert.deepEqual(Object.keys(result.discovery), ['title', 'url', 'discoveredVia', 'targetSessionDate']);
-  assert.equal(Object.hasOwn(result.discovery, 'publishedAt'), false);
-  assert.equal(Object.hasOwn(result.discovery, 'articleText'), false);
-  assert.equal(Object.hasOwn(result.discovery, 'evidenceRef'), false);
+  assert.deepEqual(Object.keys(result), ['ok', 'type', 'candidates']);
+  assert.deepEqual(Object.keys(result.candidates[0]), ['rank', 'discovery']);
+  assert.deepEqual(Object.keys(result.candidates[0].discovery), [
+    'title', 'url', 'discoveredVia', 'targetSessionDate'
+  ]);
+  assert.equal(Object.hasOwn(result.candidates[0].discovery, 'publishedAt'), false);
+  assert.equal(Object.hasOwn(result.candidates[0].discovery, 'articleText'), false);
+  assert.equal(Object.hasOwn(result.candidates[0].discovery, 'evidenceRef'), false);
 });

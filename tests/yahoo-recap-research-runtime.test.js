@@ -5,6 +5,7 @@ const path = require('node:path');
 
 const {
   YAHOO_RECAP_RESEARCH_PRODUCTION_BOUNDS,
+  YAHOO_RECAP_RESEARCH_MAX_SESSION_VALIDATION_ATTEMPTS,
   createYahooRecapResearchRuntime
 } = require('../lib/yahoo-recap-research-runtime');
 
@@ -30,25 +31,25 @@ function anthropicResponse(results, overrides = {}) {
   };
 }
 
-function searchResult() {
+function searchResult(url = recapUrl, title = 'Stock market today: September 9 recap') {
   return {
     type: 'web_search_result',
-    title: 'Stock market today: September 9 recap',
-    url: recapUrl,
+    title,
+    url,
     encrypted_content: 'not exposed'
   };
 }
 
-function yahooHtml(overrides = {}) {
+function yahooHtml(overrides = {}, url = recapUrl) {
   const article = {
     '@type': 'NewsArticle',
     headline: 'Stock market today: September 9 recap',
     datePublished: '2026-09-09T20:30:00Z',
     dateModified: '2026-09-09T21:00:00Z',
-    mainEntityOfPage: {'@type': 'WebPage', '@id': recapUrl},
+    mainEntityOfPage: {'@type': 'WebPage', '@id': url},
     ...overrides
   };
-  return `<link rel="canonical" href="${recapUrl}">`
+  return `<link rel="canonical" href="${url}">`
     + `<script type="application/ld+json">${JSON.stringify(article)}</script>`;
 }
 
@@ -77,6 +78,7 @@ test('owns one deeply immutable production bounds bundle', () => {
   });
   assert.equal(Object.isFrozen(YAHOO_RECAP_RESEARCH_PRODUCTION_BOUNDS), true);
   assert.equal(Object.isFrozen(YAHOO_RECAP_RESEARCH_PRODUCTION_BOUNDS.sessionValidationBounds), true);
+  assert.equal(YAHOO_RECAP_RESEARCH_MAX_SESSION_VALIDATION_ATTEMPTS, 3);
 });
 
 test('rejects non-canonical input before discovery', async () => {
@@ -110,7 +112,7 @@ test('discovery receives only targetSessionDate and successful metadata passes u
   assert.equal(calls.length, 2);
   const request = JSON.parse(calls[0].options.body);
   assert.equal(request.messages.length, 1);
-  assert.match(request.messages[0].content, /2026-09-09/);
+  assert.equal(request.messages[0].content, 'Yahoo US stock market today September 9 2026');
   assert.equal(calls[0].options.headers['x-api-key'], 'server-key');
   assert.deepEqual(result, {
     ok: true,
@@ -196,7 +198,132 @@ test('session NOT_VALIDATED remains normal optional absence', async () => {
   assert.equal(result.ok, true);
   assert.equal(result.type, 'NOT_VALIDATED');
   assert.equal(result.validation, null);
-  assert.equal(result.discovery.url, recapUrl);
+  assert.equal(result.discovery, null);
+});
+
+test('skips stale candidates and returns the later exact target-session recap', async () => {
+  const target = '2026-09-10';
+  const staleUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-september-8.html';
+  const targetUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-september-10.html';
+  const calls = [];
+  const result = await runtime(async (url, options) => {
+    calls.push(url);
+    if (url === 'https://api.anthropic.com/v1/messages') {
+      const request = JSON.parse(options.body);
+      assert.equal(request.messages[0].content, 'Yahoo US stock market today September 10 2026');
+      return anthropicResponse([
+        searchResult(staleUrl, 'September 8 recap'),
+        searchResult(targetUrl, 'September 10 recap')
+      ]);
+    }
+    if (url === staleUrl) {
+      return yahooResponse(yahooHtml({
+        headline: 'September 8 recap',
+        datePublished: '2026-09-08T20:30:00Z',
+        dateModified: '2026-09-08T21:00:00Z'
+      }, staleUrl), {url: staleUrl});
+    }
+    return yahooResponse(yahooHtml({
+      headline: 'September 10 recap',
+      datePublished: '2026-09-10T20:30:00Z',
+      dateModified: '2026-09-10T21:00:00Z'
+    }, targetUrl), {url: targetUrl});
+  }).discoverAndValidateRecap({targetSessionDate: target});
+
+  assert.deepEqual(calls, ['https://api.anthropic.com/v1/messages', staleUrl, targetUrl]);
+  assert.equal(result.type, 'VALIDATED');
+  assert.equal(result.discovery.url, targetUrl);
+  assert.equal(result.validation.targetSessionDate, target);
+});
+
+test('returns optional absence without stale substitution after the bounded attempt ceiling', async () => {
+  const target = '2026-09-10';
+  const urls = Array.from({length: 4}, (_, index) =>
+    `https://finance.yahoo.com/markets/live/stock-market-today-stale-${index + 1}.html`);
+  const calls = [];
+  const result = await runtime(async url => {
+    calls.push(url);
+    if (url === 'https://api.anthropic.com/v1/messages') {
+      return anthropicResponse(urls.map((value, index) => searchResult(value, `Stale ${index + 1}`)));
+    }
+    return yahooResponse(yahooHtml({
+      headline: `Stale ${urls.indexOf(url) + 1}`,
+      datePublished: '2026-09-09T20:30:00Z',
+      dateModified: '2026-09-09T21:00:00Z'
+    }, url), {url});
+  }).discoverAndValidateRecap({targetSessionDate: target});
+
+  assert.deepEqual(result, {ok: true, type: 'NOT_VALIDATED', discovery: null, validation: null});
+  assert.equal(calls.length, 1 + YAHOO_RECAP_RESEARCH_MAX_SESSION_VALIDATION_ATTEMPTS);
+  assert.deepEqual(calls.slice(1), urls.slice(0, 3));
+});
+
+test('does not reuse a prior successful recap on a later stale-only invocation', async () => {
+  const target = '2026-09-10';
+  const targetUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-target.html';
+  const staleUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-stale.html';
+  let discoveryInvocation = 0;
+  const service = runtime(async url => {
+    if (url === 'https://api.anthropic.com/v1/messages') {
+      discoveryInvocation++;
+      return anthropicResponse([searchResult(
+        discoveryInvocation === 1 ? targetUrl : staleUrl,
+        discoveryInvocation === 1 ? 'Target recap' : 'Stale recap'
+      )]);
+    }
+    const isTarget = url === targetUrl;
+    return yahooResponse(yahooHtml({
+      headline: isTarget ? 'Target recap' : 'Stale recap',
+      datePublished: isTarget ? '2026-09-10T20:30:00Z' : '2026-09-09T20:30:00Z',
+      dateModified: isTarget ? '2026-09-10T21:00:00Z' : '2026-09-09T21:00:00Z'
+    }, url), {url});
+  });
+
+  const first = await service.discoverAndValidateRecap({targetSessionDate: target});
+  const second = await service.discoverAndValidateRecap({targetSessionDate: target});
+  assert.equal(first.type, 'VALIDATED');
+  assert.equal(first.discovery.url, targetUrl);
+  assert.deepEqual(second, {ok: true, type: 'NOT_VALIDATED', discovery: null, validation: null});
+});
+
+test('emits sanitized rank-ordered candidate validation outcomes', async () => {
+  const target = '2026-09-10';
+  const staleUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-stale.html';
+  const targetUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-target.html';
+  const diagnostics = [];
+  await runtime(async url => {
+    if (url === 'https://api.anthropic.com/v1/messages') {
+      return anthropicResponse([
+        searchResult(staleUrl, 'Stale recap'),
+        searchResult(targetUrl, 'Target recap')
+      ]);
+    }
+    const isTarget = url === targetUrl;
+    return yahooResponse(yahooHtml({
+      headline: isTarget ? 'Target recap' : 'Stale recap',
+      datePublished: isTarget ? '2026-09-10T20:30:00Z' : '2026-09-09T20:30:00Z',
+      dateModified: isTarget ? '2026-09-10T21:00:00Z' : '2026-09-09T21:00:00Z'
+    }, url), {url});
+  }, {onDiagnostics: value => diagnostics.push(value)})
+    .discoverAndValidateRecap({targetSessionDate: target});
+
+  const attempts = diagnostics.filter(value => value.stage === 'yahooRecapSessionCandidateValidation');
+  assert.deepEqual(attempts, [{
+    stage: 'yahooRecapSessionCandidateValidation',
+    rank: 1,
+    normalizedYahooUrl: staleUrl,
+    path: '/markets/live/stock-market-today-stale.html',
+    outcome: 'NOT_VALIDATED',
+    failureType: null
+  }, {
+    stage: 'yahooRecapSessionCandidateValidation',
+    rank: 2,
+    normalizedYahooUrl: targetUrl,
+    path: '/markets/live/stock-market-today-target.html',
+    outcome: 'VALIDATED',
+    failureType: null
+  }]);
+  assert.equal(JSON.stringify(attempts).includes('articleBody'), false);
 });
 
 test('session retrieval failures remain sanitized and stage-distinct with one page attempt', async () => {
