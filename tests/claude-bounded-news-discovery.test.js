@@ -201,27 +201,104 @@ test('captures only sanitized size, request-id, timing, usage, search-count, and
     {monotonicNow: () => tick++, onDiagnostics: value => diagnostics.push(value)}
   ).discoverYahooCompletedSessionRecap(context);
   assert.equal(result.ok, true);
-  assert.equal(diagnostics.length, 1);
-  assert.deepEqual(Object.keys(diagnostics[0]), [
+  assert.equal(diagnostics.length, 2);
+  assert.deepEqual(Object.keys(diagnostics[1]), [
     'model', 'requestId', 'requestSize', 'timing', 'usage', 'searchRequestCount', 'fetchCount'
   ]);
-  assert.equal(diagnostics[0].requestId, 'req_search_123');
-  assert.equal(diagnostics[0].fetchCount, 1);
-  assert.equal(diagnostics[0].searchRequestCount, 1);
-  assert.deepEqual(diagnostics[0].usage, {input_tokens: 100, output_tokens: 20});
-  for (const value of Object.values(diagnostics[0].requestSize)) {
+  assert.equal(diagnostics[1].requestId, 'req_search_123');
+  assert.equal(diagnostics[1].fetchCount, 1);
+  assert.equal(diagnostics[1].searchRequestCount, 1);
+  assert.deepEqual(diagnostics[1].usage, {input_tokens: 100, output_tokens: 20});
+  for (const value of Object.values(diagnostics[1].requestSize)) {
     assert.equal(typeof value, 'number');
     assert.ok(value >= 0);
   }
-  for (const value of Object.values(diagnostics[0].timing)) {
+  for (const value of Object.values(diagnostics[1].timing)) {
     assert.equal(typeof value, 'number');
     assert.ok(value >= 0);
   }
-  const serialized = JSON.stringify(diagnostics[0]);
+  const serialized = JSON.stringify(diagnostics[1]);
   for (const forbidden of [
     'stock-market-today-valid', 'Search completed', 'encrypted_content', 'finance.yahoo.com',
     'secret', '2026-09-09'
   ]) assert.equal(serialized.includes(forbidden), false);
+});
+
+test('emits bounded sanitized Yahoo result selection diagnostics without changing discovery', async () => {
+  const diagnostics = [];
+  const accepted = 'https://finance.yahoo.com/markets/live/stock-market-today-valid.html';
+  const results = [
+    searchResult('https://example.com/private?secret=one', 'External result'),
+    searchResult('https://finance.yahoo.com/markets/stocks/articles/other.html?tracking=yes#fragment', 'Other Yahoo page'),
+    searchResult(`${accepted}?guccounter=1#fragment`, ' Accepted recap '),
+    searchResult(`${accepted}?duplicate=yes`, 'Duplicate recap'),
+    searchResult('https://finance.yahoo.com/news/live/stock-market-today-second.html', 'Second valid recap'),
+    searchResult('https://finance.yahoo.com/news/live/stock-market-today-invalid-title.html', 'x'.repeat(513))
+  ];
+  const result = await service(async () => response(results), {
+    onDiagnostics: value => diagnostics.push(value)
+  }).discoverYahooCompletedSessionRecap(context);
+
+  assert.deepEqual(result, {
+    ok: true,
+    type: 'SUCCESS',
+    discovery: {
+      title: 'Accepted recap',
+      url: accepted,
+      discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+      targetSessionDate: '2026-09-09'
+    }
+  });
+  assert.deepEqual(diagnostics[0], {
+    stage: 'yahooRecapDiscoveryResults',
+    resultCount: 6,
+    inspectedResultCount: 6,
+    results: [
+      {rank: 1, title: 'External result', normalizedYahooUrl: null, path: null,
+        outcome: 'REJECTED', rejectionReason: 'HOST_MISMATCH'},
+      {rank: 2, title: 'Other Yahoo page',
+        normalizedYahooUrl: 'https://finance.yahoo.com/markets/stocks/articles/other.html',
+        path: '/markets/stocks/articles/other.html', outcome: 'REJECTED', rejectionReason: 'PATH_MISMATCH'},
+      {rank: 3, title: 'Accepted recap', normalizedYahooUrl: accepted,
+        path: '/markets/live/stock-market-today-valid.html', outcome: 'ACCEPTED', rejectionReason: null},
+      {rank: 4, title: 'Duplicate recap', normalizedYahooUrl: accepted,
+        path: '/markets/live/stock-market-today-valid.html', outcome: 'REJECTED', rejectionReason: 'DUPLICATE'},
+      {rank: 5, title: 'Second valid recap',
+        normalizedYahooUrl: 'https://finance.yahoo.com/news/live/stock-market-today-second.html',
+        path: '/news/live/stock-market-today-second.html', outcome: 'REJECTED', rejectionReason: 'NOT_SELECTED'},
+      {rank: 6, title: null,
+        normalizedYahooUrl: 'https://finance.yahoo.com/news/live/stock-market-today-invalid-title.html',
+        path: '/news/live/stock-market-today-invalid-title.html',
+        outcome: 'REJECTED', rejectionReason: 'INVALID_TITLE'}
+    ]
+  });
+  assert.equal(Object.isFrozen(diagnostics[0]), true);
+  assert.equal(Object.isFrozen(diagnostics[0].results), true);
+  assert.equal(Object.isFrozen(diagnostics[0].results[0]), true);
+  const serialized = JSON.stringify(diagnostics[0]);
+  assert.equal(serialized.includes('private'), false);
+  assert.equal(serialized.includes('secret'), false);
+  assert.equal(serialized.includes('tracking'), false);
+  assert.equal(serialized.includes('fragment'), false);
+  assert.equal(serialized.includes('encrypted_content'), false);
+});
+
+test('caps result diagnostics at ten in deterministic rank order while reporting the full count', async () => {
+  const diagnostics = [];
+  const results = Array.from({length: 12}, (_, index) => searchResult(
+    `https://finance.yahoo.com/news/unrelated-${index}.html`,
+    `Result ${index + 1}`
+  ));
+  const result = await service(async () => response(results), {
+    onDiagnostics: value => diagnostics.push(value)
+  }).discoverYahooCompletedSessionRecap(context);
+
+  assert.deepEqual(result, {ok: true, type: 'NOT_FOUND', discovery: null});
+  assert.equal(diagnostics[0].resultCount, 12);
+  assert.equal(diagnostics[0].inspectedResultCount, 10);
+  assert.equal(diagnostics[0].results.length, 10);
+  assert.deepEqual(diagnostics[0].results.map(item => item.rank), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.equal(JSON.stringify(diagnostics[0]).includes('unrelated-10'), false);
 });
 
 test('does not retrieve articles or integrate with package or final synthesis', async () => {
