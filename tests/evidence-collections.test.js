@@ -92,3 +92,17 @@ test('accepts structurally canonical unbranded items and retains no mutable refe
   assert.equal(collection.items[0].title, 'Disclosure');
   assert.equal(collection.items[0].provenance.publisher, 'Singapore Exchange');
 });
+
+test('preserves a canonical Yahoo recap editorial publisher through collection reconstruction', () => {
+  const item = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'US market recap', summary: 'Stocks finished lower.',
+    canonicalUrl: 'https://finance.yahoo.com/markets/live/stock-market-today-example.html',
+    publishedAt: '2026-09-09T20:03:54.000Z', symbols: [],
+    publisher: 'Independent Publisher'
+  });
+  const collection = createEvidenceCollection({market: 'US', items: [item]});
+  assert.equal(collection.items[0].provenance.publisher, 'Independent Publisher');
+  assert.equal(collection.items[0].sourceId, 'us.yahoo-finance');
+  assert.equal(Object.isFrozen(collection.items[0].provenance), true);
+});

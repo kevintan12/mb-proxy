@@ -15,12 +15,19 @@ const {
   BENCHMARK_ANCHOR_KEYS,
   CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
   FEDERAL_RESERVE_UNAVAILABLE_GAP,
+  YAHOO_RECAP_UNAVAILABLE_GAP,
+  YAHOO_RECAP_RETRIEVAL_FAILURE_GAP,
+  YAHOO_RECAP_EVIDENCE_CONSTRUCTION_FAILURE_GAP,
   ORCHESTRATION_REQUEST_KEYS,
   createUsAnalysisPackageOrchestrationService,
   validateUsAnalysisOrchestrationRequest
 } = require('../lib/us-analysis-package-orchestration');
 
 const GENERATED_AT = '2026-09-06T10:00:00.000Z';
+const YAHOO_RECAP_ARTICLE_BOUNDS = Object.freeze({
+  timeoutMs: 4000, maxResponseBytes: 1258291, maxHeadlineBytes: 512,
+  maxPublisherNameBytes: 256, maxArticleTextBytes: 8192, maxResultBytes: 12288
+});
 
 function request(selectedScope = 'US', overrides = {}) {
   return {
@@ -69,6 +76,19 @@ function snapshot(symbol) {
     currency: 'USD',
     marketState: 'CLOSED',
     completedSessions: [previousSession, session],
+    currentOverlay: null
+  });
+}
+
+function snapshotWithoutCompletedSessions(symbol) {
+  return createThreeSessionSnapshot({
+    market: 'US',
+    symbol,
+    instrumentName: `${symbol} instrument`,
+    instrumentType: symbol.startsWith('^') ? 'INDEX' : 'EQUITY',
+    currency: 'USD',
+    marketState: 'CLOSED',
+    completedSessions: [],
     currentOverlay: null
   });
 }
@@ -189,8 +209,74 @@ function fedEvidence(publishedAt = '2026-09-05T18:00:00Z') {
   });
 }
 
+function yahooRecapResearchSuccess({
+  title = 'Stock market today: September 4 recap',
+  url = 'https://finance.yahoo.com/markets/live/stock-market-today-example.html',
+  publishedAt = '2026-09-04T20:03:54.000Z',
+  updatedAt = null,
+  targetSessionDate = '2026-09-04'
+} = {}) {
+  return {
+    ok: true,
+    type: 'VALIDATED',
+    discovery: Object.freeze({
+      title,
+      url,
+      discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+      targetSessionDate
+    }),
+    validation: Object.freeze({
+      headline: title,
+      url,
+      datePublished: publishedAt,
+      dateModified: updatedAt,
+      targetSessionDate
+    })
+  };
+}
+
+function yahooRecapArticle({
+  title = 'Stock market today: September 4 recap',
+  url = 'https://finance.yahoo.com/markets/live/stock-market-today-example.html',
+  publishedAt = '2026-09-04T20:03:54.000Z',
+  updatedAt = null,
+  targetSessionDate = '2026-09-04'
+} = {}) {
+  return Object.freeze({
+    sourceId: 'us.yahoo-finance',
+    publisher: Object.freeze({name: 'Yahoo! Finance'}),
+    canonicalUrl: url,
+    headline: title,
+    publishedAt,
+    updatedAt,
+    targetSessionDate,
+    articleText: 'US stocks ended the completed session higher.'
+  });
+}
+
+function yahooRecapEvidenceSuccess(article, horizon) {
+  return {
+    ok: true,
+    type: 'SUCCESS',
+    constructedEvidence: {
+      targetSessionDate: article.targetSessionDate,
+      updatedAt: article.updatedAt,
+      horizon,
+      evidenceItem: createEvidenceItem({
+        sourceId: article.sourceId, market: 'US', evidenceCategory: 'news',
+        title: article.headline, summary: article.articleText,
+        canonicalUrl: article.canonicalUrl, publishedAt: article.publishedAt,
+        symbols: [], publisher: article.publisher.name
+      })
+    }
+  };
+}
+
 function harness(overrides = {}) {
-  const calls = {factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0, cnbc: []};
+  const calls = {
+    factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
+    yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [], cnbc: []
+  };
   const dependencies = {
     createTelemetryAcquisition: ({generatedAt}) => {
       calls.factories.push(generatedAt);
@@ -219,6 +305,25 @@ function harness(overrides = {}) {
         return fedEvidence();
       }
     },
+    yahooRecapResearch: {
+      async discoverAndValidateRecap(value) {
+        calls.yahooRecapResearch.push(value);
+        return {ok: true, type: 'NOT_FOUND', discovery: null, validation: null};
+      }
+    },
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent(value) {
+        calls.yahooRecapArticle.push(value);
+        throw new Error('not expected');
+      }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) {
+        calls.yahooRecapEvidence.push(value);
+        throw new Error('not expected');
+      }
+    },
+    yahooRecapArticleContentBounds: YAHOO_RECAP_ARTICLE_BOUNDS,
     cnbcNewsResearch: {
       async researchNews({horizons}) {
         calls.cnbc.push(horizons);
@@ -258,6 +363,9 @@ test('assembles a canonical US package with supplied benchmarks and deterministi
   assert.deepEqual(calls.persistence, ['^RUT', '^DJI', 'MSFT', 'AAPL', 'NVDA']);
   assert.deepEqual(calls.yahoo, ['^RUT', '^DJI', 'MSFT', 'AAPL', 'NVDA']);
   assert.equal(calls.fed, 1);
+  assert.deepEqual(calls.yahooRecapResearch, [{targetSessionDate: '2026-09-04'}]);
+  assert.deepEqual(calls.yahooRecapArticle, []);
+  assert.deepEqual(calls.yahooRecapEvidence, []);
   assert.equal(calls.cnbc.length, 1);
   assert.deepEqual(calls.cnbc[0], [
     {
@@ -313,27 +421,253 @@ test('reports sanitized non-negative timings for existing package stages', async
   }));
 
   assert.equal(validateClaudeAnalysisInput(output), true);
-  assert.equal(diagnostics.length, 1);
-  assert.deepEqual(Object.keys(diagnostics[0]), ['timing']);
-  assert.deepEqual(Object.keys(diagnostics[0].timing), [
+  const timingDiagnostic = diagnostics.find(value => value.timing);
+  assert.ok(timingDiagnostic);
+  assert.deepEqual(Object.keys(timingDiagnostic), ['timing']);
+  assert.deepEqual(Object.keys(timingDiagnostic.timing), [
     'yahooTelemetryAcquisitionMs',
     'postgresPersistenceReadbackMs',
     'yahooMarketDataEvidenceAcquisitionMs',
     'federalReserveEvidenceAcquisitionMs',
+    'yahooRecapResearchMs',
+    'yahooRecapArticleContentAcquisitionMs',
+    'yahooRecapEvidenceConstructionMs',
     'cnbcNewsResearchMs',
     'packageAssemblyFinalizationMs',
     'packageRuntimeTotalMs'
   ]);
-  for (const elapsed of Object.values(diagnostics[0].timing)) {
+  for (const elapsed of Object.values(timingDiagnostic.timing)) {
     assert.equal(typeof elapsed, 'number');
     assert.equal(Number.isFinite(elapsed), true);
     assert.equal(elapsed >= 0, true);
   }
-  assert.equal(Object.isFrozen(diagnostics[0]), true);
-  assert.equal(Object.isFrozen(diagnostics[0].timing), true);
-  const serialized = JSON.stringify(diagnostics[0]);
+  assert.equal(Object.isFrozen(timingDiagnostic), true);
+  assert.equal(Object.isFrozen(timingDiagnostic.timing), true);
+  const serialized = JSON.stringify(diagnostics);
   assert.equal(serialized.includes('MSFT'), false);
   assert.equal(serialized.includes('Federal Reserve policy statement'), false);
+});
+
+test('integrates a validated Yahoo recap with package-owned ordering, identity and horizon', async () => {
+  const article = yahooRecapArticle();
+  const articleCalls = [];
+  const evidenceCalls = [];
+  const {service, calls} = harness({
+    yahooRecapResearch: {
+      async discoverAndValidateRecap(value) {
+        calls.yahooRecapResearch.push(value);
+        return yahooRecapResearchSuccess();
+      }
+    },
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent(value) {
+        articleCalls.push(value);
+        return {ok: true, type: 'SUCCESS', articleContent: article};
+      }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) {
+        evidenceCalls.push(value);
+        return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+      }
+    }
+  });
+
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.deepEqual(calls.yahooRecapResearch, [{targetSessionDate: '2026-09-04'}]);
+  assert.equal(articleCalls.length, 1);
+  assert.deepEqual(articleCalls[0], {
+    discovery: yahooRecapResearchSuccess().discovery,
+    validation: yahooRecapResearchSuccess().validation,
+    bounds: YAHOO_RECAP_ARTICLE_BOUNDS
+  });
+  assert.equal(evidenceCalls.length, 1);
+  assert.deepEqual(evidenceCalls[0].horizon, {
+    classification: 'SUBSEQUENT_DEVELOPMENT',
+    startsAtExclusive: '2026-09-04T20:00:00.000Z',
+    endsAtInclusive: GENERATED_AT
+  });
+  assert.deepEqual(context.evidence.map(record => [
+    record.reference, record.item.sourceId, record.item.evidenceCategory
+  ]), [
+    ['e1', 'us.yahoo-finance', 'market-data'],
+    ['e2', 'us.yahoo-finance', 'news'],
+    ['e3', 'us.federal-reserve', 'monetary-policy'],
+    ['e4', 'us.federal-reserve', 'monetary-policy']
+  ]);
+  assert.equal(context.evidence[1].item.provenance.publisher, 'Yahoo! Finance');
+  assert.deepEqual(context.authoritativeFacts, ['e1', 'e3', 'e4']);
+  assert.deepEqual(context.supportingEvidence, ['e1', 'e3', 'e4']);
+  assert.deepEqual(context.subsequentDevelopments, ['e2']);
+  assert.deepEqual(context.unresolvedGaps, []);
+  assert.deepEqual(context.furtherReadings, []);
+  assert.equal(JSON.stringify(output).includes('c1'), false);
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('places a recap published inside the completed-session boundary in supporting evidence', async () => {
+  const publishedAt = '2026-09-04T19:45:00.000Z';
+  const article = yahooRecapArticle({publishedAt});
+  const research = yahooRecapResearchSuccess({publishedAt});
+  const {service} = harness({
+    yahooRecapResearch: {async discoverAndValidateRecap() { return research; }},
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() { return {ok: true, type: 'SUCCESS', articleContent: article}; }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) { return yahooRecapEvidenceSuccess(value.articleContent, value.horizon); }
+    }
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.deepEqual(context.supportingEvidence, ['e1', 'e2', 'e3', 'e4']);
+  assert.deepEqual(context.subsequentDevelopments, []);
+});
+
+test('treats Yahoo recap absence and wrong-session validation as optional without article retrieval', async () => {
+  for (const result of [
+    {ok: true, type: 'NOT_FOUND', discovery: null, validation: null},
+    {ok: true, type: 'NOT_VALIDATED', discovery: yahooRecapResearchSuccess().discovery, validation: null},
+    {
+      ...yahooRecapResearchSuccess(),
+      discovery: Object.freeze({
+        ...yahooRecapResearchSuccess().discovery,
+        targetSessionDate: '2026-09-03'
+      }),
+      validation: Object.freeze({
+        ...yahooRecapResearchSuccess().validation,
+        targetSessionDate: '2026-09-03'
+      })
+    }
+  ]) {
+    let articleCalls = 0;
+    const {service} = harness({
+      yahooRecapResearch: {async discoverAndValidateRecap() { return result; }},
+      yahooRecapArticleContentAcquisition: {
+        async acquireArticleContent() { articleCalls++; throw new Error('not expected'); }
+      }
+    });
+    const output = await service.assemble(request());
+    assert.equal(articleCalls, 0);
+    assert.equal(output.marketPackages[0].evidenceContext.evidence.some(
+      record => record.item.evidenceCategory === 'news' && record.item.sourceId === 'us.yahoo-finance'
+    ), false);
+    assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
+      result.type === 'VALIDATED'
+        ? YAHOO_RECAP_RETRIEVAL_FAILURE_GAP : YAHOO_RECAP_UNAVAILABLE_GAP
+    ]);
+  }
+});
+
+test('maps Yahoo recap stage failures to sanitized deterministic gaps', async () => {
+  const cases = [
+    {
+      expectedGap: YAHOO_RECAP_RETRIEVAL_FAILURE_GAP,
+      expectedType: 'DISCOVERY_FAILURE',
+      overrides: {
+        yahooRecapResearch: {
+          async discoverAndValidateRecap() {
+            return {ok: false, type: 'DISCOVERY_FAILURE', failureType: 'UPSTREAM_FAILURE'};
+          }
+        }
+      }
+    },
+    {
+      expectedGap: YAHOO_RECAP_RETRIEVAL_FAILURE_GAP,
+      expectedType: 'HTTP_FAILURE',
+      overrides: {
+        yahooRecapResearch: {async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }},
+        yahooRecapArticleContentAcquisition: {
+          async acquireArticleContent() { return {ok: false, type: 'HTTP_FAILURE'}; }
+        }
+      }
+    },
+    {
+      expectedGap: YAHOO_RECAP_EVIDENCE_CONSTRUCTION_FAILURE_GAP,
+      expectedType: 'EVIDENCE_CONTRACT_FAILURE',
+      overrides: {
+        yahooRecapResearch: {async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }},
+        yahooRecapArticleContentAcquisition: {
+          async acquireArticleContent() {
+            return {ok: true, type: 'SUCCESS', articleContent: yahooRecapArticle()};
+          }
+        },
+        yahooRecapEvidenceConstruction: {
+          constructEvidence() { return {ok: false, type: 'EVIDENCE_CONTRACT_FAILURE'}; }
+        }
+      }
+    }
+  ];
+  for (const item of cases) {
+    const diagnostics = [];
+    const {service} = harness({
+      ...item.overrides,
+      onDiagnostics(value) { diagnostics.push(value); }
+    });
+    const output = await service.assemble(request());
+    assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [item.expectedGap]);
+    assert.deepEqual(diagnostics.find(value => value.stage === 'yahooRecapIntegration'), {
+      stage: 'yahooRecapIntegration', outcome: 'FAILURE', failureType: item.expectedType
+    });
+    const serialized = JSON.stringify(diagnostics);
+    assert.equal(serialized.includes('articleText'), false);
+    assert.equal(serialized.includes('canonicalUrl'), false);
+  }
+});
+
+test('skips Yahoo recap research when the canonical primary session date is null', async () => {
+  let researchCalls = 0;
+  const {service} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) { return snapshotWithoutCompletedSessions(symbol); }
+    }),
+    yahooRecapResearch: {
+      async discoverAndValidateRecap() { researchCalls++; throw new Error('not expected'); }
+    }
+  });
+  const output = await service.assemble(request());
+  assert.equal(output.marketPackages[0].marketContext.primaryCompletedSessionDate, null);
+  assert.equal(researchCalls, 0);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(
+    record => record.item.evidenceCategory === 'news' && record.item.sourceId === 'us.yahoo-finance'
+  ), false);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
+    YAHOO_RECAP_UNAVAILABLE_GAP,
+    CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP
+  ]);
+});
+
+test('does not reuse a previous successful Yahoo recap when the current discovery is absent', async () => {
+  const article = yahooRecapArticle();
+  let discoveryCalls = 0;
+  const {service} = harness({
+    yahooRecapResearch: {
+      async discoverAndValidateRecap() {
+        discoveryCalls++;
+        return discoveryCalls === 1
+          ? yahooRecapResearchSuccess()
+          : {ok: true, type: 'NOT_FOUND', discovery: null, validation: null};
+      }
+    },
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() { return {ok: true, type: 'SUCCESS', articleContent: article}; }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) { return yahooRecapEvidenceSuccess(value.articleContent, value.horizon); }
+    }
+  });
+  const first = await service.assemble(request());
+  const second = await service.assemble(request());
+  const hasYahooRecap = output => output.marketPackages[0].evidenceContext.evidence.some(
+    record => record.item.evidenceCategory === 'news' && record.item.sourceId === 'us.yahoo-finance'
+  );
+  assert.equal(discoveryCalls, 2);
+  assert.equal(hasYahooRecap(first), true);
+  assert.equal(hasYahooRecap(second), false);
+  assert.deepEqual(second.marketPackages[0].evidenceContext.unresolvedGaps, [
+    YAHOO_RECAP_UNAVAILABLE_GAP
+  ]);
 });
 
 test('keeps portfolio membership validation independent of the Claude byte guard', () => {
@@ -370,7 +704,10 @@ test('rejects overlap between supplied anchors and either portfolio list before 
   for (const membership of cases) {
     const {service, calls} = harness();
     await assert.rejects(service.assemble(request('US', membership)), /cannot be portfolio membership/);
-    assert.deepEqual(calls, {factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0, cnbc: []});
+    assert.deepEqual(calls, {
+      factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
+      yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [], cnbc: []
+    });
   }
 });
 
@@ -407,7 +744,7 @@ test('CNBC all-SKIP adds no evidence or gap', async () => {
   const output = await service.assemble(request());
   const context = output.marketPackages[0].evidenceContext;
   assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
-  assert.deepEqual(context.unresolvedGaps, []);
+  assert.deepEqual(context.unresolvedGaps, [YAHOO_RECAP_UNAVAILABLE_GAP]);
 });
 
 test('every CNBC stage failure degrades to one deterministic package gap', async () => {
@@ -427,7 +764,10 @@ test('every CNBC stage failure degrades to one deterministic package gap', async
     const output = await service.assemble(request());
     const context = output.marketPackages[0].evidenceContext;
     assert.equal(validateClaudeAnalysisInput(output), true);
-    assert.deepEqual(context.unresolvedGaps, [CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP]);
+    assert.deepEqual(context.unresolvedGaps, [
+      YAHOO_RECAP_UNAVAILABLE_GAP,
+      CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP
+    ]);
     assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
     assert.equal(diagnostics.some(item => item.failureType === type), true);
   }
@@ -447,6 +787,7 @@ test('unavailable or inconsistent canonical benchmark boundaries degrade CNBC on
   const output = await service.assemble(request());
   assert.equal(researchCalls, 0);
   assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
+    YAHOO_RECAP_RETRIEVAL_FAILURE_GAP,
     CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP
   ]);
   assert.equal(validateClaudeAnalysisInput(output), true);
@@ -480,7 +821,7 @@ test('continues with one deterministic unresolved gap when Federal Reserve acqui
   const output = await service.assemble(request());
   const context = output.marketPackages[0].evidenceContext;
   assert.deepEqual(context.evidence.map(item => item.item.sourceId), ['us.yahoo-finance']);
-  assert.deepEqual(context.unresolvedGaps, [FEDERAL_RESERVE_UNAVAILABLE_GAP]);
+  assert.deepEqual(context.unresolvedGaps, [FEDERAL_RESERVE_UNAVAILABLE_GAP, YAHOO_RECAP_UNAVAILABLE_GAP]);
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
@@ -524,7 +865,10 @@ test('rejects inconsistent persisted reconstruction and malformed provider mater
     federalReserveEvidenceAcquisition: {async acquireEvidence() { return null; }}
   });
   const output = await malformedFed.service.assemble(request());
-  assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [FEDERAL_RESERVE_UNAVAILABLE_GAP]);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
+    FEDERAL_RESERVE_UNAVAILABLE_GAP,
+    YAHOO_RECAP_UNAVAILABLE_GAP
+  ]);
 });
 
 test('returns immutable output without mutating membership or acquired canonical objects', async () => {
