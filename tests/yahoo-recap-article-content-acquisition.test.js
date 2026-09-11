@@ -176,6 +176,70 @@ test('accepts Article, NewsArticle, and LiveBlogPosting JSON-LD types', async ()
   }
 });
 
+test('skips a bodyless NewsArticle and selects the later compatible LiveBlogPosting root body', async () => {
+  const newsArticle = article();
+  delete newsArticle.articleBody;
+  const liveBlog = article({
+    '@type': 'LiveBlogPosting',
+    articleBody: 'The session closed with broad gains.',
+    liveBlogUpdate: [
+      {
+        '@type': 'BlogPosting',
+        headline: 'Earlier update',
+        datePublished: '2026-09-09T15:00:00-04:00',
+        articleBody: 'This update must not be returned.'
+      }
+    ]
+  });
+  const result = await service(async () => response(html([newsArticle, liveBlog])))
+    .acquireArticleContent(input());
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(result.articleContent.articleText, 'The session closed with broad gains.');
+  assert.doesNotMatch(result.articleContent.articleText, /Earlier update|must not be returned/);
+});
+
+test('selects the first compatible body-bearing node in JSON-LD document order', async () => {
+  const bodyless = article({articleBody: '   '});
+  const firstBody = article({'@type': 'LiveBlogPosting', articleBody: 'First compatible body.'});
+  const secondBody = article({'@type': 'Article', articleBody: 'Second compatible body.'});
+  const result = await service(async () => response(html([bodyless, firstBody, secondBody])))
+    .acquireArticleContent(input());
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(result.articleContent.articleText, 'First compatible body.');
+});
+
+test('rejects incompatible body-bearing nodes while retaining a later compatible body', async () => {
+  const incompatible = article({
+    headline: 'Different recap',
+    articleBody: 'Incompatible body.'
+  });
+  const compatible = article({
+    '@type': 'LiveBlogPosting',
+    articleBody: 'Compatible root body.'
+  });
+  const result = await service(async () => response(html([incompatible, compatible])))
+    .acquireArticleContent(input());
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(result.articleContent.articleText, 'Compatible root body.');
+});
+
+test('does not use blank LiveBlogPosting roots or concatenate liveBlogUpdate bodies', async () => {
+  const bodyless = article({
+    '@type': 'LiveBlogPosting',
+    articleBody: '<b> </b>',
+    liveBlogUpdate: [{
+      '@type': 'BlogPosting',
+      headline: 'Update body',
+      datePublished: '2026-09-09T15:00:00-04:00',
+      articleBody: 'Available only in an update.'
+    }]
+  });
+  const result = await service(async () => response(html(bodyless)))
+    .acquireArticleContent(input());
+  assert.equal(result.type, 'ARTICLE_BODY_MISSING');
+  assert.equal(result.articleContent, null);
+});
+
 test('requires matching response, canonical, and structured article identity', async () => {
   const other = 'https://finance.yahoo.com/markets/live/stock-market-today-other.html';
   const cases = [
