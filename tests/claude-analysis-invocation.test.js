@@ -398,6 +398,23 @@ test('gives Claude evidence-bound Section 9 fallback instructions', () => {
   }
 });
 
+test('gives Claude time-safe materially relevant subsequent-development instructions', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'Review evidenceContext.subsequentDevelopments',
+    'only as later/current or forward-looking context',
+    'Never cite subsequentDevelopments as causes of the earlier primary completed-session move',
+    'When materially relevant',
+    'using their supplied evidence references',
+    'appropriate forward-looking Sections 7-10',
+    'especially Section 9 WHAT TO WATCH FOR NEXT',
+    'material risks, opportunities, next-session watch items, and takeaway implications',
+    'Do not include subsequentDevelopments when they are immaterial to the report'
+  ]) {
+    assert.equal(system.includes(requirement), true, requirement);
+  }
+});
+
 test('gives Claude the exact section uncertainty canonicality requirements', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
