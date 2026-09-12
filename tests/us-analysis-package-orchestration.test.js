@@ -838,6 +838,47 @@ test('fails closed for future-dated Yahoo or Federal Reserve evidence', async ()
   await assert.rejects(fed.assemble(request()), /Future-dated evidence/);
 });
 
+test('uses acquisition start for research and final assembly time for strict future-evidence validation', async () => {
+  const acquisitionStartedAt = '2026-09-06T10:00:00.000Z';
+  const evidencePublishedAt = '2026-09-06T10:00:01.000Z';
+  const finalGeneratedAt = '2026-09-06T10:00:02.000Z';
+  const clock = [acquisitionStartedAt, finalGeneratedAt];
+  const accepted = harness({
+    now: () => new Date(clock.shift()),
+    yahooEvidenceAcquisition: {
+      async acquireEvidence({symbol}) { return yahooEvidence(symbol, evidencePublishedAt); }
+    }
+  });
+  const output = await accepted.service.assemble(request());
+  assert.equal(output.analysisRequest.generatedAt, finalGeneratedAt);
+  assert.deepEqual(accepted.calls.factories, [acquisitionStartedAt]);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence[0].item.publishedAt, evidencePublishedAt);
+
+  const boundaryClock = [acquisitionStartedAt, finalGeneratedAt];
+  const boundary = harness({
+    now: () => new Date(boundaryClock.shift()),
+    yahooEvidenceAcquisition: {
+      async acquireEvidence({symbol}) { return yahooEvidence(symbol, finalGeneratedAt); }
+    }
+  });
+  assert.equal((await boundary.service.assemble(request())).analysisRequest.generatedAt, finalGeneratedAt);
+
+  const diagnostics = [];
+  const futureClock = [acquisitionStartedAt, finalGeneratedAt];
+  const future = harness({
+    now: () => new Date(futureClock.shift()),
+    yahooEvidenceAcquisition: {
+      async acquireEvidence({symbol}) { return yahooEvidence(symbol, '2026-09-06T10:00:03.000Z'); }
+    },
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  await assert.rejects(future.service.assemble(request()), /Future-dated evidence/);
+  assert.deepEqual(diagnostics.find(value => value.stage === 'analysisPackageAssemblyFailure'), {
+    stage: 'analysisPackageAssemblyFailure',
+    failureStage: 'FUTURE_DATED_EVIDENCE_VALIDATION'
+  });
+});
+
 test('fails closed for required telemetry, persistence and Yahoo evidence failures', async () => {
   const telemetry = harness({
     createTelemetryAcquisition: () => ({async acquireSnapshot() { throw new Error('telemetry failed'); }})

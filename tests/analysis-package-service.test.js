@@ -182,6 +182,8 @@ test('invokes acquisition once with market order and no user timezone', async ()
   }).assemble(request('ALL', {userTimezone: 'America/New_York'}));
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].markets, ['US', 'SG', 'HK']);
+  assert.equal(calls[0].acquisitionStartedAt, FIXED_NOW);
+  assert.equal(Object.hasOwn(calls[0], 'generatedAt'), false);
   assert.equal(Object.hasOwn(calls[0], 'userTimezone'), false);
   assert.equal(Object.isFrozen(calls[0].markets), true);
   assert.equal(output.analysisRequest.userTimezone, 'America/New_York');
