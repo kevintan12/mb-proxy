@@ -414,6 +414,83 @@ test('does not use blank LiveBlogPosting roots or concatenate liveBlogUpdate bod
   assert.equal(result.articleContent, null);
 });
 
+test('appends only bounded unambiguous CPI comparison clauses from live-blog updates', async () => {
+  const liveBlog = article({
+    '@type': 'LiveBlogPosting',
+    articleBody: 'Headline CPI rose 0.4% month over month against expectations of 0.4%. Core CPI rose 0.3% month over month against expectations of 0.2%, while core CPI rose 2.4% year over year.',
+    liveBlogUpdate: [
+      {
+        '@type': 'BlogPosting',
+        articleBody: 'Consumer inflation rose to 3.4% year over year, matching expectations of 3.4% and unchanged from July\'s 3.4% reading. Core inflation rose 0.3% month over month, hotter than expectations, and 2.4% year over year.'
+      },
+      {
+        '@type': 'BlogPosting',
+        articleBody: 'Economic data: CPI, month-on-month, August (+0.4% expected, +0.1% previously); Core CPI, month-on-month, August (+0.2% expected, +0.2% previously); CPI, year-on-year, August (+3.4% expected, +3.4% previously); Core CPI, year-on-year, August (+2.4% expected, +2.5% previously); U. Mich. sentiment, September (51 expected, 51.7 previously).'
+      },
+      {
+        '@type': 'BlogPosting',
+        articleBody: 'Oracle shares rose after its cloud results. Oil prices also declined.'
+      },
+      {
+        '@type': 'BlogPosting',
+        articleBody: 'CPI rose 0.5%, versus 0.4% expected and 0.3% previously.'
+      },
+      {
+        '@type': 'NewsArticle',
+        articleBody: 'CPI, month-on-month (+9.9% expected, +9.8% previously).'
+      }
+    ]
+  });
+  const result = await service(async () => response(html(liveBlog)))
+    .acquireArticleContent(input());
+  assert.equal(result.type, 'SUCCESS');
+  const text = result.articleContent.articleText;
+  for (const comparison of [
+    'CPI, month-on-month, August (+0.4% expected, +0.1% previously)',
+    'Core CPI, month-on-month, August (+0.2% expected, +0.2% previously)',
+    'CPI, year-on-year, August (+3.4% expected, +3.4% previously)',
+    'Core CPI, year-on-year, August (+2.4% expected, +2.5% previously)'
+  ]) assert.equal(text.includes(comparison), true, comparison);
+  assert.match(text, /Consumer inflation rose to 3\.4% year over year/);
+  assert.match(text, /Core inflation rose 0\.3% month over month/);
+  assert.doesNotMatch(text, /Oracle|Oil prices|0\.5%|9\.9%|U\. Mich/);
+});
+
+test('keeps root-only behavior and applies existing article/result bounds after CPI enrichment', async () => {
+  const rootOnly = await service(async () => response(html(article({
+    '@type': 'LiveBlogPosting',
+    liveBlogUpdate: [{
+      '@type': 'BlogPosting',
+      articleBody: 'An ambiguous CPI comparison expected 0.2% and previously 0.1%.'
+    }]
+  })))).acquireArticleContent(input());
+  assert.equal(rootOnly.type, 'SUCCESS');
+  assert.equal(rootOnly.articleContent.articleText,
+    'Stocks rose after new data. Investors reassessed risk.');
+
+  const enriched = article({
+    '@type': 'LiveBlogPosting',
+    articleBody: 'x'.repeat(8160),
+    liveBlogUpdate: [{
+      '@type': 'BlogPosting',
+      articleBody: 'CPI, month-on-month (+0.4% expected, +0.1% previously).'
+    }]
+  });
+  const textOverflow = await service(async () => response(html(enriched)))
+    .acquireArticleContent(input());
+  assert.equal(textOverflow.type, 'ARTICLE_TEXT_TOO_LARGE');
+  assert.equal(textOverflow.articleContent, null);
+
+  const resultOverflow = await service(async () => response(html(article({
+    '@type': 'LiveBlogPosting',
+    liveBlogUpdate: [{
+      '@type': 'BlogPosting',
+      articleBody: 'CPI, month-on-month (+0.4% expected, +0.1% previously).'
+    }]
+  })))).acquireArticleContent({...input(), bounds: {...bounds, maxResultBytes: 10}});
+  assert.equal(resultOverflow.type, 'RESULT_TOO_LARGE');
+});
+
 test('requires matching response, canonical, and structured article identity', async () => {
   const other = 'https://finance.yahoo.com/markets/live/stock-market-today-other.html';
   const cases = [

@@ -106,6 +106,16 @@ test('constructs one canonical Yahoo-authored news evidence record', () => {
   assert.equal(validateEvidenceItem(result.constructedEvidence.evidenceItem).valid, true);
 });
 
+test('preserves enriched bounded CPI comparison text unchanged in the evidence summary', () => {
+  const enriched = 'Market recap. CPI, month-on-month, August (+0.4% expected, +0.1% previously). Core CPI, year-on-year, August (+2.4% expected, +2.5% previously).';
+  const result = service().constructEvidence({
+    articleContent: articleContent({articleText: enriched}),
+    horizon: horizon()
+  });
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(result.constructedEvidence.evidenceItem.summary, enriched);
+});
+
 test('preserves a third-party publisher distinctly from the Yahoo acquisition source', () => {
   const result = service().constructEvidence({
     articleContent: articleContent({publisher: Object.freeze({name: 'Independent Publisher'})}),
