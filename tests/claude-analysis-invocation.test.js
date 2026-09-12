@@ -398,6 +398,22 @@ test('gives Claude evidence-bound Section 9 fallback instructions', () => {
   }
 });
 
+test('gives Claude supplied-evidence-only Section 2 macro comparison instructions', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'For Section 2 KEY MARKET DRIVERS',
+    'explicit current, consensus or expected, and previous comparable values',
+    'present that three-way comparison where useful',
+    'surprise versus expectations and the change versus the previous reading',
+    'Use only values explicitly supplied in the package',
+    'do not invent any missing comparison value',
+    'do not force immaterial macro items into a three-number format',
+    'do not repeat the same comparison unnecessarily across Sections 1, 2, and 3'
+  ]) {
+    assert.equal(system.includes(requirement), true, requirement);
+  }
+});
+
 test('gives Claude time-safe materially relevant subsequent-development instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
