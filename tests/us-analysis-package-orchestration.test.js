@@ -502,7 +502,12 @@ test('fails package assembly when required evidence-role classification fails or
     {
       evidenceRoleClassification: {
         async classifyEvidenceRoles() {
-          return {ok: false, type: 'UPSTREAM_FAILURE', message: 'sanitized failure'};
+          return {
+            ok: false,
+            type: 'CONTRACT_FAILURE',
+            message: 'invalid evidence role classification reason',
+            upstreamStatus: 200
+          };
         }
       }
     },
@@ -516,13 +521,23 @@ test('fails package assembly when required evidence-role classification fails or
       }
     }
   ];
-  for (const evidenceRoleClassification of cases) {
+  for (const [index, evidenceRoleClassification] of cases.entries()) {
     const diagnostics = [];
     const {service} = harness({
       ...evidenceRoleClassification,
       onDiagnostics(value) { diagnostics.push(value); }
     });
     await assert.rejects(service.assemble(request()), /Evidence-role classification|references/);
+    if (index === 0) {
+      assert.deepEqual(diagnostics.find(value => value.stage === 'evidenceRoleClassificationFailure'), {
+        stage: 'evidenceRoleClassificationFailure',
+        failureType: 'CONTRACT_FAILURE',
+        failureMessage: 'invalid evidence role classification reason',
+        upstreamStatus: 200
+      });
+    } else {
+      assert.equal(diagnostics.some(value => value.stage === 'evidenceRoleClassificationFailure'), false);
+    }
     assert.deepEqual(diagnostics.find(value => value.stage === 'analysisPackageAssemblyFailure'), {
       stage: 'analysisPackageAssemblyFailure',
       failureStage: 'EVIDENCE_ROLE_CLASSIFICATION'
