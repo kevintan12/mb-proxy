@@ -403,7 +403,7 @@ test('gives Claude supplied-evidence-only Section 2 macro comparison instruction
   for (const requirement of [
     'For Section 2 KEY MARKET DRIVERS',
     'explicit current, consensus or expected, and previous comparable values',
-    'present that three-way comparison where useful',
+    'present that three-way comparison and explain both',
     'surprise versus expectations and the change versus the previous reading',
     'Use only values explicitly supplied in the package',
     'do not invent any missing comparison value',
