@@ -203,6 +203,7 @@ test('builds a fixed server-owned request with no tools and no caller override s
     'in supplied evidence order',
     'make no provider-specific assumptions'
   ]) assert.equal(request.system.includes(required), true, required);
+  assert.equal(request.system.includes('Hard constraint: when an evidence item has horizon SUBSEQUENT_DEVELOPMENT, its roles may be only [] or [MATERIAL_EVENT]; never output PRINCIPAL_CATALYST for it, either alone or together with MATERIAL_EVENT.'), true);
   assert.throws(() => buildClaudeEvidenceRoleClassificationRequest({...input(), prompt: 'override'}));
 });
 
