@@ -36,6 +36,7 @@ test('runtime composition includes bounded CNBC and Yahoo recap research but not
     'createYahooRecapResearchRuntime',
     'createYahooRecapArticleContentAcquisitionService',
     'createYahooRecapEvidenceConstructionService',
+    'invokeClaudeEvidenceRoleClassification',
     'createUsAnalysisPackageOrchestrationService'
   ]) assert.match(source, new RegExp(component));
   assert.doesNotMatch(source, /invokeClaudeAnalysis|claude-analysis-invocation/);

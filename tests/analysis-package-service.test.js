@@ -219,7 +219,8 @@ test('fails closed for acquisition failure, missing material and empty acquired 
 test('reports only the sanitized fatal package-assembly stage and preserves the thrown failure', async () => {
   const cases = [
     'FUTURE_DATED_EVIDENCE_VALIDATION',
-    'EVIDENCE_COLLECTION_CONSTRUCTION'
+    'EVIDENCE_COLLECTION_CONSTRUCTION',
+    'EVIDENCE_ROLE_CLASSIFICATION'
   ];
   for (const failureStage of cases) {
     const diagnostics = [];

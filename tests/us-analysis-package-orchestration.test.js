@@ -14,6 +14,7 @@ const {validateClaudeAnalysisInput} = require('../lib/claude-analysis-contract')
 const {
   BENCHMARK_ANCHOR_KEYS,
   CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
+  EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP,
   FEDERAL_RESERVE_UNAVAILABLE_GAP,
   YAHOO_RECAP_UNAVAILABLE_GAP,
   YAHOO_RECAP_RETRIEVAL_FAILURE_GAP,
@@ -275,7 +276,8 @@ function yahooRecapEvidenceSuccess(article, horizon) {
 function harness(overrides = {}) {
   const calls = {
     factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
-    yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [], cnbc: []
+    yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [], cnbc: [],
+    evidenceRoleClassification: []
   };
   const dependencies = {
     createTelemetryAcquisition: ({generatedAt}) => {
@@ -330,10 +332,44 @@ function harness(overrides = {}) {
         return cnbcAllSkipSuccess(horizons);
       }
     },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        calls.evidenceRoleClassification.push(input);
+        return {
+          ok: true,
+          type: 'SUCCESS',
+          output: {
+            classifications: input.evidence.map(({reference}) => ({
+              reference,
+              materiality: 'LOW',
+              roles: [],
+              reason: 'No supported evidence role.'
+            }))
+          }
+        };
+      }
+    },
     now: () => new Date(GENERATED_AT),
     ...overrides
   };
   return {service: createUsAnalysisPackageOrchestrationService(dependencies), calls};
+}
+
+function roleClassificationSuccess(input, rolesByReference = {}) {
+  return {
+    ok: true,
+    type: 'SUCCESS',
+    output: {
+      classifications: input.evidence.map(({reference}) => ({
+        reference,
+        materiality: 'HIGH',
+        roles: rolesByReference[reference] || [],
+        reason: rolesByReference[reference]?.includes('PRINCIPAL_CATALYST')
+          ? 'This evidence causally supports the completed-session move.'
+          : 'This evidence supports the assigned role assessment.'
+      }))
+    }
+  };
 }
 
 test('assembles a canonical US package with supplied benchmarks and deterministic refs', async () => {
@@ -367,6 +403,7 @@ test('assembles a canonical US package with supplied benchmarks and deterministi
   assert.deepEqual(calls.yahooRecapArticle, []);
   assert.deepEqual(calls.yahooRecapEvidence, []);
   assert.equal(calls.cnbc.length, 1);
+  assert.equal(calls.evidenceRoleClassification.length, 1);
   assert.deepEqual(calls.cnbc[0], [
     {
       classification: 'COMPLETED_SESSION',
@@ -413,6 +450,107 @@ test('assembles a canonical US package with supplied benchmarks and deterministi
   ]);
 });
 
+test('classifies package-owned ordered evidence refs once and derives both role arrays', async () => {
+  let classifierCalls = 0;
+  let classifierInput;
+  const {service} = harness({
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT']);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        classifierCalls++;
+        classifierInput = input;
+        return roleClassificationSuccess(input, {
+          e1: ['MATERIAL_EVENT'],
+          e2: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'],
+          e5: ['MATERIAL_EVENT']
+        });
+      }
+    }
+  });
+
+  const output = await service.assemble(request());
+  const marketPackage = output.marketPackages[0];
+  assert.equal(classifierCalls, 1);
+  assert.deepEqual(classifierInput.marketContext, {
+    market: 'US',
+    exchangeTimezone: 'America/New_York',
+    marketState: 'CLOSED',
+    primaryCompletedSessionDate: '2026-09-04'
+  });
+  assert.deepEqual(classifierInput.benchmarkTelemetry.map(entry => [entry.reference, entry.snapshot.symbol]), [
+    ['t1', '^RUT']
+  ]);
+  assert.deepEqual(classifierInput.evidence.map(entry => [
+    entry.reference, entry.horizon, entry.item.canonicalUrl
+  ]), marketPackage.evidenceContext.evidence.map((entry, index) => [
+    entry.reference,
+    index === 4 ? 'SUBSEQUENT_DEVELOPMENT' : 'COMPLETED_SESSION',
+    entry.item.canonicalUrl
+  ]));
+  assert.deepEqual(marketPackage.evidenceContext.materialEvents, ['e1', 'e2', 'e5']);
+  assert.deepEqual(marketPackage.evidenceContext.principalCatalysts, ['e2']);
+  assert.equal(marketPackage.evidenceContext.evidence[4].item.sourceId, 'us.cnbc');
+  assert.equal(marketPackage.evidenceContext.evidence[4].reference, 'e5');
+});
+
+test('fails package assembly when required evidence-role classification fails or is invalid', async () => {
+  const cases = [
+    {
+      evidenceRoleClassification: {
+        async classifyEvidenceRoles() {
+          return {ok: false, type: 'UPSTREAM_FAILURE', message: 'sanitized failure'};
+        }
+      }
+    },
+    {
+      evidenceRoleClassification: {
+        async classifyEvidenceRoles(input) {
+          const result = roleClassificationSuccess(input);
+          result.output.classifications[0].reference = 'e999';
+          return result;
+        }
+      }
+    }
+  ];
+  for (const evidenceRoleClassification of cases) {
+    const diagnostics = [];
+    const {service} = harness({
+      ...evidenceRoleClassification,
+      onDiagnostics(value) { diagnostics.push(value); }
+    });
+    await assert.rejects(service.assemble(request()), /Evidence-role classification|references/);
+    assert.deepEqual(diagnostics.find(value => value.stage === 'analysisPackageAssemblyFailure'), {
+      stage: 'analysisPackageAssemblyFailure',
+      failureStage: 'EVIDENCE_ROLE_CLASSIFICATION'
+    });
+  }
+});
+
+test('fails closed when classifier assigns a subsequent development as principal catalyst', async () => {
+  const {service} = harness({
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, ['SUBSEQUENT_DEVELOPMENT']);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(input, {
+          e4: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST']
+        });
+      }
+    }
+  });
+  await assert.rejects(
+    service.assemble(request()),
+    /subsequent development cannot be a principal catalyst/
+  );
+});
+
 test('reports sanitized non-negative timings for existing package stages', async () => {
   const diagnostics = [];
   const {service} = harness({onDiagnostics(value) { diagnostics.push(value); }});
@@ -433,6 +571,7 @@ test('reports sanitized non-negative timings for existing package stages', async
     'yahooRecapArticleContentAcquisitionMs',
     'yahooRecapEvidenceConstructionMs',
     'cnbcNewsResearchMs',
+    'evidenceRoleClassificationMs',
     'packageAssemblyFinalizationMs',
     'packageRuntimeTotalMs'
   ]);
@@ -618,7 +757,7 @@ test('maps Yahoo recap stage failures to sanitized deterministic gaps', async ()
 
 test('skips Yahoo recap research when the canonical primary session date is null', async () => {
   let researchCalls = 0;
-  const {service} = harness({
+  const {service, calls} = harness({
     createTelemetryAcquisition: () => ({
       async acquireSnapshot({symbol}) { return snapshotWithoutCompletedSessions(symbol); }
     }),
@@ -634,8 +773,15 @@ test('skips Yahoo recap research when the canonical primary session date is null
   ), false);
   assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
     YAHOO_RECAP_UNAVAILABLE_GAP,
-    CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP
+    CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
+    EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP
   ]);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.materialEvents, []);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.principalCatalysts, []);
+  assert.equal(calls.evidenceRoleClassification.length, 0);
+  assert.equal(output.marketPackages[0].evidenceContext.unresolvedGaps.filter(
+    gap => gap === EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP
+  ).length, 1);
 });
 
 test('does not reuse a previous successful Yahoo recap when the current discovery is absent', async () => {
@@ -706,7 +852,8 @@ test('rejects overlap between supplied anchors and either portfolio list before 
     await assert.rejects(service.assemble(request('US', membership)), /cannot be portfolio membership/);
     assert.deepEqual(calls, {
       factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
-      yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [], cnbc: []
+      yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [], cnbc: [],
+      evidenceRoleClassification: []
     });
   }
 });
