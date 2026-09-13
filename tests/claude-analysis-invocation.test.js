@@ -440,7 +440,12 @@ test('gives Section 4 non-causal broad-market session-association instructions',
     'Section 4 must remain broad-market and independent of My Stocks and Watchlist',
     'membership in either list must not determine which broad-market movers Section 4 discusses',
     'Do not require Section 4 to use every associated reference',
-    'or use an association that is immaterial'
+    'or use an association that is immaterial',
+    'When Section 4 uses a session-associated broad-market evidence reference, cite that reference in Section 4 evidenceRefs',
+    'Do not copy such a reference into Section 5 merely because it is session-associated, broad-market evidence',
+    'relevant to market leadership, sectors, movers, breadth, or rotation',
+    "Section 5 remains strictly limited to the initiating-list securities' permitted telemetryRefs, permitted direct evidenceRefs, and permitted upcoming-event evidenceRefs",
+    'a reference may appear in Section 5 only when it independently satisfies those existing initiating-list eligibility rules'
   ]) {
     assert.equal(system.includes(requirement), true, requirement);
   }
