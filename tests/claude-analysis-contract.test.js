@@ -6,8 +6,8 @@ const {createEvidenceCollection} = require('../lib/evidence-collections');
 const {
   createCompletedRegularSession,
   createCurrentSessionOverlay,
-  createThreeSessionSnapshot
-} = require('../lib/three-session-snapshot');
+  createFiveSessionSnapshot
+} = require('../lib/five-session-snapshot');
 const {
   ANALYTICAL_STATUSES,
   SELECTED_SCOPES,
@@ -74,7 +74,7 @@ function snapshot(market, symbol = MARKET_CONFIG[market].symbol, withOverlay = f
     sourceId: config.source,
     validationState: 'LIVE VALIDATED'
   }) : null;
-  return createThreeSessionSnapshot({
+  return createFiveSessionSnapshot({
     market,
     symbol,
     instrumentName: `${symbol} instrument`,

@@ -4,14 +4,14 @@ const assert = require('node:assert/strict');
 const {
   COMPLETED_REGULAR_SESSION_KEYS,
   CURRENT_SESSION_OVERLAY_KEYS,
-  THREE_SESSION_SNAPSHOT_KEYS,
+  FIVE_SESSION_SNAPSHOT_KEYS,
   createCompletedRegularSession,
   validateCompletedRegularSession,
   createCurrentSessionOverlay,
   validateCurrentSessionOverlay,
-  createThreeSessionSnapshot,
-  validateThreeSessionSnapshot
-} = require('../lib/three-session-snapshot');
+  createFiveSessionSnapshot,
+  validateFiveSessionSnapshot
+} = require('../lib/five-session-snapshot');
 
 function session(day = '04', overrides = {}) {
   return createCompletedRegularSession({
@@ -46,9 +46,11 @@ function overlay(overrides = {}) {
 }
 
 function snapshotInput(overrides = {}) {
-  const first = session('02');
-  const second = session('03', {previousClose: first.close});
-  const third = session('04', {previousClose: second.close});
+  const first = session('01');
+  const second = session('02', {previousClose: first.close});
+  const third = session('03', {previousClose: second.close});
+  const fourth = session('04', {previousClose: third.close});
+  const fifth = session('05', {previousClose: fourth.close});
   return {
     market: 'SG',
     symbol: ' ^sti ',
@@ -56,8 +58,8 @@ function snapshotInput(overrides = {}) {
     instrumentType: 'INDEX',
     currency: 'SGD',
     marketState: 'REGULAR',
-    completedSessions: [first, second, third],
-    currentOverlay: overlay({referenceClose: third.close}),
+    completedSessions: [first, second, third, fourth, fifth],
+    currentOverlay: overlay({referenceClose: fifth.close}),
     ...overrides
   };
 }
@@ -112,17 +114,17 @@ test('creates runtime overlay separately with isFinal false and derived changes'
 });
 
 test('derives snapshot identity, oldest-to-newest primary date and completeness', () => {
-  const snapshot = createThreeSessionSnapshot(snapshotInput());
-  assert.deepEqual(Object.keys(snapshot), THREE_SESSION_SNAPSHOT_KEYS);
+  const snapshot = createFiveSessionSnapshot(snapshotInput());
+  assert.deepEqual(Object.keys(snapshot), FIVE_SESSION_SNAPSHOT_KEYS);
   assert.equal(snapshot.symbol, '^STI');
   assert.equal(snapshot.exchangeTimezone, 'Asia/Singapore');
-  assert.equal(snapshot.primaryCompletedSessionDate, '2026-09-04');
+  assert.equal(snapshot.primaryCompletedSessionDate, '2026-09-05');
   assert.equal(snapshot.completeness, 'COMPLETE');
   assert.deepEqual(snapshot.completedSessions.map(item => item.sessionDate), [
-    '2026-09-02', '2026-09-03', '2026-09-04'
+    '2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-05'
   ]);
   assert.notEqual(snapshot.completedSessions, snapshotInput().completedSessions);
-  assert.equal(validateThreeSessionSnapshot(JSON.parse(JSON.stringify(snapshot))).valid, true);
+  assert.equal(validateFiveSessionSnapshot(JSON.parse(JSON.stringify(snapshot))).valid, true);
 });
 
 test('supports US and HK exchange timezones without closing string vocabularies', () => {
@@ -131,7 +133,7 @@ test('supports US and HK exchange timezones without closing string vocabularies'
     close: 205, previousClose: 201, volume: null, asOf: '2026-07-03T00:30:00Z',
     sourceId: 'us.yahoo-finance', validationState: 'provider verified'
   });
-  const usSnapshot = createThreeSessionSnapshot({
+  const usSnapshot = createFiveSessionSnapshot({
     market: 'US', symbol: ' aapl ', instrumentName: 'Apple Inc.',
     instrumentType: 'provider-neutral equity', currency: 'USD', marketState: 'After Hours',
     completedSessions: [us], currentOverlay: null
@@ -144,7 +146,7 @@ test('supports US and HK exchange timezones without closing string vocabularies'
     close: 25500, previousClose: 25200, volume: 0, asOf: '0000-09-05T12:00:00Z',
     sourceId: 'hk.yahoo-finance', validationState: 'VALID'
   });
-  const hkSnapshot = createThreeSessionSnapshot({
+  const hkSnapshot = createFiveSessionSnapshot({
     market: 'HK', symbol: '^hsi', instrumentName: 'Hang Seng Index', instrumentType: 'INDEX',
     currency: 'HKD', marketState: 'Closed for session', completedSessions: [hk], currentOverlay: null
   });
@@ -153,13 +155,13 @@ test('supports US and HK exchange timezones without closing string vocabularies'
 });
 
 test('derives PARTIAL and UNAVAILABLE without manufacturing sessions', () => {
-  const partial = createThreeSessionSnapshot(snapshotInput({
+  const partial = createFiveSessionSnapshot(snapshotInput({
     completedSessions: [session('04')], currentOverlay: null, marketState: 'CLOSED'
   }));
   assert.equal(partial.completeness, 'PARTIAL');
   assert.equal(partial.primaryCompletedSessionDate, '2026-09-04');
 
-  const unavailable = createThreeSessionSnapshot(snapshotInput({
+  const unavailable = createFiveSessionSnapshot(snapshotInput({
     completedSessions: [], currentOverlay: null, marketState: 'HOLIDAY', currency: null
   }));
   assert.equal(unavailable.completeness, 'UNAVAILABLE');
@@ -168,16 +170,21 @@ test('derives PARTIAL and UNAVAILABLE without manufacturing sessions', () => {
 });
 
 test('rejects too many, duplicate, descending, wrong-market and mismatched overlays', () => {
-  assert.throws(() => createThreeSessionSnapshot(snapshotInput({
-    completedSessions: [session('01'), session('02'), session('03'), session('04')]
-  })), /zero to three/);
-  assert.throws(() => createThreeSessionSnapshot(snapshotInput({
+  const first = session('01');
+  const tooMany = [first];
+  for (const day of ['02', '03', '04', '05', '06']) {
+    tooMany.push(session(day, {previousClose: tooMany.at(-1).close}));
+  }
+  assert.throws(() => createFiveSessionSnapshot(snapshotInput({
+    completedSessions: tooMany
+  })), /zero to five/);
+  assert.throws(() => createFiveSessionSnapshot(snapshotInput({
     completedSessions: [session('03'), session('03')]
   })), /oldest to newest/);
-  assert.throws(() => createThreeSessionSnapshot(snapshotInput({
+  assert.throws(() => createFiveSessionSnapshot(snapshotInput({
     completedSessions: [session('04'), session('03')]
   })), /oldest to newest/);
-  assert.throws(() => createThreeSessionSnapshot(snapshotInput({
+  assert.throws(() => createFiveSessionSnapshot(snapshotInput({
     completedSessions: [session('03'), session('04')]
   })), /previousClose chain/);
   const hkSession = createCompletedRegularSession({
@@ -185,14 +192,14 @@ test('rejects too many, duplicate, descending, wrong-market and mismatched overl
     close: 25500, previousClose: 25200, volume: null,
     asOf: '2026-09-04T16:00:00+08:00', sourceId: 'hk.yahoo-finance', validationState: 'VALID'
   });
-  assert.throws(() => createThreeSessionSnapshot(snapshotInput({completedSessions: [hkSession]})), /completed session/);
-  assert.throws(() => createThreeSessionSnapshot(snapshotInput({
+  assert.throws(() => createFiveSessionSnapshot(snapshotInput({completedSessions: [hkSession]})), /completed session/);
+  assert.throws(() => createFiveSessionSnapshot(snapshotInput({
     currentOverlay: overlay({marketState: 'POST'})
   })), /current overlay/);
-  assert.throws(() => createThreeSessionSnapshot(snapshotInput({
+  assert.throws(() => createFiveSessionSnapshot(snapshotInput({
     currentOverlay: overlay({referenceClose: 5700})
   })), /referenceClose/);
-  assert.throws(() => createThreeSessionSnapshot(snapshotInput({
+  assert.throws(() => createFiveSessionSnapshot(snapshotInput({
     completedSessions: [session('04')],
     currentOverlay: overlay({
       sessionDate: '2026-09-03', asOf: '2026-09-03T10:00:00+08:00',
@@ -202,12 +209,12 @@ test('rejects too many, duplicate, descending, wrong-market and mismatched overl
 });
 
 test('rejects supplied aggregate derivatives and altered canonical output', () => {
-  assert.throws(() => createThreeSessionSnapshot({
+  assert.throws(() => createFiveSessionSnapshot({
     ...snapshotInput(), completeness: 'COMPLETE'
   }), /derived/);
-  const changed = JSON.parse(JSON.stringify(createThreeSessionSnapshot(snapshotInput())));
-  changed.completedSessions[2].provenance.publisher = 'Spoof';
-  assert.equal(validateThreeSessionSnapshot(changed).valid, false);
+  const changed = JSON.parse(JSON.stringify(createFiveSessionSnapshot(snapshotInput())));
+  changed.completedSessions[4].provenance.publisher = 'Spoof';
+  assert.equal(validateFiveSessionSnapshot(changed).valid, false);
 });
 
 test('is deeply immutable, input-independent and has no S.tz dependency', () => {
@@ -215,9 +222,9 @@ test('is deeply immutable, input-independent and has no S.tz dependency', () => 
   const oldS = global.S;
   global.S = {tz: 'Pacific/Honolulu'};
   try {
-    const snapshot = createThreeSessionSnapshot(input);
+    const snapshot = createFiveSessionSnapshot(input);
     input.completedSessions.length = 0;
-    assert.equal(snapshot.completedSessions.length, 3);
+    assert.equal(snapshot.completedSessions.length, 5);
     assert.equal(snapshot.exchangeTimezone, 'Asia/Singapore');
     assert.equal(Object.isFrozen(snapshot), true);
     assert.equal(Object.isFrozen(snapshot.completedSessions), true);

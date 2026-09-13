@@ -5,7 +5,7 @@ const handler = require('../api/quote');
 const analysisPackageRuntime = require('../lib/analysis-package-runtime');
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
-const {createCompletedRegularSession, createThreeSessionSnapshot} = require('../lib/three-session-snapshot');
+const {createCompletedRegularSession, createFiveSessionSnapshot} = require('../lib/five-session-snapshot');
 const {
   REPORT_HEADER,
   REPORT_SECTION_NAMES,
@@ -77,7 +77,7 @@ function claudeAnalysisInput() {
     close: 5747, previousClose: 5710, volume: null, asOf: '2026-09-04T17:00:00+08:00',
     sourceId: 'sg.yahoo-finance', validationState: 'VALIDATED'
   });
-  const snapshot = createThreeSessionSnapshot({
+  const snapshot = createFiveSessionSnapshot({
     market: 'SG', symbol: '^STI', instrumentName: 'Straits Times Index', instrumentType: 'INDEX',
     currency: 'SGD', marketState: 'CLOSED', completedSessions: [session], currentOverlay: null
   });
@@ -149,7 +149,7 @@ function usAnalysisPackageEnvelope() {
     close: 105, previousClose: 100, volume: null, asOf: '2026-09-04T16:00:00-04:00',
     sourceId: 'us.yahoo-finance', validationState: 'VALIDATED'
   });
-  const snapshot = createThreeSessionSnapshot({
+  const snapshot = createFiveSessionSnapshot({
     market: 'US', symbol: '^RUT', instrumentName: 'US benchmark', instrumentType: 'INDEX',
     currency: 'USD', marketState: 'CLOSED', completedSessions: [session], currentOverlay: null
   });

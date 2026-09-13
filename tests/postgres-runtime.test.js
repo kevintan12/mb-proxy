@@ -10,9 +10,9 @@ const {
   getPostgresRuntime
 } = require('../lib/postgres-runtime');
 const {
-  createPostgresThreeSessionSnapshotRepository
-} = require('../lib/postgres-three-session-snapshot-repository');
-const {createCompletedRegularSession} = require('../lib/three-session-snapshot');
+  createPostgresFiveSessionSnapshotRepository
+} = require('../lib/postgres-five-session-snapshot-repository');
+const {createCompletedRegularSession} = require('../lib/five-session-snapshot');
 
 function fakeDatabase({failOnClientSql} = {}) {
   const poolCalls = [];
@@ -134,7 +134,7 @@ test('adapter directly satisfies the existing generic repository boundary', asyn
     PoolClass: database.Pool,
     attachDatabasePool: null
   });
-  const repository = createPostgresThreeSessionSnapshotRepository(runtime);
+  const repository = createPostgresFiveSessionSnapshotRepository(runtime);
   const result = await repository.listLatest({market: 'SG', symbol: '^STI'});
   assert.deepEqual(result, []);
   assert.match(database.poolCalls[0].text, /three_session_snapshot_sessions/);
@@ -157,7 +157,7 @@ test('batched snapshot write/read failures roll back and release the one transac
       PoolClass: database.Pool,
       attachDatabasePool: null
     });
-    const repository = createPostgresThreeSessionSnapshotRepository(runtime);
+    const repository = createPostgresFiveSessionSnapshotRepository(runtime);
 
     await assert.rejects(repository.upsertSnapshot({
       market: 'SG', symbol: '^STI', sessions: [canonicalSession]

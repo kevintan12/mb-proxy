@@ -52,7 +52,7 @@ function createMemoryPostgres() {
       const matching = [...records.values()]
         .filter(row => row.market === market && row.symbol === symbol)
         .sort((left, right) => right.session_date.localeCompare(left.session_date));
-      for (const row of matching.slice(3)) {
+      for (const row of matching.slice(5)) {
         records.delete(recordKey(row.market, row.symbol, row.session_date));
       }
       return {rows: []};
@@ -63,7 +63,7 @@ function createMemoryPostgres() {
         rows: [...records.values()]
           .filter(row => row.market === market && row.symbol === symbol)
           .sort((left, right) => right.session_date.localeCompare(left.session_date))
-          .slice(0, 3)
+          .slice(0, 5)
           .map(row => ({...row}))
       };
     }
@@ -129,10 +129,10 @@ test('uses parameterized SQL and locks before atomic upsert and prune', async ()
   assert.equal(database.calls.every(call => !call.sql.includes('^STI')), true);
 });
 
-test('retains the latest three sessions independently per market and symbol', async () => {
+test('retains the latest five sessions independently per market and symbol', async () => {
   const database = createMemoryPostgres();
   const repository = createPostgresCompletedSessionTelemetryRepository(database);
-  for (const day of ['01', '02', '03', '04']) {
+  for (const day of ['01', '02', '03', '04', '05', '06']) {
     await repository.upsert(telemetry({
       sessionDate: `2026-09-${day}`,
       close: 5700 + Number(day),
@@ -150,7 +150,7 @@ test('retains the latest three sessions independently per market and symbol', as
 
   const stiRows = database.rows().filter(row => row.market === 'SG' && row.symbol === '^STI');
   assert.deepEqual(stiRows.map(row => row.session_date).sort(), [
-    '2026-09-02', '2026-09-03', '2026-09-04'
+    '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-05', '2026-09-06'
   ]);
   assert.equal(database.rows().some(row => row.symbol === 'D05.SI'), true);
   assert.equal(database.rows().some(row => row.market === 'HK'), true);
@@ -177,8 +177,8 @@ test('same-session upsert replaces close, closeTime and source', async () => {
   });
 });
 
-test('reads newest sessions descending with SQL LIMIT 3 and immutable reconstruction', async () => {
-  const rows = ['01', '02', '03', '04'].map(day => ({
+test('reads newest sessions descending with SQL LIMIT 5 and immutable reconstruction', async () => {
+  const rows = ['01', '02', '03', '04', '05', '06'].map(day => ({
     market: 'SG',
     symbol: '^STI',
     session_date: `2026-09-${day}`,
@@ -196,11 +196,11 @@ test('reads newest sessions descending with SQL LIMIT 3 and immutable reconstruc
   });
 
   const result = await repository.listLatest({market: ' sg ', symbol: ' ^sti '});
-  assert.match(calls[0].sql, /ORDER BY session_date DESC\s+LIMIT 3/);
+  assert.match(calls[0].sql, /ORDER BY session_date DESC\s+LIMIT 5/);
   assert.deepEqual(calls[0].parameters, ['SG', '^STI']);
-  assert.equal(result.length, 3);
+  assert.equal(result.length, 5);
   assert.deepEqual(result.map(record => record.sessionDate), [
-    '2026-09-04', '2026-09-03', '2026-09-02'
+    '2026-09-06', '2026-09-05', '2026-09-04', '2026-09-03', '2026-09-02'
   ]);
   assert.equal(Object.isFrozen(result), true);
   assert.equal(result.every(record => Object.isFrozen(record) && Object.isFrozen(record.provenance)), true);

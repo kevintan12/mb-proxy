@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {createYahooTelemetryAcquisitionService} = require('../lib/yahoo-telemetry-acquisition');
-const {validateThreeSessionSnapshot} = require('../lib/three-session-snapshot');
+const {validateFiveSessionSnapshot} = require('../lib/five-session-snapshot');
 
 const ZONES = Object.freeze({US: 'America/New_York', SG: 'Asia/Singapore', HK: 'Asia/Hong_Kong'});
 
@@ -49,7 +49,8 @@ function normalRows(timeSuffix = 'T01:00:00Z') {
     row('2026-09-01', 101, {time: `2026-09-01${timeSuffix}`}),
     row('2026-09-02', 102, {time: `2026-09-02${timeSuffix}`}),
     row('2026-09-03', 103, {time: `2026-09-03${timeSuffix}`}),
-    row('2026-09-04', 104, {time: `2026-09-04${timeSuffix}`})
+    row('2026-09-04', 104, {time: `2026-09-04${timeSuffix}`}),
+    row('2026-08-28', 99, {time: `2026-08-28${timeSuffix}`})
   ];
 }
 
@@ -65,23 +66,22 @@ function serviceFor({market = 'SG', instant = '2026-09-04T10:00:00Z', rows = nor
   return {service, calls, market};
 }
 
-test('makes one aligned Yahoo 10-day request and returns three sessions oldest to newest', async () => {
+test('makes one aligned Yahoo 10-day request and returns five sessions oldest to newest', async () => {
   const {service, calls} = serviceFor();
   const snapshot = await service.acquireSnapshot({market: 'sg', symbol: ' ^sti '});
 
   assert.equal(calls.length, 1);
   assert.match(calls[0][0], /query1\.finance\.yahoo\.com\/v8\/finance\/chart\/%5ESTI\?interval=1d&range=10d$/);
   assert.deepEqual(snapshot.completedSessions.map(item => item.sessionDate), [
-    '2026-09-02', '2026-09-03', '2026-09-04'
+    '2026-08-31', '2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04'
   ]);
-  assert.deepEqual(snapshot.completedSessions.map(item => item.close), [102, 103, 104]);
-  assert.equal(snapshot.completedSessions[0].previousClose, 101);
-  assert.equal(snapshot.completedSessions[1].previousClose, 102);
-  assert.equal(snapshot.completedSessions[2].previousClose, 103);
-  assert.equal(snapshot.completedSessions[2].asOf, '2026-09-04T09:00:00.000Z');
+  assert.deepEqual(snapshot.completedSessions.map(item => item.close), [100, 101, 102, 103, 104]);
+  assert.equal(snapshot.completedSessions[0].previousClose, 99);
+  assert.equal(snapshot.completedSessions[4].previousClose, 103);
+  assert.equal(snapshot.completedSessions[4].asOf, '2026-09-04T09:00:00.000Z');
   assert.equal(snapshot.completeness, 'COMPLETE');
   assert.equal(snapshot.symbol, '^STI');
-  assert.equal(validateThreeSessionSnapshot(snapshot).valid, true);
+  assert.equal(validateFiveSessionSnapshot(snapshot).valid, true);
   assert.equal(Object.isFrozen(snapshot), true);
   assert.equal(Object.isFrozen(snapshot.completedSessions), true);
 });
@@ -106,14 +106,18 @@ test('does not bridge a missing expected session or fabricate COMPLETE history',
   const {service} = serviceFor({rows});
   const snapshot = await service.acquireSnapshot({market: 'SG', symbol: '^STI'});
   assert.equal(snapshot.completeness, 'PARTIAL');
-  assert.deepEqual(snapshot.completedSessions.map(item => item.sessionDate), ['2026-09-01', '2026-09-02']);
+  assert.deepEqual(snapshot.completedSessions.map(item => item.sessionDate), [
+    '2026-08-31', '2026-09-01', '2026-09-02'
+  ]);
   assert.equal(snapshot.completedSessions.some(item => item.sessionDate === '2026-09-04'), false);
-  assert.equal(snapshot.completedSessions[0].previousClose, 100);
-  assert.equal(snapshot.completedSessions[1].previousClose, 101);
+  assert.equal(snapshot.completedSessions[0].previousClose, 99);
+  assert.equal(snapshot.completedSessions[2].previousClose, 101);
 });
 
 test('skips full-day weekends and holidays when deriving expected sessions', async () => {
   const rows = [
+    row('2026-08-31', 98, {time: '2026-08-31T13:30:00Z'}),
+    row('2026-09-01', 99, {time: '2026-09-01T13:30:00Z'}),
     row('2026-09-02', 100, {time: '2026-09-02T13:30:00Z'}),
     row('2026-09-03', 101, {time: '2026-09-03T13:30:00Z'}),
     row('2026-09-04', 102, {time: '2026-09-04T13:30:00Z'}),
@@ -122,9 +126,9 @@ test('skips full-day weekends and holidays when deriving expected sessions', asy
   const {service} = serviceFor({market: 'US', instant: '2026-09-08T21:00:00Z', rows, meta: {currency: 'USD'}});
   const snapshot = await service.acquireSnapshot({market: 'US', symbol: 'AAPL'});
   assert.deepEqual(snapshot.completedSessions.map(item => item.sessionDate), [
-    '2026-09-03', '2026-09-04', '2026-09-08'
+    '2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-08'
   ]);
-  assert.equal(snapshot.completedSessions[2].previousClose, 102);
+  assert.equal(snapshot.completedSessions[4].previousClose, 102);
   assert.equal(snapshot.completeness, 'COMPLETE');
 });
 
@@ -133,7 +137,7 @@ test('derives close instants independently of Yahoo daily-row timestamps and ign
   const {service} = serviceFor({rows, meta: {exchangeTimezoneName: 'Pacific/Honolulu'}});
   const snapshot = await service.acquireSnapshot({market: 'SG', symbol: '^STI'});
   assert.equal(snapshot.exchangeTimezone, 'Asia/Singapore');
-  assert.equal(snapshot.completedSessions[2].asOf, '2026-09-04T09:00:00.000Z');
+  assert.equal(snapshot.completedSessions.at(-1).asOf, '2026-09-04T09:00:00.000Z');
 });
 
 test('constructs SG and HK lunch overlays from real regular-market facts only', async () => {

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
-const {createCompletedRegularSession, createThreeSessionSnapshot} = require('../lib/three-session-snapshot');
+const {createCompletedRegularSession, createFiveSessionSnapshot} = require('../lib/five-session-snapshot');
 const {
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_MODEL,
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES,
@@ -25,7 +25,7 @@ function snapshot(symbol = '^GSPC') {
     asOf: '2026-09-11T16:00:00-04:00', sourceId: 'us.yahoo-finance',
     validationState: 'VALIDATED'
   });
-  return createThreeSessionSnapshot({
+  return createFiveSessionSnapshot({
     market: 'US', symbol, instrumentName: `${symbol} benchmark`, instrumentType: 'INDEX',
     currency: 'USD', marketState: 'CLOSED', completedSessions: [session], currentOverlay: null
   });

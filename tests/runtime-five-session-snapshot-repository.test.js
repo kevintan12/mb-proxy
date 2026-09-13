@@ -6,12 +6,12 @@ const path = require('node:path');
 const {
   createCompletedRegularSession,
   createCurrentSessionOverlay,
-  createThreeSessionSnapshot,
-  validateThreeSessionSnapshot
-} = require('../lib/three-session-snapshot');
+  createFiveSessionSnapshot,
+  validateFiveSessionSnapshot
+} = require('../lib/five-session-snapshot');
 const {
-  createRuntimeThreeSessionSnapshotRepository
-} = require('../lib/runtime-three-session-snapshot-repository');
+  createRuntimeFiveSessionSnapshotRepository
+} = require('../lib/runtime-five-session-snapshot-repository');
 
 function session(day, close, previousClose) {
   return createCompletedRegularSession({
@@ -29,7 +29,7 @@ function snapshot(overrides = {}) {
     asOf: '2026-09-07T04:15:00Z', lastPrice: 105, referenceClose: 104,
     volume: null, sourceId: 'sg.yahoo-finance', validationState: 'VALIDATED'
   });
-  return createThreeSessionSnapshot({
+  return createFiveSessionSnapshot({
     market: 'SG', symbol: '^STI', instrumentName: 'Straits Times Index',
     instrumentType: 'INDEX', currency: 'SGD', marketState: 'LUNCH',
     completedSessions: sessions, currentOverlay: overlay, ...overrides
@@ -51,7 +51,7 @@ function repositoryDouble({listed, failOn} = {}) {
 test('persists completed sessions oldest to newest, then reads and reconstructs canonically', async () => {
   const input = snapshot();
   const repository = repositoryDouble({listed: input.completedSessions});
-  const service = createRuntimeThreeSessionSnapshotRepository({repository});
+  const service = createRuntimeFiveSessionSnapshotRepository({repository});
   const result = await service.persistSnapshot(input);
 
   assert.deepEqual(repository.calls.map(call => call.method), ['upsertSnapshot']);
@@ -60,7 +60,7 @@ test('persists completed sessions oldest to newest, then reads and reconstructs 
   ]);
   assert.deepEqual(repository.calls[0].value.market, 'SG');
   assert.deepEqual(repository.calls[0].value.symbol, '^STI');
-  assert.equal(validateThreeSessionSnapshot(result).valid, true);
+  assert.equal(validateFiveSessionSnapshot(result).valid, true);
   assert.notEqual(result, input);
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.completedSessions), true);
@@ -69,7 +69,7 @@ test('persists completed sessions oldest to newest, then reads and reconstructs 
 test('never persists the runtime overlay and reattaches it only against the stored newest close', async () => {
   const input = snapshot();
   const repository = repositoryDouble({listed: input.completedSessions});
-  const result = await createRuntimeThreeSessionSnapshotRepository({repository}).persistSnapshot(input);
+  const result = await createRuntimeFiveSessionSnapshotRepository({repository}).persistSnapshot(input);
   assert.deepEqual(Object.keys(repository.calls[0].value), ['market', 'symbol', 'sessions']);
   assert.equal(repository.calls[0].value.currentOverlay, undefined);
   assert.deepEqual(result.currentOverlay, input.currentOverlay);
@@ -79,24 +79,24 @@ test('never persists the runtime overlay and reattaches it only against the stor
     asOf: '2026-09-07T02:00:00Z', lastPrice: 105, referenceClose: 104,
     volume: null, sourceId: 'sg.yahoo-finance', validationState: 'VALIDATED'
   });
-  const noHistory = createThreeSessionSnapshot({
+  const noHistory = createFiveSessionSnapshot({
     market: 'SG', symbol: '^STI', instrumentName: 'STI', instrumentType: 'INDEX',
     currency: 'SGD', marketState: 'REGULAR', completedSessions: [],
     currentOverlay: overlayWithoutHistory
   });
   const emptyRepository = repositoryDouble({listed: []});
-  const rebuilt = await createRuntimeThreeSessionSnapshotRepository({repository: emptyRepository})
+  const rebuilt = await createRuntimeFiveSessionSnapshotRepository({repository: emptyRepository})
     .persistSnapshot(noHistory);
   assert.equal(rebuilt.currentOverlay, null);
 
-  const partial = createThreeSessionSnapshot({
+  const partial = createFiveSessionSnapshot({
     market: 'SG', symbol: '^STI', instrumentName: 'STI', instrumentType: 'INDEX',
     currency: 'SGD', marketState: 'CLOSED',
     completedSessions: input.completedSessions.slice(0, 2), currentOverlay: null
   });
   const databaseAhead = repositoryDouble({listed: input.completedSessions});
   await assert.rejects(
-    createRuntimeThreeSessionSnapshotRepository({repository: databaseAhead}).persistSnapshot(partial),
+    createRuntimeFiveSessionSnapshotRepository({repository: databaseAhead}).persistSnapshot(partial),
     error => error.code === 'SNAPSHOT_READ_MISMATCH'
   );
 });
@@ -105,7 +105,7 @@ test('rejects missing, altered and non-contiguous persisted history', async () =
   const input = snapshot();
   const missing = repositoryDouble({listed: input.completedSessions.slice(0, 2)});
   await assert.rejects(
-    createRuntimeThreeSessionSnapshotRepository({repository: missing}).persistSnapshot(input),
+    createRuntimeFiveSessionSnapshotRepository({repository: missing}).persistSnapshot(input),
     error => error.code === 'SNAPSHOT_READ_MISMATCH'
   );
 
@@ -113,23 +113,23 @@ test('rejects missing, altered and non-contiguous persisted history', async () =
   altered[2].close = 999;
   const alteredRepository = repositoryDouble({listed: altered});
   await assert.rejects(
-    createRuntimeThreeSessionSnapshotRepository({repository: alteredRepository}).persistSnapshot(input),
+    createRuntimeFiveSessionSnapshotRepository({repository: alteredRepository}).persistSnapshot(input),
     error => error.code === 'SNAPSHOT_READ_MISMATCH'
   );
 
   const gapSessions = [session('02', 102, 101), session('04', 104, 102)];
-  const gapSnapshot = createThreeSessionSnapshot({
+  const gapSnapshot = createFiveSessionSnapshot({
     market: 'SG', symbol: '^STI', instrumentName: 'STI', instrumentType: 'INDEX',
     currency: 'SGD', marketState: 'CLOSED', completedSessions: gapSessions,
     currentOverlay: null
   });
   const gapRepository = repositoryDouble({listed: gapSessions});
   await assert.rejects(
-    createRuntimeThreeSessionSnapshotRepository({repository: gapRepository}).persistSnapshot(gapSnapshot),
+    createRuntimeFiveSessionSnapshotRepository({repository: gapRepository}).persistSnapshot(gapSnapshot),
     error => error.code === 'SNAPSHOT_CONTINUITY_INVALID'
   );
 
-  const shortInput = createThreeSessionSnapshot({
+  const shortInput = createFiveSessionSnapshot({
     market: 'SG', symbol: '^STI', instrumentName: 'STI', instrumentType: 'INDEX',
     currency: 'SGD', marketState: 'CLOSED',
     completedSessions: input.completedSessions.slice(1), currentOverlay: null
@@ -139,7 +139,7 @@ test('rejects missing, altered and non-contiguous persisted history', async () =
     listed: [badOlder, ...shortInput.completedSessions]
   });
   await assert.rejects(
-    createRuntimeThreeSessionSnapshotRepository({repository: brokenChainRepository})
+    createRuntimeFiveSessionSnapshotRepository({repository: brokenChainRepository})
       .persistSnapshot(shortInput),
     error => error.code === 'SNAPSHOT_CONTINUITY_INVALID'
   );
@@ -150,10 +150,10 @@ test('fails closed and sanitizes deterministic write/read failures', async () =>
     const input = snapshot();
     const repository = repositoryDouble({listed: input.completedSessions, failOn});
     await assert.rejects(
-      createRuntimeThreeSessionSnapshotRepository({repository}).persistSnapshot(input),
+      createRuntimeFiveSessionSnapshotRepository({repository}).persistSnapshot(input),
       error => {
         assert.equal(error.code, 'SNAPSHOT_PERSISTENCE_FAILED');
-        assert.equal(error.message, 'Three-session snapshot persistence failed');
+        assert.equal(error.message, 'Five-session snapshot persistence failed');
         assert.doesNotMatch(error.message, /secret|database:\/\//);
         assert.equal(Object.prototype.hasOwnProperty.call(error, 'cause'), false);
         return true;
@@ -167,7 +167,7 @@ test('rejects non-canonical input before any persistence call', async () => {
   input.completedSessions[0].provenance.publisher = 'Spoof';
   const repository = repositoryDouble({listed: []});
   await assert.rejects(
-    createRuntimeThreeSessionSnapshotRepository({repository}).persistSnapshot(input),
+    createRuntimeFiveSessionSnapshotRepository({repository}).persistSnapshot(input),
     /Invalid canonical/
   );
   assert.equal(repository.calls.length, 0);
@@ -175,7 +175,7 @@ test('rejects non-canonical input before any persistence call', async () => {
 
 test('runtime snapshot wiring has no route, migration, Claude, or Neon coupling', () => {
   const source = fs.readFileSync(path.join(
-    __dirname, '..', 'lib', 'runtime-three-session-snapshot-repository.js'
+    __dirname, '..', 'lib', 'runtime-five-session-snapshot-repository.js'
   ), 'utf8');
   assert.doesNotMatch(source, /api\/quote|analysisPackage|claude|@neondatabase|NEON_/i);
 });

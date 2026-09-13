@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const {createCompletedRegularSession, createThreeSessionSnapshot} = require('../lib/three-session-snapshot');
+const {createCompletedRegularSession, createFiveSessionSnapshot} = require('../lib/five-session-snapshot');
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
 const {
@@ -44,46 +44,32 @@ function request(selectedScope = 'US', overrides = {}) {
 }
 
 function snapshot(symbol) {
-  const previousSession = createCompletedRegularSession({
-    market: 'US',
-    sessionDate: '2026-09-03',
-    open: 95,
-    high: 102,
-    low: 94,
-    close: 100,
-    previousClose: 96,
-    volume: 900,
-    asOf: '2026-09-03T16:00:00-04:00',
-    sourceId: 'us.yahoo-finance',
+  const sessions = [
+    ['2026-08-31', 97, 96],
+    ['2026-09-01', 98, 97],
+    ['2026-09-02', 99, 98],
+    ['2026-09-03', 100, 99],
+    ['2026-09-04', 105, 100]
+  ].map(([sessionDate, close, previousClose], index) => createCompletedRegularSession({
+    market: 'US', sessionDate, open: close - 1, high: close + 5, low: close - 5,
+    close, previousClose, volume: 900 + index * 25,
+    asOf: `${sessionDate}T16:00:00-04:00`, sourceId: 'us.yahoo-finance',
     validationState: 'VALIDATED'
-  });
-  const session = createCompletedRegularSession({
-    market: 'US',
-    sessionDate: '2026-09-04',
-    open: 100,
-    high: 110,
-    low: 95,
-    close: 105,
-    previousClose: 100,
-    volume: 1000,
-    asOf: '2026-09-04T16:00:00-04:00',
-    sourceId: 'us.yahoo-finance',
-    validationState: 'VALIDATED'
-  });
-  return createThreeSessionSnapshot({
+  }));
+  return createFiveSessionSnapshot({
     market: 'US',
     symbol,
     instrumentName: `${symbol} instrument`,
     instrumentType: symbol.startsWith('^') ? 'INDEX' : 'EQUITY',
     currency: 'USD',
     marketState: 'CLOSED',
-    completedSessions: [previousSession, session],
+    completedSessions: sessions,
     currentOverlay: null
   });
 }
 
 function snapshotWithoutCompletedSessions(symbol) {
-  return createThreeSessionSnapshot({
+  return createFiveSessionSnapshot({
     market: 'US',
     symbol,
     instrumentName: `${symbol} instrument`,
@@ -692,7 +678,9 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
     evidenceRef: 'e2', sessionDate: '2026-09-04'
   }]);
   assert.deepEqual(context.unresolvedGaps, [CNBC_RECAP_UNAVAILABLE_GAP]);
-  assert.deepEqual(context.furtherReadings, []);
+  assert.deepEqual(context.furtherReadings, [{
+    evidenceRef: 'e2', sessionDate: '2026-09-04'
+  }]);
   assert.equal(JSON.stringify(output).includes('c1'), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
@@ -1013,6 +1001,10 @@ test('integrates one CNBC recap before general CNBC with package-owned associati
     {evidenceRef: 'e2', sessionDate: '2026-09-04'},
     {evidenceRef: 'e5', sessionDate: '2026-09-04'}
   ]);
+  assert.deepEqual(context.furtherReadings, [
+    {evidenceRef: 'e2', sessionDate: '2026-09-04'},
+    {evidenceRef: 'e5', sessionDate: '2026-09-04'}
+  ]);
   assert.equal(context.principalCatalysts.includes('e5'), false);
   assert.deepEqual(context.unresolvedGaps, []);
   assert.equal(context.evidence[4].item.provenance.publisher, 'CNBC');
@@ -1166,6 +1158,10 @@ test('successful CNBC recap remains in the package when general bounded search f
     evidenceRef: cnbcEvidence[0].reference,
     sessionDate: '2026-09-04'
   }]);
+  assert.deepEqual(context.furtherReadings, [{
+    evidenceRef: cnbcEvidence[0].reference,
+    sessionDate: '2026-09-04'
+  }]);
   assert.equal(context.unresolvedGaps.includes(CNBC_RECAP_UNAVAILABLE_GAP), false);
   assert.equal(context.unresolvedGaps.includes(CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP), true);
 });
@@ -1199,7 +1195,7 @@ test('every CNBC stage failure degrades to one deterministic package gap', async
 });
 
 test('unavailable or inconsistent canonical benchmark boundaries degrade CNBC only', async () => {
-  const oneSession = createThreeSessionSnapshot({
+  const oneSession = createFiveSessionSnapshot({
     market: 'US', symbol: '^RUT', instrumentName: 'benchmark', instrumentType: 'INDEX',
     currency: 'USD', marketState: 'CLOSED',
     completedSessions: [snapshot('^RUT').completedSessions[1]], currentOverlay: null

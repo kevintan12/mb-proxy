@@ -5,8 +5,8 @@ const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
 const {
   createCompletedRegularSession,
-  createThreeSessionSnapshot
-} = require('../lib/three-session-snapshot');
+  createFiveSessionSnapshot
+} = require('../lib/five-session-snapshot');
 const {validateClaudeAnalysisInput} = require('../lib/claude-analysis-contract');
 const {
   ANALYSIS_PACKAGE_REQUEST_KEYS,
@@ -48,7 +48,7 @@ function marketPackage(market, reference) {
     sourceId: config.source,
     validationState: 'VALIDATED'
   });
-  const snapshot = createThreeSessionSnapshot({
+  const snapshot = createFiveSessionSnapshot({
     market,
     symbol: config.symbol,
     instrumentName: `${market} benchmark`,

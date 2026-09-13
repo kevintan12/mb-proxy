@@ -28,7 +28,7 @@ test('runtime composition includes bounded CNBC and Yahoo recap research but not
   const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'analysis-package-runtime.js'), 'utf8');
   for (const component of [
     'getPostgresRuntime',
-    'createRuntimeThreeSessionSnapshotRepository',
+    'createRuntimeFiveSessionSnapshotRepository',
     'createYahooTelemetryAcquisitionService',
     'createYahooMarketDataEvidenceAcquisitionService',
     'createFederalReserveMonetaryPolicyEvidenceAcquisitionService',

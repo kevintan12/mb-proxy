@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
-const {createCompletedRegularSession, createThreeSessionSnapshot} = require('../lib/three-session-snapshot');
+const {createCompletedRegularSession, createFiveSessionSnapshot} = require('../lib/five-session-snapshot');
 const {
   CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA,
   REPORT_HEADER,
@@ -44,7 +44,7 @@ function canonicalInput({
     close: 5747, previousClose: 5710, volume: null, asOf: '2026-09-04T17:00:00+08:00',
     sourceId: 'sg.yahoo-finance', validationState: 'VALIDATED'
   });
-  const snapshot = createThreeSessionSnapshot({
+  const snapshot = createFiveSessionSnapshot({
     market: 'SG', symbol: '^STI', instrumentName: 'Straits Times Index', instrumentType: 'INDEX',
     currency: 'SGD', marketState: 'CLOSED', completedSessions: [session], currentOverlay: null
   });
@@ -430,23 +430,44 @@ test('gives Claude supplied-evidence-only Section 2 macro comparison instruction
   }
 });
 
+test('gives Sections 1-3 exact concise prioritization and causal instructions', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'For Section 1 EXECUTIVE MARKET SUMMARY, write two or three concise paragraphs',
+    'dominant market story, supported direction and magnitude, overall sentiment and themes',
+    'distinction between completed results and developing conditions',
+    'Avoid low-value repetition and padding',
+    'present only a small prioritized set of the most material supported drivers',
+    'distinguish established facts, developing conditions, and qualified interpretation',
+    'never invent a driver merely to fill the section',
+    'For Section 3 WHAT DROVE / IS DRIVING THE MARKET',
+    'explain interactions among drivers where materially relevant',
+    'Temporal proximity alone is not causality',
+    'never present a SUBSEQUENT_DEVELOPMENT as causing an earlier completed-session move'
+  ]) assert.equal(system.includes(requirement), true, requirement);
+});
+
 test('gives Section 4 non-causal broad-market session-association instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
     'For Section 4 STOCKS & SECTORS IN FOCUS',
-    'review evidenceContext.sessionAssociations',
+    'Review evidenceContext.sessionAssociations',
     'when materially relevant',
     'associated supplied evidence reference as current-session recap or context',
     'marketContext.primaryCompletedSessionDate',
     'even when that evidence is also a SUBSEQUENT_DEVELOPMENT',
-    'broad-market leadership and laggards, sectors, notable individual movers',
-    'closing-session breadth, rotation, or context',
+    'broad-market leadership and laggards, notable individual movers, closing-session breadth, sector rotation',
     'Never present post-close session-associated evidence as having caused the earlier completed-session move',
     'never treat session association as PRINCIPAL_CATALYST eligibility',
     'Section 4 must remain broad-market and independent of My Stocks and Watchlist',
     'membership in either list must not determine which broad-market movers Section 4 discusses',
     'Do not require Section 4 to use every associated reference',
     'or use an association that is immaterial',
+    'all materially relevant broad-market materialEvents, supportingEvidence, recap and general CNBC evidence',
+    'Rank the significant companies and sectors',
+    'explaining why each matters and comparing it with the broader market where useful',
+    'Do not produce a generic mover list',
+    'If the evidence is insufficient, use qualified analysis or the existing null/DEGRADED behavior',
     'When Section 4 uses a session-associated broad-market evidence reference, cite that reference in Section 4 evidenceRefs',
     'Do not copy such a reference into Section 5 merely because it is session-associated, broad-market evidence',
     'relevant to market leadership, sectors, movers, breadth, or rotation',
@@ -455,6 +476,29 @@ test('gives Section 4 non-causal broad-market session-association instructions',
   ]) {
     assert.equal(system.includes(requirement), true, requirement);
   }
+});
+
+test('gives Sections 6-8 and 10 exact interpretation, risk, opportunity and takeaway instructions', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'For Section 6 MARKET INTERPRETATION',
+    'supported sentiment, risk appetite, breadth, momentum, and rotation',
+    'continuation, reversal, consolidation, or a change in narrative',
+    'participation is broad or concentrated',
+    'For Section 7 KEY RISKS',
+    'Distinguish an identifiable risk from a prediction',
+    'do not add a generic balanced list merely to populate the section',
+    'For Section 8 OPPORTUNITIES',
+    'specific evidence-supported broad-market sectors, themes, or companies',
+    'distinguish positive evidence from a speculative scenario',
+    'never use generic filler such as treating a possible rebound as a buying opportunity',
+    'never attach an unrelated reference merely to satisfy validation',
+    'If no defensible opportunity is supported, set content to null',
+    'use DEGRADED status',
+    'For Section 10 MARKETBRIEF TAKEAWAY, write two to four concise sentences',
+    'Do not simply repeat Section 1',
+    'do not make an unsupported recommendation'
+  ]) assert.equal(system.includes(requirement), true, requirement);
 });
 
 test('gives Claude time-safe materially relevant subsequent-development instructions', () => {
@@ -492,9 +536,11 @@ test('gives Claude the exact section uncertainty canonicality requirements', () 
 test('gives Claude plain-language and locked movement presentation instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
-    'Write for an informed layperson, not a professional market analyst',
-    'Use clear everyday English and avoid unnecessary finance jargon',
-    'If a financial term is genuinely useful, explain it briefly in plain language',
+    'clear, normal spoken English for an informed layperson, not a professional market analyst',
+    'Prefer common words when they are equally accurate',
+    'short, direct sentences where practical',
+    'Avoid institutional or analyst-desk jargon',
+    'If a technical or financial term is unavoidable, explain it briefly in plain language',
     'Preserve analytical depth: simplify wording, not reasoning',
     'Apple fell $8.24 (2.51%) to $319.97.',
     'Apple gained $3.25 (1.00%) to $328.21.',
