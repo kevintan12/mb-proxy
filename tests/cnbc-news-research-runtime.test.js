@@ -22,6 +22,19 @@ function rss() {
     + '</item></channel></rss>';
 }
 
+function rssWithUnsupportedBiggestMoves() {
+  const entry = (title, url) => '<item>'
+    + `<title>${title}</title><description>Bounded market summary.</description>`
+    + `<link>${url}</link><pubDate>Fri, 04 Sep 2026 12:00:00 -0400</pubDate>`
+    + '</item>';
+  return '<?xml version="1.0"?><rss><channel>'
+    + entry('Midday moves', 'https://www.cnbc.com/2026/09/04/stocks-making-the-biggest-moves-midday-example.html')
+    + entry('Supported market update', 'https://www.cnbc.com/2026/09/04/market-update.html')
+    + entry('Premarket moves', 'https://www.cnbc.com/2026/09/04/stocks-making-the-biggest-moves-premarket-example.html')
+    + entry('After-hours moves', 'https://www.cnbc.com/2026/09/04/stocks-making-the-biggest-moves-after-hours-example.html')
+    + '</channel></rss>';
+}
+
 test('defines one deeply immutable production bounds bundle', () => {
   const bounds = CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS;
   assert.deepEqual(bounds, {
@@ -70,6 +83,43 @@ test('composes one CNBC acquisition and one guarded materiality invocation with 
   assert.equal(calls.filter(call => call.url === 'https://api.anthropic.com/v1/messages').length, 1);
   assert.equal(calls.length, 2);
   assert.equal(calls[1].options.headers['x-api-key'], 'server-key');
+});
+
+test('filters unsupported biggest-moves pages before materiality and preserves eligible ordering', async () => {
+  const calls = [];
+  const service = createCnbcNewsResearchRuntime({
+    apiKey: 'server-key',
+    fetchImpl: async (url, options) => {
+      calls.push({url, options});
+      if (url.includes('search.cnbc.com')) {
+        return {
+          ok: true, status: 200, headers: {get: () => null},
+          async text() { return rssWithUnsupportedBiggestMoves(); }
+        };
+      }
+      const request = JSON.parse(options.body);
+      const serializedRequest = JSON.stringify(request);
+      assert.equal(serializedRequest.includes('Midday moves'), false);
+      assert.equal(serializedRequest.includes('Premarket moves'), false);
+      assert.equal(serializedRequest.includes('After-hours moves'), false);
+      assert.equal(serializedRequest.includes('Supported market update'), true);
+      return {
+        ok: true, status: 200, headers: {get: () => null},
+        async json() {
+          return {content: [{type: 'text', text: JSON.stringify({selections: [{
+            reference: 'c1', decision: 'SKIP', category: 'news', materiality: 'LOW',
+            reason: 'Not material for this research window.'
+          }]})}]};
+        }
+      };
+    }
+  });
+  const result = await service.researchNews({horizons});
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.candidateCollection.candidates.map(candidate => [
+    candidate.reference, candidate.title
+  ]), [['c1', 'Supported market update']]);
+  assert.equal(calls.length, 2);
 });
 
 test('uses the one bounds bundle at every composed stage and does not invoke final synthesis', () => {

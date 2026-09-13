@@ -357,6 +357,65 @@ test('extracts an article node nested in an @graph and permits absent dateModifi
   assert.equal(result.updatedAt, null);
 });
 
+test('accepts explicit basic and extended timezone offsets while rejecting ambiguous or malformed forms', async () => {
+  for (const [timestamp, expected] of [
+    ['2026-09-08T12:00:00+0000', '2026-09-08T12:00:00.000Z'],
+    ['2026-09-08T12:00:00-0400', '2026-09-08T16:00:00.000Z'],
+    ['2026-09-08T18:00:00+0530', '2026-09-08T12:30:00.000Z'],
+    ['2026-09-08T12:00:00+00:00', '2026-09-08T12:00:00.000Z'],
+    ['2026-09-08T12:00:00-04:00', '2026-09-08T16:00:00.000Z'],
+    ['2026-09-08T12:00:00Z', '2026-09-08T12:00:00.000Z']
+  ]) {
+    const result = await createCnbcArticleContentAcquisitionService({
+      fetchImpl: async () => response(articleHtml({datePublished: timestamp, dateModified: null}))
+    }).acquireArticleContent({candidate: candidate(), bounds: retrievalBounds});
+    assert.equal(result.publishedAt, expected);
+  }
+
+  for (const timestamp of [
+    '2026-09-08T12:00:00',
+    '2026-09-08T12:00:00+000',
+    '2026-09-08T12:00:00+00000',
+    '2026-09-08T12:00:00+2400',
+    '2026-09-08T12:00:00+0060'
+  ]) {
+    const service = createCnbcArticleContentAcquisitionService({
+      fetchImpl: async () => response(articleHtml({datePublished: timestamp, dateModified: null}))
+    });
+    await assert.rejects(
+      service.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}),
+      assertExtractionFailure('INVALID_DATE_PUBLISHED')
+    );
+  }
+});
+
+test('extracts a CNBC-style recap update with basic UTC offsets', async () => {
+  const recapUrl = 'https://www.cnbc.com/2026/09/10/stock-market-today-live-updates.html';
+  const discovery = Object.freeze({
+    title: 'Stock market news for Sept. 11, 2026', url: recapUrl,
+    discoveredVia: 'ANTHROPIC_WEB_SEARCH', targetSessionDate: '2026-09-11'
+  });
+  const html = liveBlogHtml({
+    liveBlog: {
+      datePublished: '2026-09-10T22:03:32+0000',
+      dateModified: '2026-09-11T20:35:11+0000'
+    },
+    updates: [blogUpdate({
+      articleBody: 'Stocks snap four days of losses on Friday.',
+      datePublished: '2026-09-11T20:15:23+0000',
+      dateModified: '2026-09-11T20:15:23+0000'
+    })]
+  });
+  const result = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(html, {url: recapUrl})
+  }).acquireRecapArticleContent({discovery, bounds: retrievalBounds});
+
+  assert.equal(result.selectedArticleType, 'BlogPosting');
+  assert.equal(result.publishedAt, '2026-09-11T20:15:23.000Z');
+  assert.equal(result.updatedAt, '2026-09-11T20:15:23.000Z');
+  assert.equal(result.articleText, 'Stocks snap four days of losses on Friday.');
+});
+
 test('selects the first fully extractable conventional article', async () => {
   const nodes = [{
     '@type': 'NewsArticle',

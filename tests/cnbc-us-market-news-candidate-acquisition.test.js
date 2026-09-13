@@ -138,6 +138,41 @@ test('filters by caller horizons before assigning references', async () => {
   assert.deepEqual(collection.candidates.map(candidate => candidate.reference), ['c1', 'c2']);
 });
 
+test('excludes only the unsupported biggest-moves families before assigning references', async () => {
+  const service = serviceFor(rss([
+    item({
+      title: 'Midday biggest moves',
+      link: 'https://www.cnbc.com/2026/09/11/stocks-making-the-biggest-moves-midday-dell-swks-gme.html'
+    }),
+    item({
+      title: 'Supported ordinary article',
+      link: 'https://www.cnbc.com/2026/09/11/market-update.html'
+    }),
+    item({
+      title: 'Premarket biggest moves',
+      link: 'https://www.cnbc.com/2026/09/11/stocks-making-the-biggest-moves-premarket-gme-orcl-adbe-rh.html'
+    }),
+    item({
+      title: 'Supported live blog',
+      link: 'https://www.cnbc.com/2026/09/10/stock-market-today-live-updates.html'
+    }),
+    item({
+      title: 'After-hours biggest moves',
+      link: 'https://www.cnbc.com/2026/09/10/stocks-making-the-biggest-moves-after-hours-orcl-adbe-rh.html'
+    }),
+    item({
+      title: 'Unrelated similarly named article',
+      link: 'https://www.cnbc.com/2026/09/11/stocks-making-the-biggest-moves-weekly-roundup.html'
+    })
+  ]));
+  const collection = await service.acquireCandidates({horizons, bounds});
+  assert.deepEqual(collection.candidates.map(candidate => [candidate.reference, candidate.title]), [
+    ['c1', 'Supported ordinary article'],
+    ['c2', 'Supported live blog'],
+    ['c3', 'Unrelated similarly named article']
+  ]);
+});
+
 test('accepts only HTTPS CNBC-owned article links without repairing invalid links', async () => {
   const service = serviceFor(rss([
     item({title: 'HTTP', link: 'http://www.cnbc.com/http.html'}),
