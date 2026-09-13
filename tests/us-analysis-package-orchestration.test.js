@@ -1071,10 +1071,12 @@ test('CNBC recap association excludes exact-close, pre-close, and over-two-hour 
 
 test('integrates completed and subsequent CNBC evidence after Yahoo and Fed with package-owned refs', async () => {
   let researchCalls = 0;
+  let researchTargetSessionDate = null;
   const {service} = harness({
     cnbcNewsResearch: {
-      async researchNews({horizons}) {
+      async researchNews({targetSessionDate, horizons}) {
         researchCalls++;
+        researchTargetSessionDate = targetSessionDate;
         return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT']);
       }
     }
@@ -1083,6 +1085,7 @@ test('integrates completed and subsequent CNBC evidence after Yahoo and Fed with
   const context = output.marketPackages[0].evidenceContext;
   assert.equal(validateClaudeAnalysisInput(output), true);
   assert.equal(researchCalls, 1);
+  assert.equal(researchTargetSessionDate, '2026-09-04');
   assert.deepEqual(context.evidence.map(entry => [entry.reference, entry.item.sourceId]), [
     ['e1', 'us.yahoo-finance'],
     ['e2', 'us.federal-reserve'],
@@ -1105,8 +1108,71 @@ test('CNBC all-SKIP adds no evidence or gap', async () => {
   assert.deepEqual(context.unresolvedGaps, [YAHOO_RECAP_UNAVAILABLE_GAP, CNBC_RECAP_UNAVAILABLE_GAP]);
 });
 
+test('CNBC bounded-search NOT_FOUND remains optional and adds the existing deterministic gap', async () => {
+  const diagnostics = [];
+  const {service} = harness({
+    cnbcNewsResearch: {
+      async researchNews() {
+        return {
+          ok: true,
+          type: 'NOT_FOUND',
+          candidateCollection: {market: 'US', candidates: []},
+          selections: [],
+          retrievedArticles: [],
+          constructedEvidence: []
+        };
+      }
+    },
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.equal(validateClaudeAnalysisInput(output), true);
+  assert.deepEqual(context.unresolvedGaps, [
+    YAHOO_RECAP_UNAVAILABLE_GAP,
+    CNBC_RECAP_UNAVAILABLE_GAP,
+    CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP
+  ]);
+  assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
+  assert.equal(diagnostics.some(item =>
+    item.stage === 'cnbcNewsResearchIntegration'
+      && item.failureType === 'NOT_FOUND'), true);
+});
+
+test('successful CNBC recap remains in the package when general bounded search finds nothing', async () => {
+  const {service} = harness({
+    cnbcRecapResearch: {
+      async researchCompletedSessionRecap({horizons}) {
+        return cnbcRecapResearchSuccess({horizon: horizons[1]});
+      }
+    },
+    cnbcNewsResearch: {
+      async researchNews() {
+        return {
+          ok: true,
+          type: 'NOT_FOUND',
+          candidateCollection: {market: 'US', candidates: []},
+          selections: [],
+          retrievedArticles: [],
+          constructedEvidence: []
+        };
+      }
+    }
+  });
+  const context = (await service.assemble(request())).marketPackages[0].evidenceContext;
+  const cnbcEvidence = context.evidence.filter(entry => entry.item.sourceId === 'us.cnbc');
+  assert.equal(cnbcEvidence.length, 1);
+  assert.deepEqual(context.sessionAssociations, [{
+    evidenceRef: cnbcEvidence[0].reference,
+    sessionDate: '2026-09-04'
+  }]);
+  assert.equal(context.unresolvedGaps.includes(CNBC_RECAP_UNAVAILABLE_GAP), false);
+  assert.equal(context.unresolvedGaps.includes(CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP), true);
+});
+
 test('every CNBC stage failure degrades to one deterministic package gap', async () => {
   for (const type of [
+    'DISCOVERY_PROVIDER_FAILURE',
     'CANDIDATE_ACQUISITION_FAILURE',
     'MATERIALITY_PROVIDER_FAILURE',
     'MATERIALITY_CONTRACT_FAILURE',

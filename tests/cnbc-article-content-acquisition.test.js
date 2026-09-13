@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {createNewsEvidenceCandidate} = require('../lib/news-evidence-candidates');
 const {
   CNBC_ARTICLE_CONTENT_RESULT_KEYS,
+  CNBC_DISCOVERED_ARTICLE_RESULT_KEYS,
   CNBC_EXTRACTION_DIAGNOSTIC_FAILURE_TYPES,
   CNBC_RECAP_ARTICLE_CONTENT_RESULT_KEYS,
   CnbcArticleContentAcquisitionError,
@@ -194,6 +195,29 @@ test('acquires a discovered CNBC recap from the first usable direct live-blog up
   assert.equal(result.articleText.includes('later update'), false);
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.provenance), true);
+});
+
+test('acquires one general discovered page with provider-owned headline and timestamps', async () => {
+  const discovery = Object.freeze({
+    rank: 2,
+    title: 'Search title is discovery metadata only',
+    url,
+    discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+    targetSessionDate: '2026-09-08'
+  });
+  const calls = [];
+  const result = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async (...args) => { calls.push(args); return response(); }
+  }).acquireDiscoveredArticleContent({discovery, bounds: retrievalBounds});
+  assert.equal(calls.length, 1);
+  assert.deepEqual(Object.keys(result), CNBC_DISCOVERED_ARTICLE_RESULT_KEYS);
+  assert.equal(result.discoveryRank, 2);
+  assert.equal(result.title, 'Provider headline is not authoritative here');
+  assert.equal(result.publishedAt, '2026-09-08T12:00:00.000Z');
+  assert.equal(result.updatedAt, '2026-09-08T13:30:00.000Z');
+  assert.equal(result.articleText, 'Markets moved after new data. Investors reassessed risk.');
+  assert.equal(result.targetSessionDate, '2026-09-08');
+  assert.equal(Object.isFrozen(result), true);
 });
 
 test('validates recap session identity from selected publishedAt only', async () => {

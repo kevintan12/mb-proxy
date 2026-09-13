@@ -2,168 +2,95 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-
 const {
   CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS,
   createCnbcNewsResearchRuntime
 } = require('../lib/cnbc-news-research-runtime');
 
+const targetSessionDate = '2026-09-11';
 const horizons = [{
   classification: 'COMPLETED_SESSION',
-  startsAtExclusive: '2026-09-03T20:00:00.000Z',
-  endsAtInclusive: '2026-09-04T20:00:00.000Z'
+  startsAtExclusive: '2026-09-10T20:00:00.000Z',
+  endsAtInclusive: '2026-09-11T20:00:00.000Z'
+}, {
+  classification: 'SUBSEQUENT_DEVELOPMENT',
+  startsAtExclusive: '2026-09-11T20:00:00.000Z',
+  endsAtInclusive: '2026-09-12T20:00:00.000Z'
 }];
+const urls = [
+  'https://www.cnbc.com/2026/09/11/sector-leaders.html',
+  'https://www.cnbc.com/2026/09/11/notable-movers.html'
+];
 
-function rss() {
-  return '<?xml version="1.0"?><rss><channel><item>'
-    + '<title>Market update</title><description>Bounded market summary.</description>'
-    + '<link>https://www.cnbc.com/2026/09/04/market-update.html</link>'
-    + '<pubDate>Fri, 04 Sep 2026 12:00:00 -0400</pubDate>'
-    + '</item></channel></rss>';
+function searchResponse() {
+  return {
+    ok: true, status: 200, headers: {get: () => null},
+    async json() {
+      return {content: [{type: 'web_search_tool_result', content: urls.map((url, index) => ({
+        type: 'web_search_result', title: `Search result ${index + 1}`, url,
+        encrypted_content: 'never evidence'
+      }))}], usage: {server_tool_use: {web_search_requests: 1}}};
+    }
+  };
+}
+function articleResponse(url, index) {
+  const article = {
+    '@context': 'https://schema.org', '@type': 'NewsArticle',
+    headline: `Provider headline ${index + 1}`,
+    datePublished: index === 0 ? '2026-09-11T19:00:00+0000' : '2026-09-11T20:30:00+0000',
+    dateModified: index === 0 ? null : '2026-09-11T21:00:00+0000',
+    articleBody: `Provider-owned market article ${index + 1}.`
+  };
+  const html = `<script type="application/ld+json">${JSON.stringify(article)}</script>`;
+  return {ok: true, status: 200, url, headers: {get: name => name === 'content-type' ? 'text/html' : null}, async text() { return html; }};
 }
 
-function rssWithUnsupportedBiggestMoves() {
-  const entry = (title, url) => '<item>'
-    + `<title>${title}</title><description>Bounded market summary.</description>`
-    + `<link>${url}</link><pubDate>Fri, 04 Sep 2026 12:00:00 -0400</pubDate>`
-    + '</item>';
-  return '<?xml version="1.0"?><rss><channel>'
-    + entry('Midday moves', 'https://www.cnbc.com/2026/09/04/stocks-making-the-biggest-moves-midday-example.html')
-    + entry('Supported market update', 'https://www.cnbc.com/2026/09/04/market-update.html')
-    + entry('Premarket moves', 'https://www.cnbc.com/2026/09/04/stocks-making-the-biggest-moves-premarket-example.html')
-    + entry('After-hours moves', 'https://www.cnbc.com/2026/09/04/stocks-making-the-biggest-moves-after-hours-example.html')
-    + '</channel></rss>';
-}
-
-test('defines one deeply immutable production bounds bundle', () => {
-  const bounds = CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS;
-  assert.deepEqual(bounds, {
-    candidateBounds: {
-      maxCandidates: 20, maxTitleBytes: 512, maxSummaryBytes: 2048,
-      maxExtractBytes: 2048, maxCollectionBytes: 32768
-    },
-    articleRetrievalBounds: {
-      timeoutMs: 4000, maxResponseBytes: 1310720, maxArticleTextBytes: 8192,
-      maxTitleBytes: 512, maxResultBytes: 12288
-    },
-    evidenceConstructionBounds: {
-      maxEvidenceTextBytes: 8192, maxTitleBytes: 512, maxCollectionBytes: 65536
-    }
+test('owns the unchanged deeply immutable production bounds', () => {
+  assert.deepEqual(CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS, {
+    candidateBounds: {maxCandidates: 20, maxTitleBytes: 512, maxSummaryBytes: 2048, maxExtractBytes: 2048, maxCollectionBytes: 32768},
+    articleRetrievalBounds: {timeoutMs: 4000, maxResponseBytes: 1310720, maxArticleTextBytes: 8192, maxTitleBytes: 512, maxResultBytes: 12288},
+    evidenceConstructionBounds: {maxEvidenceTextBytes: 8192, maxTitleBytes: 512, maxCollectionBytes: 65536}
   });
-  assert.equal(Object.isFrozen(bounds), true);
-  assert.equal(Object.values(bounds).every(Object.isFrozen), true);
+  assert.equal(Object.values(CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS).every(Object.isFrozen), true);
 });
 
-test('composes one CNBC acquisition and one guarded materiality invocation with shared bounds', async () => {
+test('composes one bounded search, one fetch per page, one materiality call, and no second article fetch', async () => {
   const calls = [];
+  let anthropicCalls = 0;
   const service = createCnbcNewsResearchRuntime({
     apiKey: 'server-key',
     fetchImpl: async (url, options) => {
-      calls.push({url, options});
-      if (url.includes('search.cnbc.com')) {
-        return {
-          ok: true, status: 200, headers: {get: () => null},
-          async text() { return rss(); }
-        };
-      }
-      return {
-        ok: true, status: 200, headers: {get: () => null},
-        async json() {
-          return {content: [{type: 'text', text: JSON.stringify({selections: [{
-            reference: 'c1', decision: 'SKIP', category: 'news', materiality: 'LOW',
-            reason: 'Not material for this research window.'
-          }]})}]};
-        }
-      };
-    }
-  });
-  const result = await service.researchNews({horizons});
-  assert.equal(result.ok, true);
-  assert.equal(result.constructedEvidence.length, 0);
-  assert.equal(calls.filter(call => call.url === 'https://api.anthropic.com/v1/messages').length, 1);
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1].options.headers['x-api-key'], 'server-key');
-});
-
-test('filters unsupported biggest-moves pages before materiality and preserves eligible ordering', async () => {
-  const calls = [];
-  const service = createCnbcNewsResearchRuntime({
-    apiKey: 'server-key',
-    fetchImpl: async (url, options) => {
-      calls.push({url, options});
-      if (url.includes('search.cnbc.com')) {
-        return {
-          ok: true, status: 200, headers: {get: () => null},
-          async text() { return rssWithUnsupportedBiggestMoves(); }
-        };
-      }
-      const request = JSON.parse(options.body);
-      const serializedRequest = JSON.stringify(request);
-      assert.equal(serializedRequest.includes('Midday moves'), false);
-      assert.equal(serializedRequest.includes('Premarket moves'), false);
-      assert.equal(serializedRequest.includes('After-hours moves'), false);
-      assert.equal(serializedRequest.includes('Supported market update'), true);
-      return {
-        ok: true, status: 200, headers: {get: () => null},
-        async json() {
-          return {content: [{type: 'text', text: JSON.stringify({selections: [{
-            reference: 'c1', decision: 'SKIP', category: 'news', materiality: 'LOW',
-            reason: 'Not material for this research window.'
-          }]})}]};
-        }
-      };
-    }
-  });
-  const result = await service.researchNews({horizons});
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.candidateCollection.candidates.map(candidate => [
-    candidate.reference, candidate.title
-  ]), [['c1', 'Supported market update']]);
-  assert.equal(calls.length, 2);
-});
-
-test('uses the one bounds bundle at every composed stage and does not invoke final synthesis', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../lib/cnbc-news-research-runtime.js'), 'utf8');
-  for (const field of ['candidateBounds', 'articleRetrievalBounds', 'evidenceConstructionBounds']) {
-    assert.ok(source.split(`bounds.${field}`).length >= 3);
-  }
-  assert.doesNotMatch(source, /invokeClaudeAnalysis|claude-analysis-invocation|analysis-package-service/);
-});
-
-test('forwards sanitized selected-article failure diagnostics through production composition', async () => {
-  const diagnostics = [];
-  const calls = [];
-  const service = createCnbcNewsResearchRuntime({
-    apiKey: 'server-key',
-    onDiagnostics: value => diagnostics.push(value),
-    fetchImpl: async (url, options) => {
-      calls.push({url, options});
-      if (url.includes('search.cnbc.com')) {
-        return {
-          ok: true, status: 200, headers: {get: () => null},
-          async text() { return rss(); }
-        };
-      }
+      calls.push(url);
       if (url === 'https://api.anthropic.com/v1/messages') {
+        anthropicCalls++;
+        if (JSON.parse(options.body).tools) return searchResponse();
         return {
           ok: true, status: 200, headers: {get: () => null},
           async json() {
-            return {content: [{type: 'text', text: JSON.stringify({selections: [{
-              reference: 'c1', decision: 'USE', category: 'news', materiality: 'HIGH',
-              reason: 'Material market development.'
-            }]})}]};
+            return {content: [{type: 'text', text: JSON.stringify({selections: [
+              {reference: 'c1', decision: 'USE', category: 'news', materiality: 'HIGH', reason: 'Material leadership.'},
+              {reference: 'c2', decision: 'SKIP', category: 'news', materiality: 'LOW', reason: 'Less material.'}
+            ]})}]};
           }
         };
       }
-      return {ok: false, status: 403, headers: {get: () => 'text/html'}};
+      return articleResponse(url, urls.indexOf(url));
     }
   });
-  const result = await service.researchNews({horizons});
-  assert.equal(result.type, 'ARTICLE_RETRIEVAL_FAILURE');
-  assert.equal(calls.length, 3);
-  assert.deepEqual(diagnostics.find(item => item.stage === 'cnbcSelectedArticleRetrieval'), {
-    stage: 'cnbcSelectedArticleRetrieval',
-    failedCandidateReference: 'c1',
-    failureType: 'HTTP_FAILURE'
-  });
+  const result = await service.researchNews({targetSessionDate, horizons});
+  assert.equal(result.ok, true);
+  assert.equal(anthropicCalls, 2);
+  assert.deepEqual(urls.map(url => calls.filter(value => value === url).length), [1, 1]);
+  assert.deepEqual(result.candidateCollection.candidates.map(item => [item.reference, item.title]), [
+    ['c1', 'Provider headline 1'], ['c2', 'Provider headline 2']
+  ]);
+  assert.deepEqual(result.retrievedArticles.map(item => item.reference), ['c1']);
+  assert.deepEqual(result.constructedEvidence.map(item => item.candidateReference), ['c1']);
+});
+
+test('contains no RSS or duplicate selected-article retrieval production dependency', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../lib/cnbc-news-research-runtime.js'), 'utf8');
+  assert.doesNotMatch(source, /cnbc-us-market-news-candidate-acquisition|selected-article-retrieval|Market Insider|RSS/i);
+  assert.match(source, /claude-bounded-cnbc-market-news-discovery/);
+  assert.match(source, /cnbc-search-news-candidate-acquisition/);
 });

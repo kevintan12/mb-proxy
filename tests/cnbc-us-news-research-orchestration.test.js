@@ -9,9 +9,6 @@ const {
 } = require('../lib/news-evidence-candidates');
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {
-  createCnbcSelectedArticleRetrievalOrchestrationService
-} = require('../lib/cnbc-selected-article-retrieval-orchestration');
-const {
   createCnbcRetrievedArticleEvidenceConstructionService
 } = require('../lib/cnbc-retrieved-article-evidence-construction');
 const {
@@ -93,44 +90,35 @@ function articleFor(item) {
 
 function composedService(decisions, overrides = {}) {
   const acquired = collection();
-  const articleCalls = [];
-  const selectedArticleRetrieval = createCnbcSelectedArticleRetrievalOrchestrationService({
-    articleContentAcquisition: {
-      async acquireArticleContent({candidate: item}) {
-        articleCalls.push(item.reference);
-        return articleFor(item);
-      }
-    },
-    candidateBounds,
-    articleRetrievalBounds
-  });
+  const retainedArticles = acquired.candidates.map(articleFor);
   const evidenceConstruction = createCnbcRetrievedArticleEvidenceConstructionService({
     candidateBounds,
     evidenceConstructionBounds
   });
   let materialityCalls = 0;
   const service = createCnbcUsNewsResearchOrchestrationService({
-    candidateAcquisition: {acquireCandidates: async () => acquired},
+    candidateAcquisition: {acquireCandidates: async () => ({
+      candidateCollection: acquired,
+      retrievedArticles: retainedArticles
+    })},
     invokeMaterialitySelection: async () => {
       materialityCalls++;
       return {ok: true, type: 'SUCCESS', output: selectionOutput(decisions)};
     },
-    selectedArticleRetrieval,
     evidenceConstruction,
     candidateBounds,
     articleRetrievalBounds,
     evidenceConstructionBounds,
     ...overrides
   });
-  return {service, articleCalls, materialityCalls: () => materialityCalls};
+  return {service, materialityCalls: () => materialityCalls};
 }
 
-test('all SKIP completes all four stages with zero article fetches and empty evidence', async () => {
+test('all SKIP reuses prefetched articles without selected retrieval and returns empty evidence', async () => {
   const composed = composedService(['SKIP', 'SKIP', 'SKIP']);
   const result = await composed.service.researchNews({horizons});
   assert.equal(result.ok, true);
   assert.deepEqual(Object.keys(result), CNBC_US_NEWS_RESEARCH_RESULT_KEYS);
-  assert.deepEqual(composed.articleCalls, []);
   assert.equal(composed.materialityCalls(), 1);
   assert.deepEqual(result.retrievedArticles, []);
   assert.deepEqual(result.constructedEvidence, []);
@@ -140,7 +128,6 @@ test('one USE preserves cN linkage through selection, article and evidence', asy
   const composed = composedService(['SKIP', 'USE', 'SKIP']);
   const result = await composed.service.researchNews({horizons});
   assert.equal(result.ok, true);
-  assert.deepEqual(composed.articleCalls, ['c2']);
   assert.deepEqual(result.retrievedArticles.map(item => item.reference), ['c2']);
   assert.deepEqual(result.constructedEvidence.map(item => item.candidateReference), ['c2']);
   assert.equal(result.constructedEvidence[0].selection.reference, 'c2');
@@ -151,7 +138,6 @@ test('multiple USE candidates retain deterministic candidate order and identity'
   const composed = composedService(['USE', 'SKIP', 'USE']);
   const result = await composed.service.researchNews({horizons});
   assert.equal(result.ok, true);
-  assert.deepEqual(composed.articleCalls, ['c1', 'c3']);
   assert.deepEqual(result.candidateCollection.candidates.map(item => item.reference), ['c1', 'c2', 'c3']);
   assert.deepEqual(result.selections.map(item => item.reference), ['c1', 'c2', 'c3']);
   assert.deepEqual(result.retrievedArticles.map(item => item.reference), ['c1', 'c3']);
@@ -175,24 +161,15 @@ test('forwards the explicit bounds to their respective stage boundaries', async 
     candidateAcquisition: {
       acquireCandidates: async input => {
         calls.acquisition = input;
-        return candidates;
+        return {
+          candidateCollection: candidates,
+          retrievedArticles: candidates.candidates.map(articleFor)
+        };
       }
     },
     invokeMaterialitySelection: async input => {
       calls.materiality = input;
       return {ok: true, type: 'SUCCESS', output};
-    },
-    selectedArticleRetrieval: {
-      retrieveSelectedArticles: async input => {
-        calls.retrieval = input;
-        return {
-          ok: true,
-          type: 'SUCCESS',
-          candidateCollection: candidates,
-          selections: output.selections,
-          retrievedArticles: []
-        };
-      }
     },
     evidenceConstruction: {
       constructEvidence: input => {
@@ -204,34 +181,54 @@ test('forwards the explicit bounds to their respective stage boundaries', async 
     articleRetrievalBounds,
     evidenceConstructionBounds
   });
-  const result = await service.researchNews({horizons});
+  const result = await service.researchNews({targetSessionDate: '2026-09-08', horizons});
   assert.equal(result.ok, true);
-  assert.deepEqual(calls.acquisition, {horizons, bounds: candidateBounds});
+  assert.deepEqual(calls.acquisition, {
+    targetSessionDate: '2026-09-08',
+    horizons,
+    bounds: candidateBounds,
+    articleRetrievalBounds
+  });
   assert.deepEqual(calls.materiality.candidateBounds, candidateBounds);
-  assert.deepEqual(calls.retrieval.articleRetrievalBounds, articleRetrievalBounds);
+  assert.equal(Object.hasOwn(calls, 'retrieval'), false);
   assert.deepEqual(calls.construction.evidenceConstructionBounds, evidenceConstructionBounds);
 });
 
-test('candidate acquisition failure and empty output fail before materiality', async () => {
-  for (const acquireCandidates of [
-    async () => { throw new Error('provider detail'); },
-    async () => createNewsEvidenceCandidateCollection({market: 'US', candidates: []}, {bounds: candidateBounds})
+test('candidate acquisition failure remains distinct and empty output skips materiality', async () => {
+  for (const [acquireCandidates, expected] of [
+    [async () => {
+      const error = new Error('provider detail');
+      error.code = 'DISCOVERY_PROVIDER_FAILURE';
+      throw error;
+    }, {
+      ok: false, type: 'DISCOVERY_PROVIDER_FAILURE',
+      message: 'CNBC market-news discovery failed'
+    }],
+    [async () => { throw new Error('provider detail'); }, {
+      ok: false, type: 'CANDIDATE_ACQUISITION_FAILURE',
+      message: 'CNBC news candidate acquisition failed'
+    }],
+    [async () => ({
+      candidateCollection: createNewsEvidenceCandidateCollection(
+        {market: 'US', candidates: []}, {bounds: candidateBounds}
+      ),
+      retrievedArticles: []
+    }), {
+      ok: true, type: 'NOT_FOUND',
+      candidateCollection: {market: 'US', candidates: []},
+      selections: [], retrievedArticles: [], constructedEvidence: []
+    }]
   ]) {
     let materialityCalls = 0;
     const service = createCnbcUsNewsResearchOrchestrationService({
       candidateAcquisition: {acquireCandidates},
       invokeMaterialitySelection: async () => { materialityCalls++; },
-      selectedArticleRetrieval: {retrieveSelectedArticles: async () => {}},
       evidenceConstruction: {constructEvidence: () => {}},
       candidateBounds,
       articleRetrievalBounds,
       evidenceConstructionBounds
     });
-    assert.deepEqual(await service.researchNews({horizons}), {
-      ok: false,
-      type: 'CANDIDATE_ACQUISITION_FAILURE',
-      message: 'CNBC news candidate acquisition failed'
-    });
+    assert.deepEqual(await service.researchNews({horizons}), expected);
     assert.equal(materialityCalls, 0);
   }
 });
@@ -245,13 +242,16 @@ test('materiality provider, contract and size failures remain distinct with one 
   ];
   for (const [sourceType, expectedType] of cases) {
     let calls = 0;
+    const candidates = collection();
     const service = createCnbcUsNewsResearchOrchestrationService({
-      candidateAcquisition: {acquireCandidates: async () => collection()},
+      candidateAcquisition: {acquireCandidates: async () => ({
+        candidateCollection: candidates,
+        retrievedArticles: candidates.candidates.map(articleFor)
+      })},
       invokeMaterialitySelection: async () => {
         calls++;
         return {ok: false, type: sourceType};
       },
-      selectedArticleRetrieval: {retrieveSelectedArticles: async () => {}},
       evidenceConstruction: {constructEvidence: () => {}},
       candidateBounds,
       articleRetrievalBounds,
@@ -264,11 +264,13 @@ test('materiality provider, contract and size failures remain distinct with one 
 });
 
 test('invalid materiality success output fails contract validation before retrieval', async () => {
-  let retrievalCalls = 0;
+  const candidates = collection();
   const service = createCnbcUsNewsResearchOrchestrationService({
-    candidateAcquisition: {acquireCandidates: async () => collection()},
+    candidateAcquisition: {acquireCandidates: async () => ({
+      candidateCollection: candidates,
+      retrievedArticles: candidates.candidates.map(articleFor)
+    })},
     invokeMaterialitySelection: async () => ({ok: true, type: 'SUCCESS', output: {selections: []}}),
-    selectedArticleRetrieval: {retrieveSelectedArticles: async () => { retrievalCalls++; }},
     evidenceConstruction: {constructEvidence: () => {}},
     candidateBounds,
     articleRetrievalBounds,
@@ -276,19 +278,23 @@ test('invalid materiality success output fails contract validation before retrie
   });
   const result = await service.researchNews({horizons});
   assert.equal(result.type, 'MATERIALITY_CONTRACT_FAILURE');
-  assert.equal(retrievalCalls, 0);
 });
 
-test('article retrieval failure prevents evidence construction and partial success', async () => {
+test('missing retained selected article prevents evidence construction and partial success', async () => {
   let constructionCalls = 0;
+  const candidates = collection();
   const service = createCnbcUsNewsResearchOrchestrationService({
-    candidateAcquisition: {acquireCandidates: async () => collection()},
+    candidateAcquisition: {acquireCandidates: async () => ({
+      candidateCollection: candidates,
+      retrievedArticles: [
+        articleFor(candidates.candidates[1]),
+        articleFor(candidates.candidates[1]),
+        articleFor(candidates.candidates[2])
+      ]
+    })},
     invokeMaterialitySelection: async () => ({
       ok: true, type: 'SUCCESS', output: selectionOutput(['USE', 'SKIP', 'SKIP'])
     }),
-    selectedArticleRetrieval: {
-      retrieveSelectedArticles: async () => ({ok: false, type: 'ARTICLE_RETRIEVAL_FAILURE'})
-    },
     evidenceConstruction: {constructEvidence: () => { constructionCalls++; }},
     candidateBounds,
     articleRetrievalBounds,
@@ -307,17 +313,11 @@ test('evidence construction failure returns no partial research result', async (
   const candidates = collection();
   const output = selectionOutput(['USE', 'SKIP', 'SKIP']);
   const service = createCnbcUsNewsResearchOrchestrationService({
-    candidateAcquisition: {acquireCandidates: async () => candidates},
+    candidateAcquisition: {acquireCandidates: async () => ({
+      candidateCollection: candidates,
+      retrievedArticles: candidates.candidates.map(articleFor)
+    })},
     invokeMaterialitySelection: async () => ({ok: true, type: 'SUCCESS', output}),
-    selectedArticleRetrieval: {
-      retrieveSelectedArticles: async () => ({
-        ok: true,
-        type: 'SUCCESS',
-        candidateCollection: candidates,
-        selections: output.selections,
-        retrievedArticles: [articleFor(candidates.candidates[0])]
-      })
-    },
     evidenceConstruction: {constructEvidence: () => ({ok: false, type: 'EVIDENCE_TOO_LARGE'})},
     candidateBounds,
     articleRetrievalBounds,
@@ -405,6 +405,8 @@ test('contains no final package, synthesis, provider expansion, or reference ass
   }
   assert.deepEqual(CNBC_US_NEWS_RESEARCH_RESULT_TYPES, [
     'SUCCESS',
+    'NOT_FOUND',
+    'DISCOVERY_PROVIDER_FAILURE',
     'CANDIDATE_ACQUISITION_FAILURE',
     'MATERIALITY_PROVIDER_FAILURE',
     'MATERIALITY_CONTRACT_FAILURE',
