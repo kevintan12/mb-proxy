@@ -396,11 +396,17 @@ test('gives Claude the global NORMAL null-section status rule', () => {
 test('gives Claude evidence-bound Section 9 fallback instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
+    'Hard output constraint for Sections 7-10',
+    'content must be either null or a non-empty already-trimmed string',
+    'evidenceRefs must contain at least one valid supplied evidence reference',
+    'telemetryRefs alone never satisfy this grounding requirement',
+    'Every factual claim or qualified interpretation in a populated section must be grounded in its listed supplied evidenceRefs',
     'For Section 9 WHAT TO WATCH FOR NEXT',
-    'any non-null content must contain at least one valid supplied evidenceRef',
-    'every factual or watch-next statement must be grounded in supplied evidence',
-    'Do not invent scheduled events, catalysts, dates, earnings, macro releases, or forward-looking developments',
-    'If the supplied package does not support a meaningful Section 9, set content to null and status to DEGRADED',
+    'every factual or watch-next statement must be grounded in one or more valid supplied evidenceRefs listed in Section 9',
+    'Cite each scheduled event or catalyst with its supplied supporting evidenceRef',
+    'Omit unsupported factual predictions, events, dates, earnings, macro releases, catalysts, or forward-looking developments',
+    'do not invent them or attach an unrelated reference',
+    'If the supplied package does not support a meaningful Section 9, set content to null, evidenceRefs and telemetryRefs to [], and status to DEGRADED',
     'include at least one genuine section uncertainty',
     'add the corresponding material evidence gap to the top-level evidenceGaps array'
   ]) {

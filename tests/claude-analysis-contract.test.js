@@ -591,6 +591,86 @@ test('rejects populated Section 4 with telemetry but no supplied evidence refere
   );
 });
 
+test('enforces factual grounding and canonical content for Sections 7-10 including watch items', () => {
+  const input = canonicalInput();
+  for (const index of [6, 7, 8, 9]) {
+    const telemetryOnly = normalOutput(input);
+    telemetryOnly.sections[index].content = index === 8
+      ? 'Monitor the scheduled policy announcement next week.'
+      : 'A qualified forward-looking interpretation.';
+    telemetryOnly.sections[index].evidenceRefs = [];
+    telemetryOnly.sections[index].telemetryRefs = ['t1'];
+    assert.equal(validateClaudeAnalysisOutput(telemetryOnly, input).errors.includes(
+      `sections[${index}]: factual content requires supplied evidence`
+    ), true);
+
+    const supported = normalOutput(input);
+    supported.sections[index].content = index === 8
+      ? 'Monitor the evidence-supported policy announcement next week.'
+      : 'An evidence-supported qualified forward-looking interpretation.';
+    supported.sections[index].evidenceRefs = ['e1'];
+    assert.equal(validateClaudeAnalysisOutput(supported, input).valid, true);
+  }
+
+  const blankWatch = normalOutput(input);
+  blankWatch.sections[8].content = '   ';
+  blankWatch.sections[8].evidenceRefs = [];
+  assert.deepEqual(validateClaudeAnalysisOutput(blankWatch, input).errors.filter(error =>
+    error.startsWith('sections[8]:')), [
+    'sections[8]: invalid content',
+    'sections[8]: factual content requires supplied evidence'
+  ]);
+});
+
+test('accepts a fully grounded realistic US response using Yahoo, Federal Reserve, and CNBC evidence', () => {
+  const items = [
+    createEvidenceItem({
+      sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+      title: 'Yahoo completed-session recap', summary: 'Broad closing-session context.',
+      canonicalUrl: 'https://finance.yahoo.com/markets/live/stock-market-today-example.html',
+      publishedAt: '2026-09-04T21:00:00Z', publisher: 'Yahoo Finance'
+    }),
+    createEvidenceItem({
+      sourceId: 'us.federal-reserve', market: 'US', evidenceCategory: 'monetary-policy',
+      title: 'Federal Reserve policy calendar', summary: 'Supported scheduled policy context.',
+      canonicalUrl: 'https://www.federalreserve.gov/newsevents/pressreleases/monetary20260904a.htm',
+      publishedAt: '2026-09-04T18:30:00Z'
+    }),
+    createEvidenceItem({
+      sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news',
+      title: 'CNBC market leadership report', summary: 'Supported sector and mover context.',
+      canonicalUrl: 'https://www.cnbc.com/2026/09/04/market-leadership.html',
+      publishedAt: '2026-09-04T21:30:00Z'
+    })
+  ];
+  const packageInput = marketPackage('US', {
+    items,
+    subsequentDevelopments: ['e1', 'e3'],
+    sessionAssociations: [
+      {evidenceRef: 'e1', sessionDate: '2026-09-04'},
+      {evidenceRef: 'e3', sessionDate: '2026-09-04'}
+    ]
+  });
+  packageInput.evidenceContext.materialEvents = ['e1', 'e2', 'e3'];
+  packageInput.evidenceContext.principalCatalysts = ['e2'];
+  packageInput.evidenceContext.supportingEvidence = ['e1', 'e2'];
+  const input = createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'US', initiatingList: 'myStocks', generatedAt: '2026-09-06T10:00:00Z',
+      userTimezone: 'America/New_York', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}
+  });
+  const output = normalOutput(input);
+  output.sections[6].evidenceRefs = ['e2'];
+  output.sections[7].evidenceRefs = ['e3'];
+  output.sections[8].content = 'Monitor the supplied policy calendar and later market developments.';
+  output.sections[8].evidenceRefs = ['e2', 'e3'];
+  output.sections[9].evidenceRefs = ['e1'];
+  output.evidenceReferences = ['e1', 'e2', 'e3'];
+  assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
+});
+
 test('enforces NORMAL, DEGRADED and FAILED semantics separately from contract failure', () => {
   const input = canonicalInput();
   const degradedSections = sections();
