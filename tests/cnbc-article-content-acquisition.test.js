@@ -220,6 +220,27 @@ test('acquires one general discovered page with provider-owned headline and time
   assert.equal(Object.isFrozen(result), true);
 });
 
+test('accepts the expanded bounded global discovery rank and rejects ranks beyond it before fetch', async () => {
+  let calls = 0;
+  const service = createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => { calls++; return response(); }
+  });
+  const base = {
+    title: 'Bounded later-ranked result',
+    url,
+    discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+    targetSessionDate: '2026-09-08'
+  };
+  const result = await service.acquireDiscoveredArticleContent({
+    discovery: Object.freeze({rank: 20, ...base}), bounds: retrievalBounds
+  });
+  assert.equal(result.discoveryRank, 20);
+  await assert.rejects(service.acquireDiscoveredArticleContent({
+    discovery: Object.freeze({rank: 21, ...base}), bounds: retrievalBounds
+  }), assertCode('INVALID_INPUT'));
+  assert.equal(calls, 1);
+});
+
 test('validates recap session identity from selected publishedAt only', async () => {
   const recapUrl = 'https://www.cnbc.com/2026/09/10/stock-market-today-live-updates.html';
   const discovery = Object.freeze({

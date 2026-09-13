@@ -54,7 +54,7 @@ test('owns the unchanged deeply immutable production bounds', () => {
   assert.equal(Object.values(CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS).every(Object.isFrozen), true);
 });
 
-test('composes one bounded search, one fetch per page, one materiality call, and no second article fetch', async () => {
+test('composes two bounded searches, one fetch per retained page, one materiality call, and no second article fetch', async () => {
   const calls = [];
   let anthropicCalls = 0;
   const service = createCnbcNewsResearchRuntime({
@@ -79,7 +79,7 @@ test('composes one bounded search, one fetch per page, one materiality call, and
   });
   const result = await service.researchNews({targetSessionDate, horizons});
   assert.equal(result.ok, true);
-  assert.equal(anthropicCalls, 2);
+  assert.equal(anthropicCalls, 3);
   assert.deepEqual(urls.map(url => calls.filter(value => value === url).length), [1, 1]);
   assert.deepEqual(result.candidateCollection.candidates.map(item => [item.reference, item.title]), [
     ['c1', 'Provider headline 1'], ['c2', 'Provider headline 2']

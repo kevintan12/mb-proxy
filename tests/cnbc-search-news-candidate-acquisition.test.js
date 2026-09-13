@@ -82,6 +82,17 @@ test('fetches each discovery once, skips failures, and assigns cN after validati
     stage: 'cnbcDiscoveredArticleAcquisition', rank: 1,
     failureType: 'EXTRACTION_FAILURE', extractionFailureType: 'NO_USABLE_BODY'
   });
+  assert.deepEqual(diagnostics.at(-1), {
+    stage: 'cnbcCandidateAcquisition',
+    outcome: 'SUCCESS',
+    discoveryCount: 3,
+    pageAttemptCount: 3,
+    pageFailureCount: 1,
+    extractionFailureCount: 1,
+    horizonFailureCount: 0,
+    contractFailureCount: 0,
+    candidateCount: 2
+  });
 });
 
 test('uses provider timestamps only and skips horizon mismatches without fabricating URL dates', async () => {
@@ -100,15 +111,18 @@ test('uses provider timestamps only and skips horizon mismatches without fabrica
 
 test('zero search results returns optional empty acquisition and transport failure remains distinct', async () => {
   let articleCalls = 0;
+  const diagnostics = [];
   const empty = createCnbcSearchNewsCandidateAcquisitionService({
     discovery: {discoverCnbcMarketNews: async () => ({ok: true, type: 'NOT_FOUND', discoveries: []})},
-    articleContentAcquisition: {acquireDiscoveredArticleContent: async () => { articleCalls++; }}
+    articleContentAcquisition: {acquireDiscoveredArticleContent: async () => { articleCalls++; }},
+    onDiagnostics: value => diagnostics.push(value)
   });
   const result = await empty.acquireCandidates({
     targetSessionDate: '2026-09-11', horizons, bounds, articleRetrievalBounds: articleBounds
   });
   assert.deepEqual(result.candidateCollection.candidates, []);
   assert.equal(articleCalls, 0);
+  assert.equal(diagnostics[0].outcome, 'ZERO_DISCOVERIES');
 
   const failed = createCnbcSearchNewsCandidateAcquisitionService({
     discovery: {discoverCnbcMarketNews: async () => ({ok: false, type: 'UPSTREAM_FAILURE'})},
@@ -117,4 +131,37 @@ test('zero search results returns optional empty acquisition and transport failu
   await assert.rejects(failed.acquireCandidates({
     targetSessionDate: '2026-09-11', horizons, bounds, articleRetrievalBounds: articleBounds
   }), error => error.code === 'DISCOVERY_PROVIDER_FAILURE');
+});
+
+test('diagnostics distinguish all retained pages failing extraction from all extracted pages missing horizons', async () => {
+  for (const [mode, expectedOutcome] of [
+    ['extract', 'ALL_PAGES_FAILED'],
+    ['horizon', 'ALL_EXTRACTED_PAGES_OUT_OF_HORIZON']
+  ]) {
+    const diagnostics = [];
+    const items = [discovery(1), discovery(2)];
+    const service = createCnbcSearchNewsCandidateAcquisitionService({
+      discovery: {discoverCnbcMarketNews: async () => ({
+        ok: true, type: 'SUCCESS', discoveries: items
+      })},
+      articleContentAcquisition: {acquireDiscoveredArticleContent: async ({discovery: item}) => {
+        if (mode === 'extract') {
+          const error = new Error('private');
+          error.code = 'EXTRACTION_FAILURE';
+          error.extractionFailureType = 'NO_USABLE_BODY';
+          throw error;
+        }
+        return article(item, {publishedAt: '2026-09-13T12:00:00.000Z'});
+      }},
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const result = await service.acquireCandidates({
+      targetSessionDate: '2026-09-11', horizons, bounds, articleRetrievalBounds: articleBounds
+    });
+    assert.deepEqual(result.candidateCollection.candidates, []);
+    const summary = diagnostics.find(item => item.stage === 'cnbcCandidateAcquisition');
+    assert.equal(summary.outcome, expectedOutcome);
+    assert.equal(summary.candidateCount, 0);
+    assert.equal(summary.pageAttemptCount, 2);
+  }
 });

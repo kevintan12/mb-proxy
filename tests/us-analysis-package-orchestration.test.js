@@ -8,7 +8,8 @@ const {
   createNewsEvidenceCandidateCollection
 } = require('../lib/news-evidence-candidates');
 const {
-  CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS
+  CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS,
+  createCnbcNewsResearchRuntime
 } = require('../lib/cnbc-news-research-runtime');
 const {validateClaudeAnalysisInput} = require('../lib/claude-analysis-contract');
 const {
@@ -81,7 +82,7 @@ function snapshotWithoutCompletedSessions(symbol) {
   });
 }
 
-function cnbcCandidate(reference, horizon) {
+function cnbcCandidate(reference, horizon, overrides = {}) {
   const number = reference.slice(1);
   const publishedAt = new Date(
     (Date.parse(horizon.startsAtExclusive) + Date.parse(horizon.endsAtInclusive)) / 2
@@ -97,14 +98,16 @@ function cnbcCandidate(reference, horizon) {
     extract: null,
     canonicalUrl: `https://www.cnbc.com/2026/09/04/item-${number}.html`,
     publishedAt,
-    symbols: []
+    symbols: [],
+    ...overrides
   }, {bounds: CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS.candidateBounds});
 }
 
-function cnbcResearchSuccess(horizons, classifications = []) {
+function cnbcResearchSuccess(horizons, classifications = [], candidateOverrides = []) {
   const candidates = classifications.map((classification, index) => cnbcCandidate(
     `c${index + 1}`,
-    horizons.find(horizon => horizon.classification === classification)
+    horizons.find(horizon => horizon.classification === classification),
+    candidateOverrides[index]
   ));
   const candidateCollection = createNewsEvidenceCandidateCollection({
     market: 'US',
@@ -1003,7 +1006,9 @@ test('integrates one CNBC recap before general CNBC with package-owned associati
   ]);
   assert.deepEqual(context.furtherReadings, [
     {evidenceRef: 'e2', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e5', sessionDate: '2026-09-04'}
+    {evidenceRef: 'e5', sessionDate: '2026-09-04'},
+    {evidenceRef: 'e6', sessionDate: '2026-09-04'},
+    {evidenceRef: 'e7', sessionDate: '2026-09-04'}
   ]);
   assert.equal(context.principalCatalysts.includes('e5'), false);
   assert.deepEqual(context.unresolvedGaps, []);
@@ -1088,6 +1093,10 @@ test('integrates completed and subsequent CNBC evidence after Yahoo and Fed with
   assert.deepEqual(context.supportingEvidence, ['e1', 'e2', 'e3', 'e4']);
   assert.deepEqual(context.subsequentDevelopments, ['e5']);
   assert.deepEqual(context.principalCatalysts, []);
+  assert.deepEqual(context.furtherReadings, [
+    {evidenceRef: 'e4', sessionDate: '2026-09-04'},
+    {evidenceRef: 'e5', sessionDate: '2026-09-04'}
+  ]);
   assert.equal(JSON.stringify(output).includes('c1'), false);
   assert.equal(JSON.stringify(output).includes('c2'), false);
 });
@@ -1098,6 +1107,144 @@ test('CNBC all-SKIP adds no evidence or gap', async () => {
   const context = output.marketPackages[0].evidenceContext;
   assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
   assert.deepEqual(context.unresolvedGaps, [YAHOO_RECAP_UNAVAILABLE_GAP, CNBC_RECAP_UNAVAILABLE_GAP]);
+  assert.deepEqual(context.furtherReadings, []);
+});
+
+test('non-portfolio company and sector CNBC evidence survives package roles without stock telemetry and follows recap anchors in Further Readings', async () => {
+  const yahooArticle = yahooRecapArticle();
+  const companyUrl = 'https://www.cnbc.com/2026/09/04/broadcom-semiconductor-leadership.html';
+  const sectorUrl = 'https://www.cnbc.com/2026/09/04/health-care-sector-advances.html';
+  const unusableUrl = 'https://www.cnbc.com/2026/09/04/bodyless-market-page.html';
+  let searchCall = 0;
+  const pageCalls = [];
+  const cnbcDiagnostics = [];
+  const cnbcNewsResearch = createCnbcNewsResearchRuntime({
+    apiKey: 'server-key',
+    onDiagnostics: value => cnbcDiagnostics.push(value),
+    fetchImpl: async (url, options) => {
+      if (url === 'https://api.anthropic.com/v1/messages') {
+        const requestBody = JSON.parse(options.body);
+        if (requestBody.tools) {
+          const results = searchCall++ === 0
+            ? [
+                ...Array.from({length: 8}, (_, index) => ({
+                  type: 'web_search_result',
+                  title: `Rejected result ${index + 1}`,
+                  url: `https://example.test/rejected-${index + 1}.html`
+                })),
+                {type: 'web_search_result', title: 'Bodyless market page', url: unusableUrl},
+                {type: 'web_search_result', title: 'Broadcom result', url: companyUrl}
+              ]
+            : [
+                {type: 'web_search_result', title: 'Duplicate Broadcom result', url: companyUrl},
+                {type: 'web_search_result', title: 'Health-care sector result', url: sectorUrl}
+              ];
+          return {
+            ok: true, status: 200,
+            async json() {
+              return {
+                content: [{type: 'web_search_tool_result', content: results}],
+                usage: {server_tool_use: {web_search_requests: 1}}
+              };
+            }
+          };
+        }
+        return {
+          ok: true, status: 200,
+          async json() {
+            return {content: [{type: 'text', text: JSON.stringify({selections: [
+              {reference: 'c1', decision: 'USE', category: 'news', materiality: 'HIGH', reason: 'Material non-portfolio company leadership.'},
+              {reference: 'c2', decision: 'USE', category: 'news', materiality: 'HIGH', reason: 'Material sector opportunity evidence.'}
+            ]})}]};
+          }
+        };
+      }
+      pageCalls.push(url);
+      const article = url === unusableUrl ? {
+        '@context': 'https://schema.org', '@type': 'NewsArticle',
+        headline: 'Bodyless market page', datePublished: '2026-09-04T19:00:00+00:00'
+      } : {
+        '@context': 'https://schema.org', '@type': 'NewsArticle',
+        headline: url === companyUrl
+          ? 'Broadcom leads broad-market semiconductor gains'
+          : 'Health-care sector advances on constructive developments',
+        datePublished: '2026-09-04T19:00:00+00:00',
+        articleBody: url === companyUrl
+          ? 'Broadcom led semiconductor shares higher after a material company development.'
+          : 'Health-care shares advanced as constructive industry developments supported the sector.'
+      };
+      const html = `<script type="application/ld+json">${JSON.stringify(article)}</script>`;
+      return {
+        ok: true, status: 200, url,
+        headers: {get: name => name === 'content-type' ? 'text/html' : null},
+        async text() { return html; }
+      };
+    }
+  });
+  const {service} = harness({
+    yahooRecapResearch: {async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }},
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() { return {ok: true, type: 'SUCCESS', articleContent: yahooArticle}; }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) { return yahooRecapEvidenceSuccess(value.articleContent, value.horizon); }
+    },
+    cnbcRecapResearch: {
+      async researchCompletedSessionRecap({horizons}) {
+        return cnbcRecapResearchSuccess({horizon: horizons[1]});
+      }
+    },
+    cnbcNewsResearch,
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(input, {e8: ['MATERIAL_EVENT'], e9: ['MATERIAL_EVENT']});
+      }
+    }
+  });
+  const output = await service.assemble(request('US', {
+    myStocks: [{market: 'US', symbol: 'AAPL'}],
+    watchlist: [{market: 'US', symbol: 'NVDA'}]
+  }));
+  const context = output.marketPackages[0];
+  assert.equal(context.evidenceContext.unresolvedGaps.includes(CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP),
+    false, JSON.stringify(cnbcDiagnostics));
+  assert.deepEqual(context.telemetry.stockSnapshots.map(entry => entry.snapshot.symbol), ['AAPL', 'NVDA']);
+  const broadMarket = context.evidenceContext.evidence.slice(-2);
+  assert.deepEqual(broadMarket.map(entry => [entry.reference, entry.item.title, entry.item.symbols]), [
+    ['e8', 'Broadcom leads broad-market semiconductor gains', []],
+    ['e9', 'Health-care sector advances on constructive developments', []]
+  ]);
+  assert.deepEqual(context.evidenceContext.materialEvents.slice(-2), ['e8', 'e9']);
+  assert.deepEqual(context.evidenceContext.supportingEvidence.slice(-2), ['e8', 'e9']);
+  assert.deepEqual(context.evidenceContext.furtherReadings, [
+    {evidenceRef: 'e4', sessionDate: '2026-09-04'},
+    {evidenceRef: 'e7', sessionDate: '2026-09-04'},
+    {evidenceRef: 'e8', sessionDate: '2026-09-04'},
+    {evidenceRef: 'e9', sessionDate: '2026-09-04'}
+  ]);
+  assert.deepEqual(output.portfolioContext.myStocks.map(item => item.symbol), ['AAPL']);
+  assert.deepEqual(output.portfolioContext.watchlist.map(item => item.symbol), ['NVDA']);
+  assert.equal(searchCall, 2);
+  assert.deepEqual(pageCalls, [unusableUrl, companyUrl, sectorUrl]);
+});
+
+test('Further Readings deduplicates general CNBC evidence against mandatory recap anchors by canonical URL', async () => {
+  const recapUrl = 'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html';
+  const {service} = harness({
+    cnbcRecapResearch: {
+      async researchCompletedSessionRecap({horizons}) {
+        return cnbcRecapResearchSuccess({horizon: horizons[1]});
+      }
+    },
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION'], [{canonicalUrl: recapUrl}]);
+      }
+    }
+  });
+  const context = (await service.assemble(request())).marketPackages[0].evidenceContext;
+  assert.equal(context.evidence.filter(entry => entry.item.canonicalUrl === recapUrl).length, 2);
+  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e4', sessionDate: '2026-09-04'}]);
 });
 
 test('CNBC bounded-search NOT_FOUND remains optional and adds the existing deterministic gap', async () => {

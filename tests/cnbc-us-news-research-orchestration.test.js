@@ -115,13 +115,26 @@ function composedService(decisions, overrides = {}) {
 }
 
 test('all SKIP reuses prefetched articles without selected retrieval and returns empty evidence', async () => {
-  const composed = composedService(['SKIP', 'SKIP', 'SKIP']);
+  const diagnostics = [];
+  const composed = composedService(['SKIP', 'SKIP', 'SKIP'], {
+    onDiagnostics: value => diagnostics.push(value)
+  });
   const result = await composed.service.researchNews({horizons});
   assert.equal(result.ok, true);
   assert.deepEqual(Object.keys(result), CNBC_US_NEWS_RESEARCH_RESULT_KEYS);
   assert.equal(composed.materialityCalls(), 1);
   assert.deepEqual(result.retrievedArticles, []);
   assert.deepEqual(result.constructedEvidence, []);
+  assert.equal(diagnostics.at(-1).outcome, 'SUCCESS');
+  assert.equal(diagnostics.at(-1).failureType, null);
+  assert.deepEqual(diagnostics.at(-1).counts, {
+    candidateCount: 3,
+    useCount: 0,
+    skipCount: 3,
+    retrievedArticleCount: 0,
+    constructedEvidenceCount: 0,
+    materialityInvocationCount: 1
+  });
 });
 
 test('one USE preserves cN linkage through selection, article and evidence', async () => {
@@ -347,6 +360,8 @@ test('emits sanitized stage timings/counts and preserves materiality diagnostics
   assert.deepEqual(diagnostics[0], providerDiagnostic);
   const stageDiagnostic = diagnostics[1];
   assert.equal(stageDiagnostic.stage, 'cnbcNewsResearch');
+  assert.equal(stageDiagnostic.outcome, 'SUCCESS');
+  assert.equal(stageDiagnostic.failureType, null);
   for (const value of Object.values(stageDiagnostic.timing)) {
     assert.equal(typeof value, 'number');
     assert.ok(value >= 0);
