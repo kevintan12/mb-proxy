@@ -7,6 +7,9 @@ const {
   CnbcArticleContentAcquisitionError,
   createCnbcArticleContentAcquisitionService
 } = require('../lib/cnbc-article-content-acquisition');
+const {
+  CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS
+} = require('../lib/cnbc-news-research-runtime');
 
 const candidateBounds = Object.freeze({
   maxCandidates: 5,
@@ -56,6 +59,36 @@ function articleHtml(overrides = {}) {
     ...overrides
   };
   return `<!doctype html><html><head><script type="application/ld+json">${JSON.stringify(article)}</script></head><body></body></html>`;
+}
+
+function liveBlogHtml({newsArticle = {}, liveBlog = {}, updates = []} = {}) {
+  const nodes = [{
+    '@context': 'https://schema.org',
+    '@type': 'NewsArticle',
+    datePublished: '2026-09-08T11:00:00Z',
+    dateModified: '2026-09-08T11:30:00Z',
+    ...newsArticle
+  }, {
+    '@context': 'https://schema.org',
+    '@type': 'LiveBlogPosting',
+    datePublished: '2026-09-08T11:00:00Z',
+    dateModified: '2026-09-08T21:00:00Z',
+    liveBlogUpdate: updates,
+    ...liveBlog
+  }];
+  return '<!doctype html><html><head>'
+    + nodes.map(node => `<script type="application/ld+json">${JSON.stringify(node)}</script>`).join('')
+    + '</head><body></body></html>';
+}
+
+function blogUpdate(overrides = {}) {
+  return {
+    '@type': 'BlogPosting',
+    datePublished: '2026-09-08T20:00:00Z',
+    dateModified: '2026-09-08T20:15:00Z',
+    articleBody: 'Stocks closed higher after a volatile session.',
+    ...overrides
+  };
 }
 
 function response(html = articleHtml(), overrides = {}) {
@@ -237,6 +270,160 @@ test('extracts an article node nested in an @graph and permits absent dateModifi
   }).acquireArticleContent({candidate: candidate(), bounds: retrievalBounds});
   assert.equal(result.publishedAt, '2026-09-08T16:00:00.000Z');
   assert.equal(result.updatedAt, null);
+});
+
+test('falls back to the first provider-ordered usable LiveBlogPosting update without concatenation', async () => {
+  const html = liveBlogHtml({updates: [
+    blogUpdate({articleBody: '   '}),
+    blogUpdate({
+      articleBody: 'Closing <b>summary</b> for the completed session.',
+      datePublished: '2026-09-08T20:01:00Z',
+      dateModified: '2026-09-08T20:02:00Z'
+    }),
+    blogUpdate({articleBody: 'Later unrelated update must not be included.'})
+  ]});
+  const result = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(html)
+  }).acquireArticleContent({candidate: candidate(), bounds: retrievalBounds});
+
+  assert.equal(result.articleText, 'Closing summary for the completed session.');
+  assert.equal(result.publishedAt, '2026-09-08T20:01:00.000Z');
+  assert.equal(result.updatedAt, '2026-09-08T20:02:00.000Z');
+  assert.doesNotMatch(result.articleText, /Later unrelated/);
+});
+
+test('falls back when a conventional article body normalizes to unusable content', async () => {
+  const html = liveBlogHtml({
+    newsArticle: {articleBody: ' \n <b> </b> &nbsp; '},
+    updates: [blogUpdate({articleBody: 'Usable closing update.'})]
+  });
+  const result = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(html)
+  }).acquireArticleContent({candidate: candidate(), bounds: retrievalBounds});
+
+  assert.equal(result.articleText, 'Usable closing update.');
+});
+
+test('keeps usable conventional article precedence over a live-blog update', async () => {
+  const html = liveBlogHtml({
+    newsArticle: {
+      articleBody: 'Conventional article body.',
+      datePublished: '2026-09-08T12:01:00Z',
+      dateModified: '2026-09-08T12:02:00Z'
+    },
+    updates: [blogUpdate({
+      articleBody: 'Live-blog body must remain fallback-only.',
+      datePublished: '2026-09-08T20:01:00Z',
+      dateModified: '2026-09-08T20:02:00Z'
+    })]
+  });
+  const result = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(html)
+  }).acquireArticleContent({candidate: candidate(), bounds: retrievalBounds});
+
+  assert.equal(result.articleText, 'Conventional article body.');
+  assert.equal(result.publishedAt, '2026-09-08T12:01:00.000Z');
+  assert.equal(result.updatedAt, '2026-09-08T12:02:00.000Z');
+});
+
+test('does not accept BlogPosting objects outside LiveBlogPosting.liveBlogUpdate', async () => {
+  const html = liveBlogHtml({
+    liveBlog: {liveBlogUpdate: []},
+    updates: []
+  }).replace('</head>', `<script type="application/ld+json">${JSON.stringify(blogUpdate())}</script></head>`);
+  const service = createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(html)});
+  await assert.rejects(
+    service.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}),
+    assertCode('EXTRACTION_FAILURE')
+  );
+});
+
+test('treats LiveBlogPosting only as a container and ignores its root articleBody', async () => {
+  const liveBlog = {
+    '@context': 'https://schema.org',
+    '@type': 'LiveBlogPosting',
+    datePublished: '2026-09-08T11:00:00Z',
+    dateModified: '2026-09-08T21:00:00Z',
+    articleBody: 'Root live-blog content must not be extracted.',
+    liveBlogUpdate: [blogUpdate({articleBody: ' <b> </b> &nbsp; '})]
+  };
+  const html = `<html><script type="application/ld+json">${JSON.stringify(liveBlog)}</script></html>`;
+  const service = createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(html)});
+  await assert.rejects(
+    service.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}),
+    assertCode('EXTRACTION_FAILURE')
+  );
+});
+
+test('does not admit nested conventional articles through a live-blog update subtree', async () => {
+  const liveBlog = {
+    '@context': 'https://schema.org',
+    '@type': 'LiveBlogPosting',
+    datePublished: '2026-09-08T11:00:00Z',
+    dateModified: '2026-09-08T21:00:00Z',
+    liveBlogUpdate: [{
+      '@type': 'Thing',
+      nested: {
+        '@type': 'NewsArticle',
+        datePublished: '2026-09-08T20:00:00Z',
+        articleBody: 'Nested conventional content must be ignored.'
+      }
+    }]
+  };
+  const html = `<html><script type="application/ld+json">${JSON.stringify(liveBlog)}</script></html>`;
+  const service = createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(html)});
+  await assert.rejects(
+    service.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}),
+    assertCode('EXTRACTION_FAILURE')
+  );
+});
+
+test('fails closed for unusable live-blog updates and malformed selected timestamps', async () => {
+  const cases = [
+    liveBlogHtml({updates: [blogUpdate({articleBody: ''}), {'@type': 'BlogPosting'}]}),
+    liveBlogHtml({updates: [blogUpdate({datePublished: 'not-a-date'}), blogUpdate()]}),
+    liveBlogHtml({updates: [blogUpdate({dateModified: 'not-a-date'}), blogUpdate()]})
+  ];
+  for (const html of cases) {
+    const service = createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(html)});
+    await assert.rejects(
+      service.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}),
+      assertCode('EXTRACTION_FAILURE')
+    );
+  }
+});
+
+test('preserves conventional Article, NewsArticle and ReportageNewsArticle body extraction', async () => {
+  for (const type of ['Article', 'NewsArticle', 'ReportageNewsArticle']) {
+    const html = articleHtml({'@type': type, articleBody: `${type} body remains authoritative.`});
+    const result = await createCnbcArticleContentAcquisitionService({
+      fetchImpl: async () => response(html)
+    }).acquireArticleContent({candidate: candidate(), bounds: retrievalBounds});
+    assert.equal(result.articleText, `${type} body remains authoritative.`);
+  }
+});
+
+test('production response ceiling accepts the measured live page size and rejects bytes above it', async () => {
+  const bounds = CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS.articleRetrievalBounds;
+  const representativeBytes = 1143462;
+  const base = articleHtml({articleBody: 'Bounded article body.'});
+  const representative = base.padEnd(representativeBytes, ' ');
+  const accepted = createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(representative)
+  });
+  const result = await accepted.acquireArticleContent({candidate: candidate(), bounds});
+  assert.equal(result.articleText, 'Bounded article body.');
+
+  const oversized = base.padEnd(bounds.maxResponseBytes + 1, ' ');
+  const rejected = createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(oversized)
+  });
+  await assert.rejects(
+    rejected.acquireArticleContent({candidate: candidate(), bounds}),
+    assertSizeFailure('RESPONSE_TOO_LARGE')
+  );
+  assert.equal(bounds.maxArticleTextBytes, 8192);
+  assert.equal(bounds.maxResultBytes, 12288);
 });
 
 test('rejects publication, modification and chronological timestamp mismatches', async () => {
