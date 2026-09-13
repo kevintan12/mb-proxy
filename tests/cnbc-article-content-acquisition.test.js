@@ -343,6 +343,27 @@ test('extracts an article node nested in an @graph and permits absent dateModifi
   assert.equal(result.updatedAt, null);
 });
 
+test('selects the first fully extractable conventional article', async () => {
+  const nodes = [{
+    '@type': 'NewsArticle',
+    articleBody: 'Earlier body with an invalid timestamp.',
+    datePublished: 'not-a-date'
+  }, {
+    '@type': 'ReportageNewsArticle',
+    articleBody: 'Later fully extractable conventional body.',
+    datePublished: '2026-09-08T12:01:00Z',
+    dateModified: '2026-09-08T12:02:00Z'
+  }];
+  const html = `<html><script type="application/ld+json">${JSON.stringify(nodes)}</script></html>`;
+  const result = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(html)
+  }).acquireArticleContent({candidate: candidate(), bounds: retrievalBounds});
+
+  assert.equal(result.articleText, 'Later fully extractable conventional body.');
+  assert.equal(result.publishedAt, '2026-09-08T12:01:00.000Z');
+  assert.equal(result.updatedAt, '2026-09-08T12:02:00.000Z');
+});
+
 test('falls back to the first provider-ordered usable LiveBlogPosting update without concatenation', async () => {
   const html = liveBlogHtml({updates: [
     blogUpdate({articleBody: '   '}),
@@ -361,6 +382,29 @@ test('falls back to the first provider-ordered usable LiveBlogPosting update wit
   assert.equal(result.publishedAt, '2026-09-08T20:01:00.000Z');
   assert.equal(result.updatedAt, '2026-09-08T20:02:00.000Z');
   assert.doesNotMatch(result.articleText, /Later unrelated/);
+});
+
+test('selects the first fully extractable direct live-blog update', async () => {
+  const html = liveBlogHtml({updates: [
+    blogUpdate({
+      articleBody: 'Earlier body with a missing timestamp.',
+      datePublished: undefined
+    }),
+    blogUpdate({
+      articleBody: 'Later fully extractable live-blog body.',
+      datePublished: '2026-09-08T20:01:00Z',
+      dateModified: '2026-09-08T20:02:00Z'
+    }),
+    blogUpdate({articleBody: 'Still later content must not be selected.'})
+  ]});
+  const result = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(html)
+  }).acquireArticleContent({candidate: candidate(), bounds: retrievalBounds});
+
+  assert.equal(result.articleText, 'Later fully extractable live-blog body.');
+  assert.equal(result.publishedAt, '2026-09-08T20:01:00.000Z');
+  assert.equal(result.updatedAt, '2026-09-08T20:02:00.000Z');
+  assert.doesNotMatch(result.articleText, /Still later/);
 });
 
 test('falls back when a conventional article body normalizes to unusable content', async () => {
@@ -452,8 +496,8 @@ test('does not admit nested conventional articles through a live-blog update sub
 test('fails closed for unusable live-blog updates and malformed selected timestamps', async () => {
   const cases = [
     liveBlogHtml({updates: [blogUpdate({articleBody: ''}), {'@type': 'BlogPosting'}]}),
-    liveBlogHtml({updates: [blogUpdate({datePublished: 'not-a-date'}), blogUpdate()]}),
-    liveBlogHtml({updates: [blogUpdate({dateModified: 'not-a-date'}), blogUpdate()]})
+    liveBlogHtml({updates: [blogUpdate({datePublished: 'not-a-date'})]}),
+    liveBlogHtml({updates: [blogUpdate({dateModified: 'not-a-date'})]})
   ];
   for (const html of cases) {
     const service = createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(html)});
