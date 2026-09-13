@@ -302,12 +302,34 @@ test('emits only the allowlisted adapter subtype and exact failed cN before fail
     if (code === 'CONTENT_TOO_LARGE') {
       expectedDiagnostic.sizeFailureType = 'UNKNOWN_SIZE_FAILURE';
     }
+    if (code === 'EXTRACTION_FAILURE') {
+      expectedDiagnostic.extractionFailureType = 'UNKNOWN_EXTRACTION_FAILURE';
+    }
     assert.deepEqual(diagnostics, [expectedDiagnostic]);
     const serialized = JSON.stringify(diagnostics);
     for (const forbidden of ['https://', 'title', 'article content', 'provider response', 'stack', 'prompt', 'credential']) {
       assert.equal(serialized.includes(forbidden), false);
     }
   }
+});
+
+test('preserves an allowlisted extraction reason in general CNBC retrieval diagnostics', async () => {
+  const diagnostics = [];
+  const error = new Error('private page content');
+  error.code = 'EXTRACTION_FAILURE';
+  error.extractionFailureType = 'INVALID_DATE_PUBLISHED';
+  await serviceWith(async () => { throw error; }, value => diagnostics.push(value))
+    .retrieveSelectedArticles({
+      candidateCollection: collection(),
+      selections: selections(['USE', 'SKIP', 'SKIP'])
+    });
+  assert.deepEqual(diagnostics, [{
+    stage: 'cnbcSelectedArticleRetrieval',
+    failedCandidateReference: 'c1',
+    failureType: 'EXTRACTION_FAILURE',
+    extractionFailureType: 'INVALID_DATE_PUBLISHED'
+  }]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /private page content/);
 });
 
 test('emits only recognized size subtypes for CONTENT_TOO_LARGE failures', async () => {

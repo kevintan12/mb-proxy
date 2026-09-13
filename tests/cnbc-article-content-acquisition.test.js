@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {createNewsEvidenceCandidate} = require('../lib/news-evidence-candidates');
 const {
   CNBC_ARTICLE_CONTENT_RESULT_KEYS,
+  CNBC_EXTRACTION_DIAGNOSTIC_FAILURE_TYPES,
   CNBC_RECAP_ARTICLE_CONTENT_RESULT_KEYS,
   CnbcArticleContentAcquisitionError,
   createCnbcArticleContentAcquisitionService
@@ -115,6 +116,12 @@ function assertSizeFailure(sizeFailureType) {
   return error => error instanceof CnbcArticleContentAcquisitionError
     && error.code === 'CONTENT_TOO_LARGE'
     && error.sizeFailureType === sizeFailureType;
+}
+
+function assertExtractionFailure(extractionFailureType) {
+  return error => error instanceof CnbcArticleContentAcquisitionError
+    && error.code === 'EXTRACTION_FAILURE'
+    && error.extractionFailureType === extractionFailureType;
 }
 
 test('extracts bounded CNBC JSON-LD article content with deterministic immutable identity', async () => {
@@ -311,18 +318,25 @@ test('keeps timeout active through fetch and complete body reading', async () =>
 });
 
 test('rejects malformed, non-article and incomplete structured article pages distinctly', async () => {
+  assert.deepEqual(CNBC_EXTRACTION_DIAGNOSTIC_FAILURE_TYPES, [
+    'NO_USABLE_BODY', 'INVALID_DATE_PUBLISHED', 'INVALID_DATE_MODIFIED'
+  ]);
   const cases = [
     ['<html><body>Not an article</body></html>', 'INVALID_PAGE'],
     ['<script type="application/ld+json">not-json</script>', 'INVALID_PAGE'],
     [articleHtml({'@type': 'WebPage'}), 'INVALID_PAGE'],
-    [articleHtml({articleBody: ''}), 'EXTRACTION_FAILURE'],
-    [articleHtml({datePublished: 'not-a-date'}), 'EXTRACTION_FAILURE'],
-    [articleHtml({datePublished: '2026-09-08T12:00:00'}), 'EXTRACTION_FAILURE'],
-    [articleHtml({dateModified: 'not-a-date'}), 'EXTRACTION_FAILURE']
+    [articleHtml({articleBody: ''}), 'EXTRACTION_FAILURE', 'NO_USABLE_BODY'],
+    [articleHtml({datePublished: undefined}), 'EXTRACTION_FAILURE', 'INVALID_DATE_PUBLISHED'],
+    [articleHtml({datePublished: 'not-a-date'}), 'EXTRACTION_FAILURE', 'INVALID_DATE_PUBLISHED'],
+    [articleHtml({datePublished: '2026-09-08T12:00:00'}), 'EXTRACTION_FAILURE', 'INVALID_DATE_PUBLISHED'],
+    [articleHtml({dateModified: 'not-a-date'}), 'EXTRACTION_FAILURE', 'INVALID_DATE_MODIFIED']
   ];
-  for (const [html, code] of cases) {
+  for (const [html, code, extractionFailureType] of cases) {
     const service = createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(html)});
-    await assert.rejects(service.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}), assertCode(code));
+    await assert.rejects(
+      service.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}),
+      extractionFailureType ? assertExtractionFailure(extractionFailureType) : assertCode(code)
+    );
   }
 });
 
@@ -495,15 +509,15 @@ test('does not admit nested conventional articles through a live-blog update sub
 
 test('fails closed for unusable live-blog updates and malformed selected timestamps', async () => {
   const cases = [
-    liveBlogHtml({updates: [blogUpdate({articleBody: ''}), {'@type': 'BlogPosting'}]}),
-    liveBlogHtml({updates: [blogUpdate({datePublished: 'not-a-date'})]}),
-    liveBlogHtml({updates: [blogUpdate({dateModified: 'not-a-date'})]})
+    [liveBlogHtml({updates: [blogUpdate({articleBody: ''}), {'@type': 'BlogPosting'}]}), 'NO_USABLE_BODY'],
+    [liveBlogHtml({updates: [blogUpdate({datePublished: 'not-a-date'})]}), 'INVALID_DATE_PUBLISHED'],
+    [liveBlogHtml({updates: [blogUpdate({dateModified: 'not-a-date'})]}), 'INVALID_DATE_MODIFIED']
   ];
-  for (const html of cases) {
+  for (const [html, extractionFailureType] of cases) {
     const service = createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(html)});
     await assert.rejects(
       service.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}),
-      assertCode('EXTRACTION_FAILURE')
+      assertExtractionFailure(extractionFailureType)
     );
   }
 });

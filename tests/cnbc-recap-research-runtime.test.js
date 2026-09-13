@@ -225,6 +225,27 @@ test('stage failures are sanitized and non-blocking with no retry', async () => 
   }
 });
 
+test('preserves an allowlisted extraction reason in dedicated recap diagnostics', async () => {
+  const diagnostics = [];
+  const {service} = runtime({
+    onDiagnostics(value) { diagnostics.push(value); },
+    articleContentAcquisition: {async acquireRecapArticleContent() {
+      throw new CnbcArticleContentAcquisitionError(
+        'EXTRACTION_FAILURE', 'private page content', undefined, 'INVALID_DATE_MODIFIED'
+      );
+    }}
+  });
+  const result = await service.researchCompletedSessionRecap({targetSessionDate, horizons});
+  assert.equal(result.type, 'ARTICLE_ACQUISITION_FAILURE');
+  assert.deepEqual(diagnostics, [{
+    stage: 'cnbcRecapResearch',
+    outcome: 'FAILURE',
+    failureType: 'EXTRACTION_FAILURE',
+    extractionFailureType: 'INVALID_DATE_MODIFIED'
+  }]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /private page content/);
+});
+
 test('rejects caller overrides and malformed horizons before discovery', async () => {
   const {service, calls} = runtime();
   for (const input of [
