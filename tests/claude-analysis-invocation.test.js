@@ -424,6 +424,28 @@ test('gives Claude supplied-evidence-only Section 2 macro comparison instruction
   }
 });
 
+test('gives Section 4 non-causal broad-market session-association instructions', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'For Section 4 STOCKS & SECTORS IN FOCUS',
+    'review evidenceContext.sessionAssociations',
+    'when materially relevant',
+    'associated supplied evidence reference as current-session recap or context',
+    'marketContext.primaryCompletedSessionDate',
+    'even when that evidence is also a SUBSEQUENT_DEVELOPMENT',
+    'broad-market leadership and laggards, sectors, notable individual movers',
+    'closing-session breadth, rotation, or context',
+    'Never present post-close session-associated evidence as having caused the earlier completed-session move',
+    'never treat session association as PRINCIPAL_CATALYST eligibility',
+    'Section 4 must remain broad-market and independent of My Stocks and Watchlist',
+    'membership in either list must not determine which broad-market movers Section 4 discusses',
+    'Do not require Section 4 to use every associated reference',
+    'or use an association that is immaterial'
+  ]) {
+    assert.equal(system.includes(requirement), true, requirement);
+  }
+});
+
 test('gives Claude time-safe materially relevant subsequent-development instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
