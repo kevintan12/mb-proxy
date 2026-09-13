@@ -98,6 +98,7 @@ function claudeAnalysisInput() {
       evidenceContext: {
         materialEvents: ['e1'], authoritativeFacts: [], principalCatalysts: ['e1'],
         supportingEvidence: ['e1'], conflictingEvidence: [], subsequentDevelopments: [],
+        sessionAssociations: [],
         unresolvedGaps: [], furtherReadings: []
       }
     }],
@@ -169,6 +170,7 @@ function usAnalysisPackageEnvelope() {
       evidenceContext: {
         materialEvents: [], authoritativeFacts: ['e1'], principalCatalysts: [],
         supportingEvidence: ['e1'], conflictingEvidence: [], subsequentDevelopments: [],
+        sessionAssociations: [],
         unresolvedGaps: [], furtherReadings: []
       }
     }],

@@ -25,7 +25,9 @@ const {
 function canonicalInput({
   includeSecondEvidence = false,
   evidenceTitle = 'Market update',
-  evidenceSummary
+  evidenceSummary,
+  subsequentDevelopments = [],
+  sessionAssociations = []
 } = {}) {
   const item = createEvidenceItem({
     sourceId: 'sg.reuters', market: 'SG', evidenceCategory: 'news', title: evidenceTitle,
@@ -62,7 +64,8 @@ function canonicalInput({
       evidenceCollection: createEvidenceCollection({market: 'SG', items: evidenceItems}),
       evidenceContext: {
         materialEvents: ['e1'], authoritativeFacts: [], principalCatalysts: ['e1'],
-        supportingEvidence: ['e1'], conflictingEvidence: [], subsequentDevelopments: [],
+        supportingEvidence: ['e1'], conflictingEvidence: [], subsequentDevelopments,
+        sessionAssociations,
         unresolvedGaps: [], furtherReadings: []
       }
     }],
@@ -104,7 +107,10 @@ function anthropicResponse(output, overrides = {}) {
 }
 
 test('builds one deterministic server-owned request with the full package and no tools', () => {
-  const input = canonicalInput();
+  const input = canonicalInput({
+    subsequentDevelopments: ['e1'],
+    sessionAssociations: [{evidenceRef: 'e1', sessionDate: '2026-09-04'}]
+  });
   const request = buildClaudeAnalysisRequest(input);
   assert.equal(CLAUDE_ANALYSIS_MODEL, 'claude-haiku-4-5-20251001');
   assert.equal(CLAUDE_ANALYSIS_MAX_TOKENS, 4000);
@@ -113,6 +119,10 @@ test('builds one deterministic server-owned request with the full package and no
   assert.deepEqual(request.messages, [{role: 'user', content: JSON.stringify(input)}]);
   assert.equal(JSON.parse(request.messages[0].content).analysisRequest.initiatingList, 'myStocks');
   assert.equal(JSON.parse(request.messages[0].content).marketPackages[0].telemetry.benchmarkSnapshots[0].reference, 't1');
+  assert.deepEqual(JSON.parse(request.messages[0].content).marketPackages[0].evidenceContext.sessionAssociations, [
+    {evidenceRef: 'e1', sessionDate: '2026-09-04'}
+  ]);
+  assert.equal(Object.isFrozen(input.marketPackages[0].evidenceContext.sessionAssociations), true);
   assert.equal(request.output_config.format.type, 'json_schema');
   assert.equal(request.output_config.format.schema, CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA);
   assert.equal(Object.hasOwn(request, 'tools'), false);

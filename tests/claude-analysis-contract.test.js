@@ -86,7 +86,9 @@ function snapshot(market, symbol = MARKET_CONFIG[market].symbol, withOverlay = f
   });
 }
 
-function marketPackage(market, {evidenceRef = 'e1', telemetrySnapshots, items} = {}) {
+function marketPackage(market, {
+  evidenceRef = 'e1', telemetrySnapshots, items, subsequentDevelopments = [], sessionAssociations = []
+} = {}) {
   const packageItems = items || [evidence(market)];
   const snapshots = telemetrySnapshots || [snapshot(market)];
   return {
@@ -106,7 +108,8 @@ function marketPackage(market, {evidenceRef = 'e1', telemetrySnapshots, items} =
       principalCatalysts: [evidenceRef],
       supportingEvidence: [evidenceRef],
       conflictingEvidence: [],
-      subsequentDevelopments: [],
+      subsequentDevelopments,
+      sessionAssociations,
       unresolvedGaps: [],
       furtherReadings: []
     }
@@ -301,6 +304,70 @@ test('normalizes evidence roles and protects evidence provenance and Further Rea
     analysisRequest: input.analysisRequest,
     marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}
   }), /primary completed/);
+});
+
+test('validates ordered subsequent-development session associations without changing evidence identity', () => {
+  const usItems = [
+    createEvidenceItem({
+      sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'market-data',
+      title: 'Yahoo session recap', canonicalUrl: 'https://finance.yahoo.com/news/session-recap',
+      publishedAt: '2026-09-04T21:00:00Z'
+    }),
+    createEvidenceItem({
+      sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news',
+      title: 'CNBC session recap', canonicalUrl: 'https://www.cnbc.com/2026/09/04/session-recap.html',
+      publishedAt: '2026-09-04T21:30:00Z'
+    })
+  ];
+  const packageInput = marketPackage('US', {
+    items: usItems,
+    subsequentDevelopments: ['e1', 'e2'],
+    sessionAssociations: [
+      {evidenceRef: 'e1', sessionDate: '2026-09-04'},
+      {evidenceRef: 'e2', sessionDate: '2026-09-04'}
+    ]
+  });
+  const input = createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'US', initiatingList: 'myStocks', generatedAt: '2026-09-06T10:00:00Z',
+      userTimezone: 'America/New_York', reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}
+  });
+  const context = input.marketPackages[0].evidenceContext;
+  assert.deepEqual(context.sessionAssociations, packageInput.evidenceContext.sessionAssociations);
+  assert.equal(Object.isFrozen(context.sessionAssociations), true);
+  assert.equal(Object.isFrozen(context.sessionAssociations[0]), true);
+
+  for (const invalid of [
+    [{evidenceRef: 'e1'}],
+    [{evidenceRef: 'e1', sessionDate: '2026-09-04', extra: true}],
+    [{evidenceRef: 'e1', sessionDate: 'not-a-date'}],
+    [{evidenceRef: 'e1', sessionDate: '2026-09-04'}, {evidenceRef: 'e1', sessionDate: '2026-09-04'}],
+    [{evidenceRef: 'e3', sessionDate: '2026-09-04'}],
+    [{evidenceRef: 'e1', sessionDate: '2026-09-03'}],
+    [{evidenceRef: 'e2', sessionDate: '2026-09-04'}, {evidenceRef: 'e1', sessionDate: '2026-09-04'}]
+  ]) {
+    const invalidPackage = JSON.parse(JSON.stringify(packageInput));
+    invalidPackage.evidenceContext.sessionAssociations = invalid;
+    assert.throws(() => createClaudeAnalysisInput({
+      analysisRequest: input.analysisRequest,
+      marketPackages: [invalidPackage], portfolioContext: {myStocks: [], watchlist: []}
+    }), /session association/);
+  }
+  const nonSubsequent = JSON.parse(JSON.stringify(packageInput));
+  nonSubsequent.evidenceContext.subsequentDevelopments = [];
+  assert.throws(() => createClaudeAnalysisInput({
+    analysisRequest: input.analysisRequest,
+    marketPackages: [nonSubsequent], portfolioContext: {myStocks: [], watchlist: []}
+  }), /session association/);
+
+  const missingField = JSON.parse(JSON.stringify(packageInput));
+  delete missingField.evidenceContext.sessionAssociations;
+  assert.throws(() => createClaudeAnalysisInput({
+    analysisRequest: input.analysisRequest,
+    marketPackages: [missingField], portfolioContext: {myStocks: [], watchlist: []}
+  }), /property shape/);
 });
 
 test('keeps My Stocks and Watchlist separate with telemetry, evidence and 14-day events', () => {

@@ -654,6 +654,10 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
   assert.deepEqual(context.authoritativeFacts, ['e1', 'e3', 'e4']);
   assert.deepEqual(context.supportingEvidence, ['e1', 'e3', 'e4']);
   assert.deepEqual(context.subsequentDevelopments, ['e2']);
+  assert.deepEqual(context.principalCatalysts, []);
+  assert.deepEqual(context.sessionAssociations, [{
+    evidenceRef: 'e2', sessionDate: '2026-09-04'
+  }]);
   assert.deepEqual(context.unresolvedGaps, []);
   assert.deepEqual(context.furtherReadings, []);
   assert.equal(JSON.stringify(output).includes('c1'), false);
@@ -677,6 +681,48 @@ test('places a recap published inside the completed-session boundary in supporti
   const context = output.marketPackages[0].evidenceContext;
   assert.deepEqual(context.supportingEvidence, ['e1', 'e2', 'e3', 'e4']);
   assert.deepEqual(context.subsequentDevelopments, []);
+  assert.deepEqual(context.sessionAssociations, []);
+});
+
+test('associates a Yahoo recap only during the bounded post-close relevance window', async () => {
+  for (const publishedAt of [
+    '2026-09-04T20:00:00.000Z',
+    '2026-09-04T19:59:59.999Z',
+    '2026-09-04T22:00:00.001Z'
+  ]) {
+    const article = yahooRecapArticle({publishedAt});
+    const research = yahooRecapResearchSuccess({publishedAt});
+    const {service} = harness({
+      yahooRecapResearch: {async discoverAndValidateRecap() { return research; }},
+      yahooRecapArticleContentAcquisition: {
+        async acquireArticleContent() { return {ok: true, type: 'SUCCESS', articleContent: article}; }
+      },
+      yahooRecapEvidenceConstruction: {
+        constructEvidence(value) { return yahooRecapEvidenceSuccess(value.articleContent, value.horizon); }
+      }
+    });
+    const output = await service.assemble(request());
+    assert.deepEqual(output.marketPackages[0].evidenceContext.sessionAssociations, []);
+  }
+});
+
+test('associates a Yahoo recap published exactly two hours after canonical close', async () => {
+  const publishedAt = '2026-09-04T22:00:00.000Z';
+  const article = yahooRecapArticle({publishedAt});
+  const research = yahooRecapResearchSuccess({publishedAt});
+  const {service} = harness({
+    yahooRecapResearch: {async discoverAndValidateRecap() { return research; }},
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() { return {ok: true, type: 'SUCCESS', articleContent: article}; }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) { return yahooRecapEvidenceSuccess(value.articleContent, value.horizon); }
+    }
+  });
+  const output = await service.assemble(request());
+  assert.deepEqual(output.marketPackages[0].evidenceContext.sessionAssociations, [{
+    evidenceRef: 'e2', sessionDate: '2026-09-04'
+  }]);
 });
 
 test('treats Yahoo recap absence and wrong-session validation as optional without article retrieval', async () => {
@@ -711,6 +757,7 @@ test('treats Yahoo recap absence and wrong-session validation as optional withou
       result.type === 'VALIDATED'
         ? YAHOO_RECAP_RETRIEVAL_FAILURE_GAP : YAHOO_RECAP_UNAVAILABLE_GAP
     ]);
+    assert.deepEqual(output.marketPackages[0].evidenceContext.sessionAssociations, []);
   }
 });
 
