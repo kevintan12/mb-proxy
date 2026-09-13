@@ -14,6 +14,7 @@ const {validateClaudeAnalysisInput} = require('../lib/claude-analysis-contract')
 const {
   BENCHMARK_ANCHOR_KEYS,
   CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
+  CNBC_RECAP_UNAVAILABLE_GAP,
   EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP,
   FEDERAL_RESERVE_UNAVAILABLE_GAP,
   YAHOO_RECAP_UNAVAILABLE_GAP,
@@ -273,10 +274,35 @@ function yahooRecapEvidenceSuccess(article, horizon) {
   };
 }
 
+function cnbcRecapResearchSuccess({
+  publishedAt = '2026-09-04T20:15:23.000Z',
+  updatedAt = '2026-09-04T20:20:00.000Z',
+  targetSessionDate = '2026-09-04',
+  horizon
+} = {}) {
+  const canonicalUrl = 'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html';
+  const title = 'Stock market news for Sept. 4, 2026';
+  return {
+    ok: true,
+    type: 'SUCCESS',
+    constructedEvidence: {
+      targetSessionDate,
+      updatedAt,
+      horizon,
+      evidenceItem: createEvidenceItem({
+        sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news', title,
+        summary: 'The major averages closed higher after the completed US session.',
+        canonicalUrl, publishedAt, symbols: []
+      })
+    }
+  };
+}
+
 function harness(overrides = {}) {
   const calls = {
     factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
-    yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [], cnbc: [],
+    yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [],
+    cnbcRecapResearch: [], cnbc: [],
     evidenceRoleClassification: []
   };
   const dependencies = {
@@ -326,6 +352,12 @@ function harness(overrides = {}) {
       }
     },
     yahooRecapArticleContentBounds: YAHOO_RECAP_ARTICLE_BOUNDS,
+    cnbcRecapResearch: {
+      async researchCompletedSessionRecap(value) {
+        calls.cnbcRecapResearch.push(value);
+        return {ok: true, type: 'NOT_FOUND', constructedEvidence: null};
+      }
+    },
     cnbcNewsResearch: {
       async researchNews({horizons}) {
         calls.cnbc.push(horizons);
@@ -585,6 +617,7 @@ test('reports sanitized non-negative timings for existing package stages', async
     'yahooRecapResearchMs',
     'yahooRecapArticleContentAcquisitionMs',
     'yahooRecapEvidenceConstructionMs',
+    'cnbcRecapResearchMs',
     'cnbcNewsResearchMs',
     'evidenceRoleClassificationMs',
     'packageAssemblyFinalizationMs',
@@ -658,7 +691,7 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
   assert.deepEqual(context.sessionAssociations, [{
     evidenceRef: 'e2', sessionDate: '2026-09-04'
   }]);
-  assert.deepEqual(context.unresolvedGaps, []);
+  assert.deepEqual(context.unresolvedGaps, [CNBC_RECAP_UNAVAILABLE_GAP]);
   assert.deepEqual(context.furtherReadings, []);
   assert.equal(JSON.stringify(output).includes('c1'), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
@@ -755,7 +788,8 @@ test('treats Yahoo recap absence and wrong-session validation as optional withou
     ), false);
     assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
       result.type === 'VALIDATED'
-        ? YAHOO_RECAP_RETRIEVAL_FAILURE_GAP : YAHOO_RECAP_UNAVAILABLE_GAP
+        ? YAHOO_RECAP_RETRIEVAL_FAILURE_GAP : YAHOO_RECAP_UNAVAILABLE_GAP,
+      CNBC_RECAP_UNAVAILABLE_GAP
     ]);
     assert.deepEqual(output.marketPackages[0].evidenceContext.sessionAssociations, []);
   }
@@ -807,7 +841,9 @@ test('maps Yahoo recap stage failures to sanitized deterministic gaps', async ()
       onDiagnostics(value) { diagnostics.push(value); }
     });
     const output = await service.assemble(request());
-    assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [item.expectedGap]);
+    assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
+      item.expectedGap, CNBC_RECAP_UNAVAILABLE_GAP
+    ]);
     assert.deepEqual(diagnostics.find(value => value.stage === 'yahooRecapIntegration'), {
       stage: 'yahooRecapIntegration', outcome: 'FAILURE', failureType: item.expectedType
     });
@@ -835,6 +871,7 @@ test('skips Yahoo recap research when the canonical primary session date is null
   ), false);
   assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
     YAHOO_RECAP_UNAVAILABLE_GAP,
+    CNBC_RECAP_UNAVAILABLE_GAP,
     CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
     EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP
   ]);
@@ -874,7 +911,7 @@ test('does not reuse a previous successful Yahoo recap when the current discover
   assert.equal(hasYahooRecap(first), true);
   assert.equal(hasYahooRecap(second), false);
   assert.deepEqual(second.marketPackages[0].evidenceContext.unresolvedGaps, [
-    YAHOO_RECAP_UNAVAILABLE_GAP
+    YAHOO_RECAP_UNAVAILABLE_GAP, CNBC_RECAP_UNAVAILABLE_GAP
   ]);
 });
 
@@ -914,9 +951,121 @@ test('rejects overlap between supplied anchors and either portfolio list before 
     await assert.rejects(service.assemble(request('US', membership)), /cannot be portfolio membership/);
     assert.deepEqual(calls, {
       factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
-      yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [], cnbc: [],
+      yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [],
+      cnbcRecapResearch: [], cnbc: [],
       evidenceRoleClassification: []
     });
+  }
+});
+
+test('integrates one CNBC recap before general CNBC with package-owned association ordering', async () => {
+  const yahooArticle = yahooRecapArticle();
+  const {service, calls} = harness({
+    yahooRecapResearch: {
+      async discoverAndValidateRecap(value) {
+        calls.yahooRecapResearch.push(value);
+        return yahooRecapResearchSuccess();
+      }
+    },
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() {
+        return {ok: true, type: 'SUCCESS', articleContent: yahooArticle};
+      }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) {
+        return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+      }
+    },
+    cnbcRecapResearch: {
+      async researchCompletedSessionRecap(value) {
+        calls.cnbcRecapResearch.push(value);
+        return cnbcRecapResearchSuccess({horizon: value.horizons[1]});
+      }
+    },
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        calls.cnbc.push(horizons);
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT']);
+      }
+    }
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.deepEqual(calls.cnbcRecapResearch, [{
+    targetSessionDate: '2026-09-04',
+    horizons: calls.cnbc[0]
+  }]);
+  assert.deepEqual(context.evidence.map(({reference, item}) => [
+    reference, item.sourceId, item.title
+  ]), [
+    ['e1', 'us.yahoo-finance', '^RUT market data'],
+    ['e2', 'us.yahoo-finance', 'Stock market today: September 4 recap'],
+    ['e3', 'us.federal-reserve', 'Federal Reserve policy statement'],
+    ['e4', 'us.federal-reserve', 'Federal Reserve minutes'],
+    ['e5', 'us.cnbc', 'Stock market news for Sept. 4, 2026'],
+    ['e6', 'us.cnbc', 'CNBC market news item 1'],
+    ['e7', 'us.cnbc', 'CNBC market news item 2']
+  ]);
+  assert.deepEqual(context.supportingEvidence, ['e1', 'e3', 'e4', 'e6']);
+  assert.deepEqual(context.subsequentDevelopments, ['e2', 'e5', 'e7']);
+  assert.deepEqual(context.sessionAssociations, [
+    {evidenceRef: 'e2', sessionDate: '2026-09-04'},
+    {evidenceRef: 'e5', sessionDate: '2026-09-04'}
+  ]);
+  assert.equal(context.principalCatalysts.includes('e5'), false);
+  assert.deepEqual(context.unresolvedGaps, []);
+  assert.equal(context.evidence[4].item.provenance.publisher, 'CNBC');
+  assert.equal(context.evidence[4].item.canonicalUrl,
+    'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html');
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('CNBC recap optional outcomes and failures never block general CNBC research', async () => {
+  for (const result of [
+    {ok: true, type: 'NOT_FOUND', constructedEvidence: null},
+    {ok: true, type: 'NOT_VALIDATED', constructedEvidence: null},
+    {ok: false, type: 'ARTICLE_ACQUISITION_FAILURE', failureType: 'HTTP_FAILURE'}
+  ]) {
+    let generalCalls = 0;
+    const {service} = harness({
+      cnbcRecapResearch: {async researchCompletedSessionRecap() { return result; }},
+      cnbcNewsResearch: {
+        async researchNews({horizons}) {
+          generalCalls++;
+          return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
+        }
+      }
+    });
+    const context = (await service.assemble(request())).marketPackages[0].evidenceContext;
+    assert.equal(generalCalls, 1);
+    assert.equal(context.evidence.filter(entry => entry.item.sourceId === 'us.cnbc').length, 1);
+    assert.equal(context.unresolvedGaps.filter(gap => gap === CNBC_RECAP_UNAVAILABLE_GAP).length, 1);
+    assert.deepEqual(context.sessionAssociations, []);
+  }
+});
+
+test('CNBC recap association excludes exact-close, pre-close, and over-two-hour evidence', async () => {
+  for (const publishedAt of [
+    '2026-09-04T20:00:00.000Z',
+    '2026-09-04T19:59:59.999Z',
+    '2026-09-04T22:00:00.001Z'
+  ]) {
+    const {service} = harness({
+      cnbcRecapResearch: {
+        async researchCompletedSessionRecap({horizons}) {
+          const classification = publishedAt <= '2026-09-04T20:00:00.000Z'
+            ? 'COMPLETED_SESSION' : 'SUBSEQUENT_DEVELOPMENT';
+          return cnbcRecapResearchSuccess({
+            publishedAt,
+            updatedAt: publishedAt,
+            horizon: horizons.find(item => item.classification === classification)
+          });
+        }
+      }
+    });
+    const context = (await service.assemble(request())).marketPackages[0].evidenceContext;
+    assert.deepEqual(context.sessionAssociations, []);
   }
 });
 
@@ -953,7 +1102,7 @@ test('CNBC all-SKIP adds no evidence or gap', async () => {
   const output = await service.assemble(request());
   const context = output.marketPackages[0].evidenceContext;
   assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
-  assert.deepEqual(context.unresolvedGaps, [YAHOO_RECAP_UNAVAILABLE_GAP]);
+  assert.deepEqual(context.unresolvedGaps, [YAHOO_RECAP_UNAVAILABLE_GAP, CNBC_RECAP_UNAVAILABLE_GAP]);
 });
 
 test('every CNBC stage failure degrades to one deterministic package gap', async () => {
@@ -975,6 +1124,7 @@ test('every CNBC stage failure degrades to one deterministic package gap', async
     assert.equal(validateClaudeAnalysisInput(output), true);
     assert.deepEqual(context.unresolvedGaps, [
       YAHOO_RECAP_UNAVAILABLE_GAP,
+      CNBC_RECAP_UNAVAILABLE_GAP,
       CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP
     ]);
     assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
@@ -997,6 +1147,7 @@ test('unavailable or inconsistent canonical benchmark boundaries degrade CNBC on
   assert.equal(researchCalls, 0);
   assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
     YAHOO_RECAP_RETRIEVAL_FAILURE_GAP,
+    CNBC_RECAP_UNAVAILABLE_GAP,
     CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP
   ]);
   assert.equal(validateClaudeAnalysisInput(output), true);
@@ -1030,7 +1181,9 @@ test('continues with one deterministic unresolved gap when Federal Reserve acqui
   const output = await service.assemble(request());
   const context = output.marketPackages[0].evidenceContext;
   assert.deepEqual(context.evidence.map(item => item.item.sourceId), ['us.yahoo-finance']);
-  assert.deepEqual(context.unresolvedGaps, [FEDERAL_RESERVE_UNAVAILABLE_GAP, YAHOO_RECAP_UNAVAILABLE_GAP]);
+  assert.deepEqual(context.unresolvedGaps, [
+    FEDERAL_RESERVE_UNAVAILABLE_GAP, YAHOO_RECAP_UNAVAILABLE_GAP, CNBC_RECAP_UNAVAILABLE_GAP
+  ]);
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
@@ -1117,7 +1270,8 @@ test('rejects inconsistent persisted reconstruction and malformed provider mater
   const output = await malformedFed.service.assemble(request());
   assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
     FEDERAL_RESERVE_UNAVAILABLE_GAP,
-    YAHOO_RECAP_UNAVAILABLE_GAP
+    YAHOO_RECAP_UNAVAILABLE_GAP,
+    CNBC_RECAP_UNAVAILABLE_GAP
   ]);
 });
 
