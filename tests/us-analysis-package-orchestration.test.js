@@ -11,7 +11,13 @@ const {
   CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS,
   createCnbcNewsResearchRuntime
 } = require('../lib/cnbc-news-research-runtime');
-const {validateClaudeAnalysisInput} = require('../lib/claude-analysis-contract');
+const {
+  REPORT_HEADER,
+  REPORT_SECTION_NAMES,
+  validateClaudeAnalysisInput,
+  validateClaudeAnalysisOutput
+} = require('../lib/claude-analysis-contract');
+const {buildClaudeAnalysisRequest} = require('../lib/claude-analysis-invocation');
 const {
   BENCHMARK_ANCHOR_KEYS,
   CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
@@ -1226,6 +1232,86 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
   assert.deepEqual(output.portfolioContext.watchlist.map(item => item.symbol), ['NVDA']);
   assert.equal(searchCall, 2);
   assert.deepEqual(pageCalls, [unusableUrl, companyUrl, sectorUrl]);
+  const discoveryDiagnostic = cnbcDiagnostics.find(item => item.stage === 'cnbcMarketNewsDiscovery');
+  assert.deepEqual({
+    outcome: discoveryDiagnostic.outcome,
+    resultCount: discoveryDiagnostic.resultCount,
+    inspectedResultCount: discoveryDiagnostic.inspectedResultCount,
+    retainedResultCount: discoveryDiagnostic.retainedResultCount,
+    rejectionCounts: discoveryDiagnostic.rejectionCounts
+  }, {
+    outcome: 'SUCCESS',
+    resultCount: 12,
+    inspectedResultCount: 12,
+    retainedResultCount: 3,
+    rejectionCounts: {
+      INVALID_URL: 8,
+      PATH_MISMATCH: 0,
+      INVALID_TITLE: 0,
+      DUPLICATE: 1,
+      RETAINED_LIMIT: 0
+    }
+  });
+  const acquisitionDiagnostic = cnbcDiagnostics.find(item => item.stage === 'cnbcCandidateAcquisition');
+  assert.deepEqual(acquisitionDiagnostic, {
+    stage: 'cnbcCandidateAcquisition',
+    outcome: 'SUCCESS',
+    discoveryCount: 3,
+    pageAttemptCount: 3,
+    pageFailureCount: 1,
+    extractionFailureCount: 1,
+    horizonFailureCount: 0,
+    contractFailureCount: 0,
+    candidateCount: 2
+  });
+  const researchDiagnostic = cnbcDiagnostics.find(item => item.stage === 'cnbcNewsResearch');
+  assert.equal(researchDiagnostic.outcome, 'SUCCESS');
+  assert.deepEqual(researchDiagnostic.counts, {
+    candidateCount: 2,
+    useCount: 2,
+    skipCount: 0,
+    retrievedArticleCount: 2,
+    constructedEvidenceCount: 2,
+    materialityInvocationCount: 1
+  });
+
+  const finalRequest = buildClaudeAnalysisRequest(output);
+  const finalInput = JSON.parse(finalRequest.messages[0].content);
+  assert.deepEqual(finalInput.marketPackages[0].evidenceContext.evidence.slice(-2)
+    .map(entry => [entry.reference, entry.item.title]), [
+      ['e8', 'Broadcom leads broad-market semiconductor gains'],
+      ['e9', 'Health-care sector advances on constructive developments']
+    ]);
+  const sections = REPORT_SECTION_NAMES.map((name, index) => ({
+    name,
+    content: index === 10 ? null
+      : index === 3 ? 'Broadcom led semiconductor shares and health-care stocks advanced.'
+        : index === 4 ? 'Apple was material to the initiating My Stocks list.'
+          : index === 7 ? 'Constructive health-care developments support a sector opportunity.'
+            : 'The supplied evidence supports this market conclusion.',
+    evidenceRefs: index === 10 ? [] : index === 3 ? ['e8', 'e9'] : index === 4 ? ['e2']
+      : index === 7 ? ['e9'] : ['e8'],
+    telemetryRefs: index === 10 ? [] : index === 4 ? ['t2'] : ['t1'],
+    uncertainties: []
+  }));
+  const finalOutput = {
+    status: 'NORMAL',
+    reportContext: {
+      header: REPORT_HEADER,
+      selectedScope: 'US',
+      generatedAt: output.analysisRequest.generatedAt,
+      userTimezone: 'Asia/Singapore',
+      reportType: 'MARKET_BRIEF',
+      markets: ['US']
+    },
+    sections,
+    evidenceReferences: ['e8', 'e9', 'e2'],
+    furtherReadings: ['e4', 'e7', 'e8', 'e9'],
+    evidenceGaps: []
+  };
+  assert.equal(validateClaudeAnalysisOutput(finalOutput, output).valid, true);
+  assert.deepEqual(finalOutput.sections[3].evidenceRefs, ['e8', 'e9']);
+  assert.deepEqual(finalOutput.sections[7].evidenceRefs, ['e9']);
 });
 
 test('Further Readings deduplicates general CNBC evidence against mandatory recap anchors by canonical URL', async () => {
@@ -1245,6 +1331,51 @@ test('Further Readings deduplicates general CNBC evidence against mandatory reca
   const context = (await service.assemble(request())).marketPackages[0].evidenceContext;
   assert.equal(context.evidence.filter(entry => entry.item.canonicalUrl === recapUrl).length, 2);
   assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e4', sessionDate: '2026-09-04'}]);
+});
+
+test('Further Readings preserves each available recap anchor before validated general CNBC evidence', async () => {
+  for (const scenario of [
+    {yahoo: true, cnbc: false, expected: [
+      'Stock market today: September 4 recap', 'CNBC market news item 1'
+    ]},
+    {yahoo: false, cnbc: true, expected: [
+      'Stock market news for Sept. 4, 2026', 'CNBC market news item 1'
+    ]}
+  ]) {
+    const overrides = {
+      cnbcNewsResearch: {
+        async researchNews({horizons}) {
+          return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
+        }
+      }
+    };
+    if (scenario.yahoo) {
+      const article = yahooRecapArticle();
+      overrides.yahooRecapResearch = {
+        async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }
+      };
+      overrides.yahooRecapArticleContentAcquisition = {
+        async acquireArticleContent() {
+          return {ok: true, type: 'SUCCESS', articleContent: article};
+        }
+      };
+      overrides.yahooRecapEvidenceConstruction = {
+        constructEvidence({horizon}) { return yahooRecapEvidenceSuccess(article, horizon); }
+      };
+    }
+    if (scenario.cnbc) {
+      overrides.cnbcRecapResearch = {
+        async researchCompletedSessionRecap({horizons}) {
+          return cnbcRecapResearchSuccess({horizon: horizons[1]});
+        }
+      };
+    }
+    const {service} = harness(overrides);
+    const context = (await service.assemble(request())).marketPackages[0].evidenceContext;
+    const evidenceByReference = new Map(context.evidence.map(entry => [entry.reference, entry.item]));
+    assert.deepEqual(context.furtherReadings.map(reading =>
+      evidenceByReference.get(reading.evidenceRef).title), scenario.expected);
+  }
 });
 
 test('CNBC bounded-search NOT_FOUND remains optional and adds the existing deterministic gap', async () => {

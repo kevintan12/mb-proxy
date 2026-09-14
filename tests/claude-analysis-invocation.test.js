@@ -9,7 +9,8 @@ const {
   REPORT_HEADER,
   REPORT_SECTION_NAMES,
   EMPTY_INITIATING_LIST_CONTENT,
-  createClaudeAnalysisInput
+  createClaudeAnalysisInput,
+  validateClaudeAnalysisOutput
 } = require('../lib/claude-analysis-contract');
 const {
   CLAUDE_ANALYSIS_MODEL,
@@ -491,6 +492,7 @@ test('gives Sections 6-8 and 10 exact interpretation, risk, opportunity and take
     'For Section 8 OPPORTUNITIES',
     'specific evidence-supported broad-market sectors, themes, or companies',
     'distinguish positive evidence from a speculative scenario',
+    'never present an opportunity as guaranteed or as a recommendation',
     'never use generic filler such as treating a possible rebound as a buying opportunity',
     'never attach an unrelated reference merely to satisfy validation',
     'If no defensible opportunity is supported, set content to null',
@@ -499,6 +501,14 @@ test('gives Sections 6-8 and 10 exact interpretation, risk, opportunity and take
     'Do not simply repeat Section 1',
     'do not make an unsupported recommendation'
   ]) assert.equal(system.includes(requirement), true, requirement);
+});
+
+test('keeps overlapping evidence concise without merging the frozen section roles', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  assert.match(system, /Keep the report sections distinct/);
+  assert.match(system, /place each supported fact or conclusion where it adds the most value/);
+  assert.match(system, /do not repeat the same sentence or substantially identical explanation/);
+  assert.match(system, /Sections 1, 2, 3, 6, 7, 9, and 10/);
 });
 
 test('gives Claude time-safe materially relevant subsequent-development instructions', () => {
@@ -604,6 +614,49 @@ test('accepts valid NORMAL, DEGRADED and FAILED structured reports with one requ
   assert.deepEqual(CLAUDE_ANALYSIS_RESULT_TYPES, [
     'SUCCESS', 'INPUT_FAILURE', 'REQUEST_TOO_LARGE', 'UPSTREAM_FAILURE', 'CONTRACT_FAILURE'
   ]);
+});
+
+test('deterministically downgrades evidence-limited NORMAL output while preserving strict validation', async () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  output.sections[7] = {
+    name: REPORT_SECTION_NAMES[7], content: null, evidenceRefs: [], telemetryRefs: [], uncertainties: []
+  };
+  const strictValidation = validateClaudeAnalysisOutput(output, input);
+  assert.deepEqual(strictValidation.errors, ['NORMAL requires every analysis section']);
+
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+  });
+
+  const message = 'The supplied evidence did not support a reliable OPPORTUNITIES section.';
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.deepEqual(result.output.sections[7], {
+    name: REPORT_SECTION_NAMES[7], content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: [message]
+  });
+  assert.deepEqual(result.output.evidenceGaps, [message]);
+});
+
+test('does not normalize structurally inconsistent null sections or unusable reports', async () => {
+  const input = canonicalInput();
+  const referencedNull = normalOutput(input);
+  referencedNull.sections[7] = {
+    name: REPORT_SECTION_NAMES[7], content: null, evidenceRefs: ['e1'], telemetryRefs: [],
+    uncertainties: []
+  };
+  const allUnavailable = normalOutput(input);
+  allUnavailable.sections = allUnavailable.sections.map((section, index) => index === 10
+    ? section
+    : {...section, content: null, evidenceRefs: [], telemetryRefs: [], uncertainties: []});
+
+  for (const output of [referencedNull, allUnavailable]) {
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+    });
+    assert.equal(result.type, 'CONTRACT_FAILURE');
+  }
 });
 
 test('derives top-level evidenceReferences from section first-use order', async () => {

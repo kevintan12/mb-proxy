@@ -39,7 +39,7 @@ function item(sourceId, title, canonicalUrl, publishedAt, symbols = [], evidence
   });
 }
 
-function richCompletedUsWeekInput({unresolvedGaps = []} = {}) {
+function completedUsWeekInput({unresolvedGaps = [], includeBroadMarket = true} = {}) {
   const benchmark = fiveSessionSnapshot('^GSPC');
   const stock = fiveSessionSnapshot('MSFT', 'EQUITY');
   const evidence = [
@@ -53,6 +53,15 @@ function richCompletedUsWeekInput({unresolvedGaps = []} = {}) {
       'https://www.federalreserve.gov/newsevents/pressreleases/monetary20260904a.htm',
       '2026-09-04T18:00:00Z', [], 'monetary-policy')
   ];
+  if (includeBroadMarket) evidence.push(
+    item('us.cnbc', 'Broadcom leads semiconductor shares after a major company development',
+      'https://www.cnbc.com/2026/09/04/broadcom-semiconductor-leadership.html',
+      '2026-09-04T19:00:00Z'),
+    item('us.cnbc', 'Health-care shares advance on constructive industry developments',
+      'https://www.cnbc.com/2026/09/04/health-care-sector-advances.html',
+      '2026-09-04T19:15:00Z')
+  );
+  const broadReferences = includeBroadMarket ? ['e4', 'e5'] : [];
   return createClaudeAnalysisInput({
     analysisRequest: {
       selectedScope: 'US', initiatingList: 'myStocks', generatedAt: GENERATED_AT,
@@ -68,14 +77,19 @@ function richCompletedUsWeekInput({unresolvedGaps = []} = {}) {
       telemetry: {benchmarkSnapshots: [benchmark], stockSnapshots: [stock]},
       evidenceCollection: createEvidenceCollection({market: 'US', items: evidence}),
       evidenceContext: {
-        materialEvents: ['e1', 'e2', 'e3'], authoritativeFacts: ['e3'],
-        principalCatalysts: ['e2', 'e3'], supportingEvidence: ['e2', 'e3'],
+        materialEvents: ['e1', 'e2', 'e3', ...broadReferences], authoritativeFacts: ['e3'],
+        principalCatalysts: ['e2', 'e3', ...(includeBroadMarket ? ['e4'] : [])],
+        supportingEvidence: ['e2', 'e3', ...broadReferences],
         conflictingEvidence: [], subsequentDevelopments: ['e1'],
         sessionAssociations: [{evidenceRef: 'e1', sessionDate: '2026-09-04'}],
         unresolvedGaps,
         furtherReadings: [
           {evidenceRef: 'e1', sessionDate: '2026-09-04'},
-          {evidenceRef: 'e2', sessionDate: '2026-09-04'}
+          {evidenceRef: 'e2', sessionDate: '2026-09-04'},
+          ...(includeBroadMarket ? [
+            {evidenceRef: 'e4', sessionDate: '2026-09-04'},
+            {evidenceRef: 'e5', sessionDate: '2026-09-04'}
+          ] : [])
         ]
       }
     }],
@@ -90,10 +104,15 @@ function richCompletedUsWeekInput({unresolvedGaps = []} = {}) {
   });
 }
 
+function richCompletedUsWeekInput({unresolvedGaps = []} = {}) {
+  return completedUsWeekInput({unresolvedGaps, includeBroadMarket: true});
+}
+
 function thinDegradedFiveSessionInput() {
-  return richCompletedUsWeekInput({unresolvedGaps: [
-    'Optional narrative evidence was unavailable at package assembly time.'
-  ]});
+  return completedUsWeekInput({
+    includeBroadMarket: false,
+    unresolvedGaps: ['Optional broad-market narrative evidence was unavailable at package assembly time.']
+  });
 }
 
 function reportContext(input) {
@@ -105,22 +124,40 @@ function reportContext(input) {
 }
 
 function supportedOutput(input, {opportunity = true, plainEnglish = true} = {}) {
+  const broadMarketAvailable = input.marketPackages[0].evidenceContext.evidence.length >= 5;
+  const ordinaryContent = plainEnglish
+    ? [
+        'The market finished higher as company and policy evidence shaped the session.',
+        'Federal Reserve policy context and company developments were the main supported drivers.',
+        'The recap and policy evidence support the reported completed-session move.',
+        broadMarketAvailable
+          ? 'Broadcom led semiconductor shares, while health-care stocks also advanced.'
+          : 'The two market recaps describe broad closing-session conditions.',
+        'Microsoft was material to the initiating My Stocks list.',
+        'The evidence points to broader participation beyond the initiating list.',
+        'Policy uncertainty remains a material risk to the market outlook.',
+        'Constructive health-care developments support a specific sector opportunity.',
+        'The later Yahoo recap and policy calendar identify the next developments to monitor.',
+        'Company leadership broadened, but policy risk remains important.'
+      ]
+    : Array(10).fill('Equity positioning reflected rate-path expectations and reallocation momentum.');
+  const evidenceRefs = [
+    ['e2', 'e3'], ['e3'], ['e2', 'e3'], broadMarketAvailable ? ['e4', 'e5'] : ['e1', 'e2'],
+    ['e2'], broadMarketAvailable ? ['e4', 'e5'] : ['e2'], ['e3'], ['e5'], ['e1', 'e3'], ['e1']
+  ];
   const sections = REPORT_SECTION_NAMES.map((name, index) => ({
     name,
-    content: index === 10 ? null
-      : index === 4 ? 'Microsoft was material to the initiating My Stocks list.'
-        : index === 7 && !opportunity ? null
-          : plainEnglish
-            ? 'The supplied evidence supports this concise market conclusion.'
-            : 'Equity positioning reflected rate-path expectations and reallocation momentum.',
-    evidenceRefs: index === 10 || (index === 7 && !opportunity) ? [] : ['e2'],
+    content: index === 10 ? null : index === 7 && !opportunity ? null : ordinaryContent[index],
+    evidenceRefs: index === 10 || (index === 7 && !opportunity) ? [] : evidenceRefs[index],
     telemetryRefs: index === 10 || (index === 7 && !opportunity) ? []
       : index === 4 ? ['t2'] : ['t1'],
     uncertainties: index === 7 && !opportunity ? ['No defensible opportunity is supported.'] : []
   }));
   return {
     status: opportunity ? 'NORMAL' : 'DEGRADED', reportContext: reportContext(input), sections,
-    evidenceReferences: ['e2'], furtherReadings: ['e1', 'e2'],
+    evidenceReferences: broadMarketAvailable
+      ? ['e2', 'e3', 'e4', 'e5', 'e1'] : ['e2', 'e3', 'e1'],
+    furtherReadings: broadMarketAvailable ? ['e1', 'e2', 'e4', 'e5'] : ['e1', 'e2'],
     evidenceGaps: opportunity ? [] : ['No defensible evidence-supported opportunity was available.']
   };
 }

@@ -95,7 +95,7 @@ test('rejects unsafe, malformed, recap, and all unsupported biggest-moves famili
   });
 });
 
-test('inspects ten per intent and later valid results survive bad early rankings within a global five-URL budget', async () => {
+test('inspects ten per intent and balances both intents within the global five-URL budget', async () => {
   const firstIntent = Array.from({length: 10}, (_, index) => index < 8
     ? result(`https://example.test/rejected-${index + 1}.html`, `Rejected ${index + 1}`)
     : result('https://www.cnbc.com/2026/09/11/shared.html', `Shared ${index + 1}`));
@@ -112,6 +112,29 @@ test('inspects ten per intent and later valid results survive bad early rankings
   assert.equal(output.discoveries.length, 5);
   assert.deepEqual(output.discoveries.map(item => item.rank), [9, 12, 13, 14, 15]);
   assert.equal(call, 2);
+});
+
+test('a full first-intent result set cannot starve company and sector discoveries', async () => {
+  const firstIntent = Array.from({length: 10}, (_, index) =>
+    result(`https://www.cnbc.com/2026/09/11/session-${index + 1}.html`, `Session ${index + 1}`));
+  const secondIntent = [
+    result('https://www.cnbc.com/2026/09/11/non-portfolio-company.html', 'Company'),
+    result('https://www.cnbc.com/2026/09/11/constructive-sector.html', 'Sector')
+  ];
+  let call = 0;
+  const service = createClaudeBoundedCnbcMarketNewsDiscoveryService({
+    apiKey: 'key', fetchImpl: async () => response(call++ === 0 ? firstIntent : secondIntent)
+  });
+
+  const output = await service.discoverCnbcMarketNews({targetSessionDate: '2026-09-11'});
+
+  assert.deepEqual(output.discoveries.map(item => [item.rank, item.title]), [
+    [1, 'Session 1'],
+    [2, 'Session 2'],
+    [3, 'Session 3'],
+    [11, 'Company'],
+    [12, 'Sector']
+  ]);
 });
 
 test('returns optional absence and deterministic provider failures with no retry', async () => {
@@ -188,8 +211,9 @@ test('diagnostics distinguish zero results, validation rejection, and bounded pa
       return response([result('https://www.cnbc.com/2026/09/11/valid-company-news.html')]);
     }
   });
-  assert.equal((await partial.discoverCnbcMarketNews({targetSessionDate: '2026-09-11'})).type,
-    'SUCCESS');
+  const partialOutput = await partial.discoverCnbcMarketNews({targetSessionDate: '2026-09-11'});
+  assert.equal(partialOutput.type, 'SUCCESS');
+  assert.deepEqual(partialOutput.discoveries.map(item => item.rank), [11]);
   assert.equal(diagnostics[0].outcome, 'PARTIAL_SUCCESS');
   assert.equal(diagnostics[0].failedSearchCount, 1);
   assert.equal(diagnostics[0].fetchCount, 2);
