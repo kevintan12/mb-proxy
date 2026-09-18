@@ -41,7 +41,7 @@ function candidate(reference) {
     evidenceCategory: 'news',
     title: `Canonical title ${reference}`,
     summary: `Canonical RSS summary ${reference}.`,
-    extract: null,
+    extract: `Compact candidate extract ${reference}.`,
     canonicalUrl: `https://www.cnbc.com/2026/09/08/${reference}.html`,
     publishedAt: '2026-09-08T12:00:00Z',
     symbols: []
@@ -85,6 +85,25 @@ function service(bounds = constructionBounds) {
     evidenceConstructionBounds: bounds
   });
 }
+
+test('constructs compact provisional evidence for every retrieved candidate without materiality', () => {
+  const candidates = collection();
+  const result = service().constructProvisionalEvidence({
+    candidateCollection: candidates,
+    retrievedArticles: candidates.candidates.map(item => articleFor(item))
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.constructedEvidence.map(record => [
+    record.candidateReference, record.evidenceItem.summary
+  ]), [
+    ['c1', 'Compact candidate extract c1.'],
+    ['c2', 'Compact candidate extract c2.'],
+    ['c3', 'Compact candidate extract c3.']
+  ]);
+  assert.equal(result.constructedEvidence.some(record =>
+    record.evidenceItem.summary.includes('Bounded article content')), false);
+  assert.equal(Object.isFrozen(result.constructedEvidence[0]), true);
+});
 
 test('all SKIP produces an immutable empty constructed evidence result', () => {
   const result = service().constructEvidence({

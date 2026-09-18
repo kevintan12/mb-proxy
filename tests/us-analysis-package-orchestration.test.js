@@ -19,7 +19,12 @@ const {
 } = require('../lib/claude-analysis-contract');
 const {buildClaudeAnalysisRequest} = require('../lib/claude-analysis-invocation');
 const {
+  buildClaudeEvidenceRoleClassificationRequest,
+  CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES
+} = require('../lib/claude-evidence-role-classification');
+const {
   BENCHMARK_ANCHOR_KEYS,
+  BROAD_MARKET_EVIDENCE_UNAVAILABLE_GAP,
   CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
   CNBC_RECAP_UNAVAILABLE_GAP,
   EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP,
@@ -101,7 +106,7 @@ function cnbcCandidate(reference, horizon, overrides = {}) {
     evidenceCategory: 'news',
     title: `CNBC market news item ${number}`,
     summary: `CNBC candidate summary item ${number}.`,
-    extract: null,
+    extract: `Bounded CNBC candidate extract item ${number}.`,
     canonicalUrl: `https://www.cnbc.com/2026/09/04/item-${number}.html`,
     publishedAt,
     symbols: [],
@@ -119,13 +124,7 @@ function cnbcResearchSuccess(horizons, classifications = [], candidateOverrides 
     market: 'US',
     candidates
   }, {bounds: CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS.candidateBounds});
-  const selections = candidates.map(candidate => ({
-    reference: candidate.reference,
-    decision: 'USE',
-    category: 'news',
-    materiality: 'HIGH',
-    reason: 'Material market development.'
-  }));
+  const selections = [];
   const retrievedArticles = candidates.map(candidate => ({
     reference: candidate.reference,
     sourceId: candidate.sourceId,
@@ -139,13 +138,12 @@ function cnbcResearchSuccess(horizons, classifications = [], candidateOverrides 
   const constructedEvidence = candidates.map((candidate, index) => ({
     candidateReference: candidate.reference,
     horizon: candidate.horizon,
-    selection: selections[index],
     evidenceItem: createEvidenceItem({
       sourceId: candidate.sourceId,
       market: candidate.market,
       evidenceCategory: candidate.evidenceCategory,
       title: candidate.title,
-      summary: retrievedArticles[index].articleText,
+      summary: candidate.extract,
       canonicalUrl: candidate.canonicalUrl,
       publishedAt: candidate.publishedAt,
       symbols: candidate.symbols
@@ -154,20 +152,8 @@ function cnbcResearchSuccess(horizons, classifications = [], candidateOverrides 
   return {ok: true, type: 'SUCCESS', candidateCollection, selections, retrievedArticles, constructedEvidence};
 }
 
-function cnbcAllSkipSuccess(horizons) {
-  const candidateCollection = createNewsEvidenceCandidateCollection({
-    market: 'US', candidates: [cnbcCandidate('c1', horizons[0])]
-  }, {bounds: CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS.candidateBounds});
-  return {
-    ok: true,
-    type: 'SUCCESS',
-    candidateCollection,
-    selections: [{
-      reference: 'c1', decision: 'SKIP', category: 'news', materiality: 'LOW', reason: 'Not material.'
-    }],
-    retrievedArticles: [],
-    constructedEvidence: []
-  };
+function cnbcNonmaterialSuccess(horizons) {
+  return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
 }
 
 function yahooEvidence(symbol, publishedAt = '2026-09-05T20:00:00Z') {
@@ -203,6 +189,22 @@ function fedEvidence(publishedAt = '2026-09-05T18:00:00Z') {
         publishedAt: '2026-09-04T18:00:00Z', symbols: []
       })
     ]
+  });
+}
+
+function manyFedEvidence(count, summaryBytes = 0) {
+  return createEvidenceCollection({
+    market: 'US',
+    items: Array.from({length: count}, (_, index) => createEvidenceItem({
+      sourceId: 'us.federal-reserve',
+      market: 'US',
+      evidenceCategory: 'monetary-policy',
+      title: `Federal Reserve release ${index + 1}`,
+      ...(summaryBytes ? {summary: 'x'.repeat(summaryBytes)} : {}),
+      canonicalUrl: `https://www.federalreserve.gov/newsevents/pressreleases/monetary202609${String(index + 1).padStart(2, '0')}a.htm`,
+      publishedAt: '2026-09-04T18:00:00Z',
+      symbols: []
+    }))
   });
 }
 
@@ -356,7 +358,7 @@ function harness(overrides = {}) {
     cnbcNewsResearch: {
       async researchNews({horizons}) {
         calls.cnbc.push(horizons);
-        return cnbcAllSkipSuccess(horizons);
+        return cnbcNonmaterialSuccess(horizons);
       }
     },
     evidenceRoleClassification: {
@@ -370,6 +372,7 @@ function harness(overrides = {}) {
               reference,
               materiality: 'LOW',
               roles: [],
+              subjects: [],
               reason: 'No supported evidence role.'
             }))
           }
@@ -382,15 +385,21 @@ function harness(overrides = {}) {
   return {service: createUsAnalysisPackageOrchestrationService(dependencies), calls};
 }
 
-function roleClassificationSuccess(input, rolesByReference = {}) {
+function roleClassificationSuccess(
+  input,
+  rolesByReference = {},
+  subjectsByReference = {},
+  materialityByReference = {}
+) {
   return {
     ok: true,
     type: 'SUCCESS',
     output: {
       classifications: input.evidence.map(({reference}) => ({
         reference,
-        materiality: 'HIGH',
+        materiality: materialityByReference[reference] || 'HIGH',
         roles: rolesByReference[reference] || [],
+        subjects: subjectsByReference[reference] || [],
         reason: rolesByReference[reference]?.includes('PRINCIPAL_CATALYST')
           ? 'This evidence causally supports the completed-session move.'
           : 'This evidence supports the assigned role assessment.'
@@ -513,15 +522,19 @@ test('classifies package-owned ordered evidence refs once and derives both role 
   ]);
   assert.deepEqual(classifierInput.evidence.map(entry => [
     entry.reference, entry.horizon, entry.item.canonicalUrl
-  ]), marketPackage.evidenceContext.evidence.map((entry, index) => [
-    entry.reference,
-    index === 4 ? 'SUBSEQUENT_DEVELOPMENT' : 'COMPLETED_SESSION',
-    entry.item.canonicalUrl
-  ]));
-  assert.deepEqual(marketPackage.evidenceContext.materialEvents, ['e1', 'e2', 'e5']);
+  ]), [
+    ['e1', 'COMPLETED_SESSION', 'https://finance.yahoo.com/quote/%5ERUT/'],
+    ['e2', 'COMPLETED_SESSION', 'https://www.federalreserve.gov/newsevents/pressreleases/monetary20260905a.htm'],
+    ['e3', 'COMPLETED_SESSION', 'https://www.federalreserve.gov/newsevents/pressreleases/monetary20260904a.htm'],
+    ['e4', 'COMPLETED_SESSION', 'https://www.cnbc.com/2026/09/04/item-1.html'],
+    ['e5', 'SUBSEQUENT_DEVELOPMENT', 'https://www.cnbc.com/2026/09/04/item-2.html']
+  ]);
+  assert.deepEqual(marketPackage.evidenceContext.materialEvents, ['e1', 'e2', 'e4']);
   assert.deepEqual(marketPackage.evidenceContext.principalCatalysts, ['e2']);
-  assert.equal(marketPackage.evidenceContext.evidence[4].item.sourceId, 'us.cnbc');
-  assert.equal(marketPackage.evidenceContext.evidence[4].reference, 'e5');
+  assert.equal(marketPackage.evidenceContext.evidence[3].item.sourceId, 'us.cnbc');
+  assert.equal(marketPackage.evidenceContext.evidence[3].reference, 'e4');
+  assert.equal(marketPackage.evidenceContext.evidence[3].item.canonicalUrl,
+    'https://www.cnbc.com/2026/09/04/item-2.html');
 });
 
 test('fails package assembly when required evidence-role classification fails or is invalid', async () => {
@@ -1047,6 +1060,13 @@ test('integrates one CNBC recap before general CNBC with package-owned associati
         calls.cnbc.push(horizons);
         return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT']);
       }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(input, {
+          e6: ['MATERIAL_EVENT'], e7: ['MATERIAL_EVENT']
+        });
+      }
     }
   });
   const output = await service.assemble(request());
@@ -1100,6 +1120,11 @@ test('CNBC recap optional outcomes and failures never block general CNBC researc
           generalCalls++;
           return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
         }
+      },
+      evidenceRoleClassification: {
+        async classifyEvidenceRoles(input) {
+          return roleClassificationSuccess(input, {e4: ['MATERIAL_EVENT']});
+        }
       }
     });
     const context = (await service.assemble(request())).marketPackages[0].evidenceContext;
@@ -1144,6 +1169,13 @@ test('integrates completed and subsequent CNBC evidence after Yahoo and Fed with
         researchTargetSessionDate = targetSessionDate;
         return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT']);
       }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(input, {
+          e4: ['MATERIAL_EVENT'], e5: ['MATERIAL_EVENT']
+        });
+      }
     }
   });
   const output = await service.assemble(request());
@@ -1169,7 +1201,161 @@ test('integrates completed and subsequent CNBC evidence after Yahoo and Fed with
   assert.equal(JSON.stringify(output).includes('c2'), false);
 });
 
-test('CNBC all-SKIP adds no evidence or gap', async () => {
+test('filters five provisional CNBC items and compacts every retained reference-bearing path', async () => {
+  const {service} = harness({
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, [
+          'COMPLETED_SESSION', 'COMPLETED_SESSION', 'COMPLETED_SESSION',
+          'SUBSEQUENT_DEVELOPMENT', 'SUBSEQUENT_DEVELOPMENT'
+        ]);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(
+          input,
+          {
+            e5: ['MATERIAL_EVENT'],
+            e7: ['MATERIAL_EVENT'],
+            e8: ['MATERIAL_EVENT']
+          },
+          {
+            e5: [{kind: 'COMPANY', name: 'CNBC market news item 2'}],
+            e7: [{kind: 'SECTOR', name: 'CNBC market news item 4'}],
+            e8: [{kind: 'COMPANY', name: 'CNBC market news item 5'}]
+          },
+          {e4: 'LOW', e5: 'HIGH', e6: 'MEDIUM', e7: 'MEDIUM', e8: 'LOW'}
+        );
+      }
+    }
+  });
+
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.deepEqual(context.evidence.map(entry => [entry.reference, entry.item.title]), [
+    ['e1', '^RUT market data'],
+    ['e2', 'Federal Reserve policy statement'],
+    ['e3', 'Federal Reserve minutes'],
+    ['e4', 'CNBC market news item 2'],
+    ['e5', 'CNBC market news item 4']
+  ]);
+  assert.deepEqual(context.materialEvents, ['e4', 'e5']);
+  assert.deepEqual(context.principalCatalysts, []);
+  assert.deepEqual(context.supportingEvidence, ['e1', 'e2', 'e3', 'e4']);
+  assert.deepEqual(context.subsequentDevelopments, ['e5']);
+  assert.deepEqual(context.broadMarketFocus, [
+    {evidenceRef: 'e4', subjects: [{kind: 'COMPANY', name: 'CNBC market news item 2'}]},
+    {evidenceRef: 'e5', subjects: [{kind: 'SECTOR', name: 'CNBC market news item 4'}]}
+  ]);
+  assert.deepEqual(context.furtherReadings, [
+    {evidenceRef: 'e4', sessionDate: '2026-09-04'},
+    {evidenceRef: 'e5', sessionDate: '2026-09-04'}
+  ]);
+  assert.equal(JSON.stringify(output).includes('CNBC market news item 1'), false);
+  assert.equal(JSON.stringify(output).includes('CNBC market news item 3'), false);
+  assert.equal(JSON.stringify(output).includes('CNBC market news item 5'), false);
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('admits provisional CNBC evidence only while the 50-item classifier bound remains safe', async () => {
+  let classifiedInput = null;
+  const {service} = harness({
+    federalReserveEvidenceAcquisition: {
+      async acquireEvidence() { return manyFedEvidence(48); }
+    },
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION', 'COMPLETED_SESSION']);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        classifiedInput = input;
+        return roleClassificationSuccess(input, {e50: ['MATERIAL_EVENT']});
+      }
+    }
+  });
+
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.equal(classifiedInput.evidence.length, 50);
+  assert.equal(classifiedInput.evidence.at(-1).item.title, 'CNBC market news item 1');
+  assert.equal(context.evidence.length, 50);
+  assert.equal(context.evidence.at(-1).reference, 'e50');
+  assert.equal(context.evidence.at(-1).item.title, 'CNBC market news item 1');
+  assert.equal(JSON.stringify(context).includes('CNBC market news item 2'), false);
+  assert.equal(context.unresolvedGaps.includes(BROAD_MARKET_EVIDENCE_UNAVAILABLE_GAP), false);
+});
+
+test('keeps oversized provisional CNBC evidence optional at the 64 KiB classifier preflight', async () => {
+  const benchmark = snapshot('^RUT');
+  const yahooItem = yahooEvidence('^RUT').items[0];
+  const provisional = cnbcResearchSuccess(
+    [
+      {classification: 'COMPLETED_SESSION', startsAtExclusive: '2026-09-03T20:00:00.000Z', endsAtInclusive: '2026-09-04T20:00:00.000Z'},
+      {classification: 'SUBSEQUENT_DEVELOPMENT', startsAtExclusive: '2026-09-04T20:00:00.000Z', endsAtInclusive: GENERATED_AT}
+    ],
+    ['COMPLETED_SESSION']
+  ).constructedEvidence[0].evidenceItem;
+  function classifierBytes(items) {
+    const requestBody = buildClaudeEvidenceRoleClassificationRequest({
+      marketContext: {
+        market: 'US', exchangeTimezone: 'America/New_York', marketState: 'CLOSED',
+        primaryCompletedSessionDate: '2026-09-04'
+      },
+      benchmarkTelemetry: [{reference: 't1', snapshot: benchmark}],
+      evidence: items.map((item, index) => ({
+        reference: `e${index + 1}`, horizon: 'COMPLETED_SESSION', item
+      }))
+    });
+    return Buffer.byteLength(JSON.stringify(requestBody), 'utf8');
+  }
+  let low = 0;
+  let high = 4000;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const items = [yahooItem, ...manyFedEvidence(20, middle).items];
+    if (classifierBytes(items) <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  const fedCollection = manyFedEvidence(20, low);
+  const baseItems = [yahooItem, ...fedCollection.items];
+  assert.equal(classifierBytes(baseItems)
+    <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES, true);
+  assert.equal(classifierBytes(baseItems.concat(provisional))
+    > CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES, true);
+
+  let classifiedInput = null;
+  const {service} = harness({
+    federalReserveEvidenceAcquisition: {
+      async acquireEvidence() { return fedCollection; }
+    },
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        classifiedInput = input;
+        return roleClassificationSuccess(input);
+      }
+    }
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.equal(classifiedInput.evidence.length, baseItems.length);
+  assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
+  assert.deepEqual(context.broadMarketFocus, []);
+  assert.equal(context.unresolvedGaps.includes(BROAD_MARKET_EVIDENCE_UNAVAILABLE_GAP), true);
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('roleless low-materiality CNBC provisional evidence adds no final evidence or gap', async () => {
   const {service} = harness();
   const output = await service.assemble(request());
   const context = output.marketPackages[0].evidenceContext;
@@ -1217,15 +1403,7 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
             }
           };
         }
-        return {
-          ok: true, status: 200,
-          async json() {
-            return {content: [{type: 'text', text: JSON.stringify({selections: [
-              {reference: 'c1', decision: 'USE', category: 'news', materiality: 'HIGH', reason: 'Material non-portfolio company leadership.'},
-              {reference: 'c2', decision: 'USE', category: 'news', materiality: 'HIGH', reason: 'Material sector opportunity evidence.'}
-            ]})}]};
-          }
-        };
+        throw new Error('standalone CNBC materiality invocation is forbidden');
       }
       pageCalls.push(url);
       const article = url === unusableUrl ? {
@@ -1265,7 +1443,14 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
     cnbcNewsResearch,
     evidenceRoleClassification: {
       async classifyEvidenceRoles(input) {
-        return roleClassificationSuccess(input, {e8: ['MATERIAL_EVENT'], e9: ['MATERIAL_EVENT']});
+        return roleClassificationSuccess(
+          input,
+          {e8: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'], e9: ['MATERIAL_EVENT']},
+          {
+            e8: [{kind: 'COMPANY', name: 'Broadcom'}],
+            e9: [{kind: 'SECTOR', name: 'Health-care sector'}]
+          }
+        );
       }
     }
   });
@@ -1283,6 +1468,10 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
     ['e9', 'Health-care sector advances on constructive developments', []]
   ]);
   assert.deepEqual(context.evidenceContext.materialEvents.slice(-2), ['e8', 'e9']);
+  assert.deepEqual(context.evidenceContext.broadMarketFocus, [
+    {evidenceRef: 'e8', subjects: [{kind: 'COMPANY', name: 'Broadcom'}]},
+    {evidenceRef: 'e9', subjects: [{kind: 'SECTOR', name: 'Health-care sector'}]}
+  ]);
   assert.deepEqual(context.evidenceContext.supportingEvidence.slice(-2), ['e8', 'e9']);
   assert.deepEqual(context.evidenceContext.furtherReadings, [
     {evidenceRef: 'e4', sessionDate: '2026-09-04'},
@@ -1340,11 +1529,11 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
   assert.equal(researchDiagnostic.outcome, 'SUCCESS');
   assert.deepEqual(researchDiagnostic.counts, {
     candidateCount: 2,
-    useCount: 2,
+    useCount: 0,
     skipCount: 0,
     retrievedArticleCount: 2,
     constructedEvidenceCount: 2,
-    materialityInvocationCount: 1
+    materialityInvocationCount: 0
   });
   const serializedDiagnostics = JSON.stringify(cnbcDiagnostics);
   for (const forbidden of [
@@ -1403,6 +1592,11 @@ test('Further Readings deduplicates general CNBC evidence against mandatory reca
       async researchNews({horizons}) {
         return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION'], [{canonicalUrl: recapUrl}]);
       }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(input, {e5: ['MATERIAL_EVENT']});
+      }
     }
   });
   const context = (await service.assemble(request())).marketPackages[0].evidenceContext;
@@ -1423,6 +1617,11 @@ test('Further Readings preserves each available recap anchor before validated ge
       cnbcNewsResearch: {
         async researchNews({horizons}) {
           return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
+        }
+      },
+      evidenceRoleClassification: {
+        async classifyEvidenceRoles(input) {
+          return roleClassificationSuccess(input, {e5: ['MATERIAL_EVENT']});
         }
       }
     };

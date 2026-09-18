@@ -68,7 +68,7 @@ function claudeAnalysisInput() {
     sourceId: 'sg.reuters',
     market: 'SG',
     evidenceCategory: 'news',
-    title: 'Market update',
+    title: 'Technology sector market update',
     canonicalUrl: 'https://www.reuters.com/markets/example',
     publishedAt: '2026-09-06T08:00:00Z'
   });
@@ -99,6 +99,10 @@ function claudeAnalysisInput() {
         materialEvents: ['e1'], authoritativeFacts: [], principalCatalysts: ['e1'],
         supportingEvidence: ['e1'], conflictingEvidence: [], subsequentDevelopments: [],
         sessionAssociations: [],
+        broadMarketFocus: [{
+          evidenceRef: 'e1',
+          subjects: [{kind: 'SECTOR', name: 'Technology'}]
+        }],
         unresolvedGaps: [], furtherReadings: []
       }
     }],
@@ -116,7 +120,8 @@ function claudeAnalysisOutput(input) {
     sections: REPORT_SECTION_NAMES.map((name, index) => ({
       name,
       content: index === 10 ? null : index === 4
-        ? EMPTY_INITIATING_LIST_CONTENT.myStocks : 'Supported analysis.',
+        ? EMPTY_INITIATING_LIST_CONTENT.myStocks : index === 3
+          ? 'Technology led the broad market.' : 'Supported analysis.',
       evidenceRefs: index === 10 || index === 4 ? [] : ['e1'],
       telemetryRefs: index === 10 || index === 4 ? [] : ['t1'],
       uncertainties: []
@@ -171,6 +176,7 @@ function usAnalysisPackageEnvelope() {
         materialEvents: [], authoritativeFacts: ['e1'], principalCatalysts: [],
         supportingEvidence: ['e1'], conflictingEvidence: [], subsequentDevelopments: [],
         sessionAssociations: [],
+        broadMarketFocus: [],
         unresolvedGaps: [], furtherReadings: []
       }
     }],

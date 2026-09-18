@@ -85,6 +85,7 @@ function marketPackage(market, reference) {
       conflictingEvidence: [],
       subsequentDevelopments: [],
       sessionAssociations: [],
+      broadMarketFocus: [],
       unresolvedGaps: [],
       furtherReadings: []
     }

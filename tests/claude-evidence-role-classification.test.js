@@ -56,9 +56,9 @@ function input(horizons = ['COMPLETED_SESSION', 'COMPLETED_SESSION', 'SUBSEQUENT
 
 function classifications(overrides = {}) {
   const values = [
-    {reference: 'e1', materiality: 'MEDIUM', roles: ['MATERIAL_EVENT'], reason: 'A material event is supported.'},
-    {reference: 'e2', materiality: 'HIGH', roles: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'], reason: 'Supplied evidence and benchmark movement support causality.'},
-    {reference: 'e3', materiality: 'LOW', roles: [], reason: 'No supported semantic role.'}
+    {reference: 'e1', materiality: 'MEDIUM', roles: ['MATERIAL_EVENT'], subjects: [], reason: 'A material event is supported.'},
+    {reference: 'e2', materiality: 'HIGH', roles: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'], subjects: [], reason: 'Supplied evidence and benchmark movement support causality.'},
+    {reference: 'e3', materiality: 'LOW', roles: [], subjects: [], reason: 'No supported semantic role.'}
   ];
   if (overrides.index !== undefined) values[overrides.index] = {...values[overrides.index], ...overrides.value};
   return {classifications: values};
@@ -90,6 +90,28 @@ test('permits a subsequent development to be a material event', () => {
     materiality: 'HIGH', roles: ['MATERIAL_EVENT'], reason: 'Material forward-looking development.'
   }});
   assert.equal(validateClaudeEvidenceRoleClassificationOutput(raw, input()).valid, true);
+});
+
+test('accepts only bounded provider-neutral subjects grounded in title or summary', () => {
+  const raw = classifications({index: 0, value: {
+    subjects: [{kind: 'COMPANY', name: 'Canonical evidence'}, {kind: 'SECTOR', name: 'Bounded evidence'}]
+  }});
+  const output = createClaudeEvidenceRoleClassificationOutput(raw, input());
+  assert.deepEqual(output.classifications[0].subjects, [
+    {kind: 'COMPANY', name: 'Canonical evidence'},
+    {kind: 'SECTOR', name: 'Bounded evidence'}
+  ]);
+  assert.equal(Object.isFrozen(output.classifications[0].subjects[0]), true);
+  for (const subjects of [
+    [{kind: 'COMPANY', name: 'Unmatched company'}],
+    [{kind: 'INDEX', name: 'Canonical evidence'}],
+    [{kind: 'COMPANY', name: 'Canonical evidence'}, {kind: 'COMPANY', name: 'Canonical evidence'}],
+    Array.from({length: 6}, (_, index) => ({kind: 'COMPANY', name: `Canonical evidence ${index}`})),
+    [{kind: 'COMPANY', name: 'é'.repeat(65)}]
+  ]) {
+    assert.equal(validateClaudeEvidenceRoleClassificationOutput(
+      classifications({index: 0, value: {subjects}}), input()).valid, false);
+  }
 });
 
 test('rejects a subsequent development classified as a principal catalyst', () => {
@@ -200,6 +222,9 @@ test('builds a fixed server-owned request with no tools and no caller override s
     'SUBSEQUENT_DEVELOPMENT may be MATERIAL_EVENT',
     'must never be PRINCIPAL_CATALYST',
     'Use roles: []',
+    'subjects only for materially significant broad-market companies or sectors',
+    'title or summary',
+    'must not depend on portfolio membership or provider identity',
     'in supplied evidence order',
     'make no provider-specific assumptions'
   ]) assert.equal(request.system.includes(required), true, required);

@@ -27,8 +27,12 @@ function canonicalInput({
   includeSecondEvidence = false,
   evidenceTitle = 'Market update',
   evidenceSummary,
+  materialEvents = ['e1'],
+  principalCatalysts = ['e1'],
+  supportingEvidence = ['e1'],
   subsequentDevelopments = [],
-  sessionAssociations = []
+  sessionAssociations = [],
+  broadMarketFocus = [{evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Market update'}]}]
 } = {}) {
   const item = createEvidenceItem({
     sourceId: 'sg.reuters', market: 'SG', evidenceCategory: 'news', title: evidenceTitle,
@@ -64,9 +68,10 @@ function canonicalInput({
       telemetry: {benchmarkSnapshots: [snapshot], stockSnapshots: []},
       evidenceCollection: createEvidenceCollection({market: 'SG', items: evidenceItems}),
       evidenceContext: {
-        materialEvents: ['e1'], authoritativeFacts: [], principalCatalysts: ['e1'],
-        supportingEvidence: ['e1'], conflictingEvidence: [], subsequentDevelopments,
+        materialEvents, authoritativeFacts: [], principalCatalysts,
+        supportingEvidence, conflictingEvidence: [], subsequentDevelopments,
         sessionAssociations,
+        broadMarketFocus,
         unresolvedGaps: [], furtherReadings: []
       }
     }],
@@ -84,7 +89,8 @@ function reportContext(input) {
 function sections(content = 'Supported analysis.') {
   return REPORT_SECTION_NAMES.map((name, index) => ({
     name,
-    content: index === 10 ? null : index === 4 ? EMPTY_INITIATING_LIST_CONTENT.myStocks : content,
+    content: index === 10 ? null : index === 4 ? EMPTY_INITIATING_LIST_CONTENT.myStocks
+      : content === null ? null : index === 3 ? 'Supported Market update analysis.' : content,
     evidenceRefs: index === 10 || index === 4 || content === null ? [] : ['e1'],
     telemetryRefs: index === 10 || index === 4 || content === null ? [] : ['t1'],
     uncertainties: []
@@ -92,8 +98,11 @@ function sections(content = 'Supported analysis.') {
 }
 
 function normalOutput(input, overrides = {}) {
+  const reportSections = sections();
+  const firstFocus = input.marketPackages.flatMap(item => item.evidenceContext.broadMarketFocus)[0];
+  if (firstFocus) reportSections[3].content = `Supported ${firstFocus.subjects[0].name} analysis.`;
   return {
-    status: 'NORMAL', reportContext: reportContext(input), sections: sections(),
+    status: 'NORMAL', reportContext: reportContext(input), sections: reportSections,
     evidenceReferences: ['e1'], furtherReadings: [], evidenceGaps: [], ...overrides
   };
 }
@@ -319,7 +328,7 @@ test('reports only sanitized Section 4 structure when populated content lacks ev
   assert.deepEqual(result, {
     ok: false,
     type: 'CONTRACT_FAILURE',
-    message: 'Invalid Claude analysis output: sections[3]: factual content requires supplied evidence',
+    message: 'Invalid Claude analysis output: sections[3]: stocks and sectors require broad-market focus evidence; sections[3]: factual content requires supplied evidence',
     upstreamStatus: 200
   });
   assert.equal(diagnostics.length, 1);
@@ -639,6 +648,59 @@ test('deterministically downgrades evidence-limited NORMAL output while preservi
   assert.deepEqual(result.output.evidenceGaps, [message]);
 });
 
+test('deterministically nulls impossible Sections 2-4 and recomputes first-use references', async () => {
+  const input = canonicalInput({
+    includeSecondEvidence: true,
+    materialEvents: [],
+    principalCatalysts: [],
+    broadMarketFocus: []
+  });
+  const output = normalOutput(input);
+  output.sections[0].evidenceRefs = ['e2'];
+  output.sections[1].uncertainties = ['Model-supplied uncertainty must be replaced.'];
+  output.sections[2].uncertainties = ['Model-supplied uncertainty must be replaced.'];
+  output.sections[3].uncertainties = ['Model-supplied uncertainty must be replaced.'];
+  output.evidenceReferences = ['e1'];
+
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+  });
+
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  const expected = [
+    'The supplied evidence did not establish a material market driver.',
+    'The supplied evidence did not establish a supported principal catalyst for the market move.',
+    'Validated broad-market company or sector evidence was unavailable.'
+  ];
+  for (const [offset, message] of expected.entries()) {
+    const section = result.output.sections[offset + 1];
+    assert.equal(section.content, null);
+    assert.deepEqual(section.evidenceRefs, []);
+    assert.deepEqual(section.telemetryRefs, []);
+    assert.deepEqual(section.uncertainties, [message]);
+    assert.equal(result.output.evidenceGaps.includes(message), true);
+  }
+  assert.deepEqual(result.output.evidenceReferences, ['e2', 'e1']);
+});
+
+test('does not normalize hard-gate violations when the package supplies eligible evidence', async () => {
+  const input = canonicalInput();
+  const invalidDriver = normalOutput(input);
+  invalidDriver.sections[1].evidenceRefs = [];
+  const invalidCatalyst = normalOutput(input);
+  invalidCatalyst.sections[2].evidenceRefs = [];
+  const invalidFocus = normalOutput(input);
+  invalidFocus.sections[3].content = 'Generic index commentary.';
+
+  for (const output of [invalidDriver, invalidCatalyst, invalidFocus]) {
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+    });
+    assert.equal(result.type, 'CONTRACT_FAILURE');
+  }
+});
+
 test('does not normalize structurally inconsistent null sections or unusable reports', async () => {
   const input = canonicalInput();
   const referencedNull = normalOutput(input);
@@ -663,7 +725,7 @@ test('derives top-level evidenceReferences from section first-use order', async 
   const input = canonicalInput({includeSecondEvidence: true});
   const output = normalOutput(input);
   output.sections[0].evidenceRefs = ['e2', 'e1'];
-  output.sections[1].evidenceRefs = ['e2'];
+  output.sections[1].evidenceRefs = ['e1'];
   output.evidenceReferences = ['e1', 'e2'];
 
   const result = await invokeClaudeAnalysis({
@@ -673,7 +735,7 @@ test('derives top-level evidenceReferences from section first-use order', async 
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.deepEqual(result.output.evidenceReferences, ['e2', 'e1']);
   assert.deepEqual(result.output.sections[0].evidenceRefs, ['e2', 'e1']);
-  assert.deepEqual(result.output.sections[1].evidenceRefs, ['e2']);
+  assert.deepEqual(result.output.sections[1].evidenceRefs, ['e1']);
 });
 
 test('still rejects missing, extra or invalid section-level evidenceRefs', async () => {

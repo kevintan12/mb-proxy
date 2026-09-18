@@ -72,8 +72,17 @@ test('thin fixture remains canonical and supports deterministic degraded output'
   assert.equal(output.sections[7].content, null);
   assert.deepEqual(output.sections[7].evidenceRefs, []);
   assert.deepEqual(output.sections[7].uncertainties, ['No defensible opportunity is supported.']);
-  assert.deepEqual(output.evidenceGaps,
-    ['No defensible evidence-supported opportunity was available.']);
+  assert.deepEqual(output.sections[3], {
+    name: 'STOCKS & SECTORS IN FOCUS',
+    content: null,
+    evidenceRefs: [],
+    telemetryRefs: [],
+    uncertainties: ['Validated broad-market company or sector evidence was unavailable.']
+  });
+  assert.deepEqual(output.evidenceGaps, [
+    'Validated broad-market company or sector evidence was unavailable.',
+    'No defensible evidence-supported opportunity was available.'
+  ]);
 });
 
 test('post-close and portfolio overlap fixtures retain separate temporal and list boundaries', () => {

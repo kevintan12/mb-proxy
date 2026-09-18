@@ -82,6 +82,10 @@ function completedUsWeekInput({unresolvedGaps = [], includeBroadMarket = true} =
         supportingEvidence: ['e2', 'e3', ...broadReferences],
         conflictingEvidence: [], subsequentDevelopments: ['e1'],
         sessionAssociations: [{evidenceRef: 'e1', sessionDate: '2026-09-04'}],
+        broadMarketFocus: includeBroadMarket ? [
+          {evidenceRef: 'e4', subjects: [{kind: 'COMPANY', name: 'Broadcom'}]},
+          {evidenceRef: 'e5', subjects: [{kind: 'SECTOR', name: 'Health-care'}]}
+        ] : [],
         unresolvedGaps,
         furtherReadings: [
           {evidenceRef: 'e1', sessionDate: '2026-09-04'},
@@ -124,7 +128,7 @@ function reportContext(input) {
 }
 
 function supportedOutput(input, {opportunity = true, plainEnglish = true} = {}) {
-  const broadMarketAvailable = input.marketPackages[0].evidenceContext.evidence.length >= 5;
+  const broadMarketAvailable = input.marketPackages[0].evidenceContext.broadMarketFocus.length > 0;
   const ordinaryContent = plainEnglish
     ? [
         'The market finished higher as company and policy evidence shaped the session.',
@@ -141,24 +145,40 @@ function supportedOutput(input, {opportunity = true, plainEnglish = true} = {}) 
         'Company leadership broadened, but policy risk remains important.'
       ]
     : Array(10).fill('Equity positioning reflected rate-path expectations and reallocation momentum.');
+  if (!plainEnglish && broadMarketAvailable) {
+    ordinaryContent[3] = 'Broadcom equity positioning reflected reallocation momentum.';
+  }
   const evidenceRefs = [
     ['e2', 'e3'], ['e3'], ['e2', 'e3'], broadMarketAvailable ? ['e4', 'e5'] : ['e1', 'e2'],
     ['e2'], broadMarketAvailable ? ['e4', 'e5'] : ['e2'], ['e3'], ['e5'], ['e1', 'e3'], ['e1']
   ];
   const sections = REPORT_SECTION_NAMES.map((name, index) => ({
     name,
-    content: index === 10 ? null : index === 7 && !opportunity ? null : ordinaryContent[index],
-    evidenceRefs: index === 10 || (index === 7 && !opportunity) ? [] : evidenceRefs[index],
-    telemetryRefs: index === 10 || (index === 7 && !opportunity) ? []
+    content: index === 10 || (index === 3 && !broadMarketAvailable)
+      ? null : index === 7 && !opportunity ? null : ordinaryContent[index],
+    evidenceRefs: index === 10 || (index === 3 && !broadMarketAvailable)
+      || (index === 7 && !opportunity) ? [] : evidenceRefs[index],
+    telemetryRefs: index === 10 || (index === 3 && !broadMarketAvailable)
+      || (index === 7 && !opportunity) ? []
       : index === 4 ? ['t2'] : ['t1'],
-    uncertainties: index === 7 && !opportunity ? ['No defensible opportunity is supported.'] : []
+    uncertainties: index === 3 && !broadMarketAvailable
+      ? ['Validated broad-market company or sector evidence was unavailable.']
+      : index === 7 && !opportunity ? ['No defensible opportunity is supported.'] : []
   }));
+  const evidenceGaps = [];
+  if (!broadMarketAvailable) {
+    evidenceGaps.push('Validated broad-market company or sector evidence was unavailable.');
+  }
+  if (!opportunity) {
+    evidenceGaps.push('No defensible evidence-supported opportunity was available.');
+  }
   return {
-    status: opportunity ? 'NORMAL' : 'DEGRADED', reportContext: reportContext(input), sections,
+    status: opportunity && broadMarketAvailable ? 'NORMAL' : 'DEGRADED',
+    reportContext: reportContext(input), sections,
     evidenceReferences: broadMarketAvailable
       ? ['e2', 'e3', 'e4', 'e5', 'e1'] : ['e2', 'e3', 'e1'],
     furtherReadings: broadMarketAvailable ? ['e1', 'e2', 'e4', 'e5'] : ['e1', 'e2'],
-    evidenceGaps: opportunity ? [] : ['No defensible evidence-supported opportunity was available.']
+    evidenceGaps
   };
 }
 

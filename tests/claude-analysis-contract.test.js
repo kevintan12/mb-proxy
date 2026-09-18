@@ -87,10 +87,20 @@ function snapshot(market, symbol = MARKET_CONFIG[market].symbol, withOverlay = f
 }
 
 function marketPackage(market, {
-  evidenceRef = 'e1', telemetrySnapshots, items, subsequentDevelopments = [], sessionAssociations = []
+  evidenceRef = 'e1', telemetrySnapshots, items, subsequentDevelopments = [], sessionAssociations = [],
+  broadMarketFocus
 } = {}) {
   const packageItems = items || [evidence(market)];
   const snapshots = telemetrySnapshots || [snapshot(market)];
+  const canonicalBroadMarketFocus = broadMarketFocus === undefined
+    ? packageItems[0]?.evidenceCategory === 'news'
+      ? [{evidenceRef, subjects: [{
+          kind: 'SECTOR',
+          name: packageItems[0].title.includes('market update')
+            ? 'market update' : packageItems[0].title
+        }]}]
+      : []
+    : broadMarketFocus;
   return {
     market,
     marketContext: {
@@ -110,6 +120,7 @@ function marketPackage(market, {
       conflictingEvidence: [],
       subsequentDevelopments,
       sessionAssociations,
+      broadMarketFocus: canonicalBroadMarketFocus,
       unresolvedGaps: [],
       furtherReadings: []
     }
@@ -146,7 +157,8 @@ function sections({content = 'Supported analysis.', evidenceRefs = ['e1'], telem
   return REPORT_SECTION_NAMES.map((name, index) => ({
     name,
     content: index === REPORT_SECTION_NAMES.length - 1 ? null
-      : index === 4 ? EMPTY_INITIATING_LIST_CONTENT[initiatingList] : content,
+      : index === 4 ? EMPTY_INITIATING_LIST_CONTENT[initiatingList]
+        : content === null ? null : index === 3 ? 'Supported market update analysis.' : content,
     evidenceRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 4 ? [] : evidenceRefs.slice(),
     telemetryRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 4 ? [] : telemetryRefs.slice(),
     uncertainties: []
@@ -154,10 +166,13 @@ function sections({content = 'Supported analysis.', evidenceRefs = ['e1'], telem
 }
 
 function normalOutput(input, overrides = {}) {
+  const reportSections = sections({initiatingList: input.analysisRequest.initiatingList});
+  const firstFocus = input.marketPackages.flatMap(item => item.evidenceContext.broadMarketFocus)[0];
+  if (firstFocus) reportSections[3].content = `Supported ${firstFocus.subjects[0].name} analysis.`;
   return {
     status: 'NORMAL',
     reportContext: reportContext(input),
-    sections: sections({initiatingList: input.analysisRequest.initiatingList}),
+    sections: reportSections,
     evidenceReferences: ['e1'],
     furtherReadings: [],
     evidenceGaps: [],
@@ -583,12 +598,99 @@ test('rejects populated Section 4 with telemetry but no supplied evidence refere
   output.sections[3].evidenceRefs = [];
   output.sections[3].telemetryRefs = ['t1'];
   assert.deepEqual(validateClaudeAnalysisOutput(output, input).errors, [
+    'sections[3]: stocks and sectors require broad-market focus evidence',
     'sections[3]: factual content requires supplied evidence'
   ]);
   assert.throws(
     () => createClaudeAnalysisOutput(output, input),
-    /^TypeError: Invalid Claude analysis output: sections\[3\]: factual content requires supplied evidence$/
+    /stocks and sectors require broad-market focus evidence/
   );
+});
+
+test('binds Sections 2-4 to canonical driver, catalyst, and broad-market focus evidence', () => {
+  const supportingOnlyPackage = marketPackage('SG');
+  supportingOnlyPackage.evidenceContext.materialEvents = [];
+  supportingOnlyPackage.evidenceContext.principalCatalysts = [];
+  supportingOnlyPackage.evidenceContext.broadMarketFocus = [];
+  const supportingOnlyInput = createClaudeAnalysisInput({
+    analysisRequest: canonicalInput().analysisRequest,
+    marketPackages: [supportingOnlyPackage],
+    portfolioContext: {myStocks: [], watchlist: []}
+  });
+  const supportingOnlyOutput = normalOutput(supportingOnlyInput);
+  const supportingErrors = validateClaudeAnalysisOutput(
+    supportingOnlyOutput, supportingOnlyInput
+  ).errors;
+  assert.equal(supportingErrors.includes(
+    'sections[1]: key market drivers require a material event or principal catalyst'
+  ), true);
+  assert.equal(supportingErrors.includes(
+    'sections[2]: market causality requires a principal catalyst'
+  ), true);
+
+  const materialOnlyPackage = marketPackage('SG');
+  materialOnlyPackage.evidenceContext.principalCatalysts = [];
+  const materialOnlyInput = createClaudeAnalysisInput({
+    analysisRequest: canonicalInput().analysisRequest,
+    marketPackages: [materialOnlyPackage],
+    portfolioContext: {myStocks: [], watchlist: []}
+  });
+  const materialOnlyOutput = normalOutput(materialOnlyInput);
+  const materialOnlyErrors = validateClaudeAnalysisOutput(
+    materialOnlyOutput, materialOnlyInput
+  ).errors;
+  assert.equal(materialOnlyErrors.some(error => error.startsWith('sections[1]:')), false);
+  assert.equal(materialOnlyErrors.includes(
+    'sections[2]: market causality requires a principal catalyst'
+  ), true);
+
+  const input = canonicalInput();
+  const missingSubject = normalOutput(input);
+  missingSubject.sections[3].content = 'A generic broad-market assessment.';
+  assert.equal(validateClaudeAnalysisOutput(missingSubject, input).errors.includes(
+    'sections[3]: stocks and sectors must mention a validated broad-market subject'
+  ), true);
+  assert.equal(validateClaudeAnalysisOutput(normalOutput(input), input).valid, true);
+});
+
+test('rejects malformed, unknown, duplicate, reordered, and ungrounded broad-market focus', () => {
+  const items = [
+    evidence('SG', {title: 'Technology companies led the market'}),
+    evidence('SG', {
+      title: 'Banks lagged the broader market',
+      canonicalUrl: 'https://www.reuters.com/markets/sg-banks-example'
+    })
+  ];
+  function createWithFocus(broadMarketFocus) {
+    const packageInput = marketPackage('SG', {items, broadMarketFocus});
+    packageInput.evidenceContext.materialEvents = ['e1', 'e2'];
+    packageInput.evidenceContext.principalCatalysts = ['e1'];
+    packageInput.evidenceContext.supportingEvidence = ['e1', 'e2'];
+    return createClaudeAnalysisInput({
+      analysisRequest: canonicalInput().analysisRequest,
+      marketPackages: [packageInput],
+      portfolioContext: {myStocks: [], watchlist: []}
+    });
+  }
+  assert.doesNotThrow(() => createWithFocus([
+    {evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Technology'}]},
+    {evidenceRef: 'e2', subjects: [{kind: 'COMPANY', name: 'Banks'}]}
+  ]));
+  for (const focus of [
+    [{evidenceRef: 'e3', subjects: [{kind: 'SECTOR', name: 'Technology'}]}],
+    [
+      {evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Technology'}]},
+      {evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Technology'}]}
+    ],
+    [
+      {evidenceRef: 'e2', subjects: [{kind: 'COMPANY', name: 'Banks'}]},
+      {evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Technology'}]}
+    ],
+    [{evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Unmentioned issuer'}]}],
+    [{evidenceRef: 'e1', subjects: Array.from({length: 6}, (_, index) => ({
+      kind: 'SECTOR', name: index === 0 ? 'Technology' : `Technology ${index}`
+    }))}]
+  ]) assert.throws(() => createWithFocus(focus), /broad-market focus/);
 });
 
 test('enforces factual grounding and canonical content for Sections 7-10 including watch items', () => {
@@ -654,6 +756,9 @@ test('accepts a fully grounded realistic US response using Yahoo, Federal Reserv
   packageInput.evidenceContext.materialEvents = ['e1', 'e2', 'e3'];
   packageInput.evidenceContext.principalCatalysts = ['e2'];
   packageInput.evidenceContext.supportingEvidence = ['e1', 'e2'];
+  packageInput.evidenceContext.broadMarketFocus = [{
+    evidenceRef: 'e3', subjects: [{kind: 'SECTOR', name: 'market leadership'}]
+  }];
   const input = createClaudeAnalysisInput({
     analysisRequest: {
       selectedScope: 'US', initiatingList: 'myStocks', generatedAt: '2026-09-06T10:00:00Z',
@@ -662,6 +767,8 @@ test('accepts a fully grounded realistic US response using Yahoo, Federal Reserv
     marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}
   });
   const output = normalOutput(input);
+  output.sections[2].evidenceRefs = ['e2'];
+  output.sections[3].evidenceRefs = ['e3'];
   output.sections[6].evidenceRefs = ['e2'];
   output.sections[7].evidenceRefs = ['e3'];
   output.sections[8].content = 'Monitor the supplied policy calendar and later market developments.';
