@@ -51,6 +51,17 @@ function candidate(overrides = {}) {
   }, {bounds: candidateBounds});
 }
 
+function discovery(overrides = {}) {
+  return Object.freeze({
+    rank: 2,
+    title: 'Search title is discovery metadata only',
+    url,
+    discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+    targetSessionDate: '2026-09-08',
+    ...overrides
+  });
+}
+
 function articleHtml(overrides = {}) {
   const article = {
     '@context': 'https://schema.org',
@@ -92,6 +103,49 @@ function blogUpdate(overrides = {}) {
     articleBody: 'Stocks closed higher after a volatile session.',
     ...overrides
   };
+}
+
+function stateArticleHtml({
+  header = {}, body = {}, headerModule = {}, bodyModule = {}, extraModules = [],
+  statePrefix = '', stateSuffix = ''
+} = {}) {
+  const headerData = {
+    id: 108364684,
+    brand: 'cnbc',
+    type: 'cnbcnewsstory',
+    url,
+    headline: 'Provider state headline',
+    datePublished: '2026-09-08T12:00:00+0000',
+    dateModified: '2026-09-08T13:30:00+0000',
+    contentClassification: ['registeredOnly'],
+    __typename: 'articleHeader',
+    ...header
+  };
+  const bodyData = {
+    id: 108364684,
+    brand: 'cnbc',
+    type: 'cnbcnewsstory',
+    articleBodyText: 'Provider state <b>article</b> body.',
+    contentClassification: ['registeredOnly'],
+    __typename: 'articleBody',
+    ...body
+  };
+  const state = {
+    page: {page: {layout: [{columns: [{modules: [{
+      name: 'articleHeader', source: '108364684', data: headerData, ...headerModule
+    }]}]}, {columns: [{modules: [{
+      name: 'articleBody', source: '108364684', data: bodyData, ...bodyModule
+    }, ...extraModules]}]}]}}
+  };
+  const newsArticle = {
+    '@context': 'https://schema.org', '@type': 'NewsArticle',
+    headline: 'Bodyless JSON-LD headline',
+    datePublished: '2026-09-08T12:00:00Z'
+  };
+  return '<!doctype html><html><head>'
+    + `<script type="application/ld+json">${JSON.stringify(newsArticle)}</script>`
+    + `<script>${statePrefix}window.__s_data=${JSON.stringify(state)}; window.__c_data={};${stateSuffix}</script>`
+    + '</head><body></body></html>';
 }
 
 function response(html = articleHtml(), overrides = {}) {
@@ -198,17 +252,11 @@ test('acquires a discovered CNBC recap from the first usable direct live-blog up
 });
 
 test('acquires one general discovered page with provider-owned headline and timestamps', async () => {
-  const discovery = Object.freeze({
-    rank: 2,
-    title: 'Search title is discovery metadata only',
-    url,
-    discoveredVia: 'ANTHROPIC_WEB_SEARCH',
-    targetSessionDate: '2026-09-08'
-  });
+  const discovered = discovery();
   const calls = [];
   const result = await createCnbcArticleContentAcquisitionService({
     fetchImpl: async (...args) => { calls.push(args); return response(); }
-  }).acquireDiscoveredArticleContent({discovery, bounds: retrievalBounds});
+  }).acquireDiscoveredArticleContent({discovery: discovered, bounds: retrievalBounds});
   assert.equal(calls.length, 1);
   assert.deepEqual(Object.keys(result), CNBC_DISCOVERED_ARTICLE_RESULT_KEYS);
   assert.equal(result.discoveryRank, 2);
@@ -218,6 +266,99 @@ test('acquires one general discovered page with provider-owned headline and time
   assert.equal(result.articleText, 'Markets moved after new data. Investors reassessed risk.');
   assert.equal(result.targetSessionDate, '2026-09-08');
   assert.equal(Object.isFrozen(result), true);
+});
+
+test('extracts verified CNBC window.__s_data article modules with matched provider identity', async () => {
+  const result = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(stateArticleHtml())
+  }).acquireDiscoveredArticleContent({discovery: discovery(), bounds: retrievalBounds});
+
+  assert.equal(result.title, 'Provider state headline');
+  assert.equal(result.articleText, 'Provider state article body.');
+  assert.equal(result.publishedAt, '2026-09-08T12:00:00.000Z');
+  assert.equal(result.updatedAt, '2026-09-08T13:30:00.000Z');
+  assert.equal(result.selectedArticleType, 'NewsArticle');
+});
+
+test('keeps conventional JSON-LD and direct live-blog extraction ahead of CNBC state fallback', async () => {
+  const conventional = stateArticleHtml().replace(
+    '"datePublished":"2026-09-08T12:00:00Z"',
+    '"datePublished":"2026-09-08T12:00:00Z","articleBody":"Conventional JSON-LD wins."'
+  );
+  const conventionalResult = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(conventional)
+  }).acquireDiscoveredArticleContent({discovery: discovery(), bounds: retrievalBounds});
+  assert.equal(conventionalResult.articleText, 'Conventional JSON-LD wins.');
+  assert.equal(conventionalResult.title, 'Bodyless JSON-LD headline');
+
+  const liveBlog = liveBlogHtml({
+    newsArticle: {headline: 'Live-blog provider headline'},
+    updates: [blogUpdate({articleBody: 'Direct live-blog update wins.'})]
+  })
+    .replace('</head>', stateArticleHtml().match(/<script>window\.__s_data=[\s\S]*?<\/script>/)[0] + '</head>');
+  const liveBlogResult = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(liveBlog)
+  }).acquireDiscoveredArticleContent({discovery: discovery(), bounds: retrievalBounds});
+  assert.equal(liveBlogResult.articleText, 'Direct live-blog update wins.');
+});
+
+test('rejects malformed, ambiguous or unmatched CNBC state modules', async () => {
+  const duplicateBody = {
+    name: 'articleBody', source: '108364684',
+    data: {
+      id: 108364684, brand: 'cnbc', type: 'cnbcnewsstory',
+      articleBodyText: 'Ambiguous second body.', __typename: 'articleBody'
+    }
+  };
+  const cases = [
+    stateArticleHtml({bodyModule: {source: '108364999'}}),
+    stateArticleHtml({body: {id: 108364999}}),
+    stateArticleHtml({header: {brand: 'other'}}),
+    stateArticleHtml({body: {type: 'other'}}),
+    stateArticleHtml({extraModules: [duplicateBody]}),
+    stateArticleHtml().replace('window.__s_data={', 'window.__s_data={malformed')
+  ];
+  for (const html of cases) {
+    await assert.rejects(
+      createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(html)})
+        .acquireDiscoveredArticleContent({discovery: discovery(), bounds: retrievalBounds}),
+      assertExtractionFailure('NO_USABLE_BODY')
+    );
+  }
+});
+
+test('rejects unusable state text, headline, URL and header timestamps', async () => {
+  const cases = [
+    [stateArticleHtml({body: {articleBodyText: ' <b> </b> &nbsp; '}}), 'NO_USABLE_BODY'],
+    [stateArticleHtml({body: {articleBodyText: {text: 'not accepted'}}}), 'NO_USABLE_BODY'],
+    [stateArticleHtml({header: {headline: '   '}}), 'NO_USABLE_BODY'],
+    [stateArticleHtml({header: {url: 'https://www.cnbc.com/2026/09/08/other.html'}}), 'NO_USABLE_BODY'],
+    [stateArticleHtml({header: {datePublished: undefined}}), 'INVALID_DATE_PUBLISHED'],
+    [stateArticleHtml({header: {datePublished: 'not-a-date'}}), 'INVALID_DATE_PUBLISHED'],
+    [stateArticleHtml({header: {dateModified: 'not-a-date'}}), 'INVALID_DATE_MODIFIED']
+  ];
+  for (const [html, failureType] of cases) {
+    await assert.rejects(
+      createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(html)})
+        .acquireDiscoveredArticleContent({discovery: discovery(), bounds: retrievalBounds}),
+      assertExtractionFailure(failureType)
+    );
+  }
+});
+
+test('applies existing title, article-text and result bounds to CNBC state extraction', async () => {
+  const cases = [
+    [{...retrievalBounds, maxTitleBytes: 5}, stateArticleHtml(), 'TITLE_TOO_LARGE'],
+    [{...retrievalBounds, maxArticleTextBytes: 5}, stateArticleHtml(), 'ARTICLE_TEXT_TOO_LARGE'],
+    [{...retrievalBounds, maxResultBytes: 10}, stateArticleHtml(), 'RESULT_TOO_LARGE']
+  ];
+  for (const [bounds, html, failureType] of cases) {
+    await assert.rejects(
+      createCnbcArticleContentAcquisitionService({fetchImpl: async () => response(html)})
+        .acquireDiscoveredArticleContent({discovery: discovery(), bounds}),
+      assertSizeFailure(failureType)
+    );
+  }
 });
 
 test('emits bounded structural diagnostics for every NO_USABLE_BODY shape without content leakage', async () => {
