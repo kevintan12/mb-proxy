@@ -220,6 +220,151 @@ test('acquires one general discovered page with provider-owned headline and time
   assert.equal(Object.isFrozen(result), true);
 });
 
+test('emits bounded structural diagnostics for every NO_USABLE_BODY shape without content leakage', async () => {
+  const diagnosticKeys = [
+    'stage', 'operation', 'discoveryRank', 'failureType', 'recognizedRootTypes',
+    'hasArticleBodyString', 'hasLiveBlogUpdateArray', 'directBlogPostingCount',
+    'directBlogPostingWithArticleBodyCount', 'directBlogPostingWithTextCount',
+    'rootLiveBlogHasArticleBody', 'selectedNodeHasHeadline', 'selectedNodeHasText',
+    'selectedNodeHasDescription'
+  ];
+  const discovery = Object.freeze({
+    rank: 2,
+    title: 'Search title must not be logged',
+    url,
+    discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+    targetSessionDate: '2026-09-08'
+  });
+
+  for (const html of [
+    articleHtml(),
+    liveBlogHtml({updates: [blogUpdate()]})
+  ]) {
+    const diagnostics = [];
+    const service = createCnbcArticleContentAcquisitionService({
+      fetchImpl: async () => response(html),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    await service.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds});
+    assert.deepEqual(diagnostics, []);
+  }
+
+  const cases = [
+    {
+      html: liveBlogHtml({updates: [blogUpdate({articleBody: undefined, text: 'private text'})]}),
+      expected: {
+        recognizedRootTypes: ['NewsArticle', 'LiveBlogPosting'],
+        hasArticleBodyString: false,
+        hasLiveBlogUpdateArray: true,
+        directBlogPostingCount: 1,
+        directBlogPostingWithArticleBodyCount: 0,
+        directBlogPostingWithTextCount: 1,
+        rootLiveBlogHasArticleBody: false,
+        selectedNodeHasHeadline: false,
+        selectedNodeHasText: false,
+        selectedNodeHasDescription: false
+      }
+    },
+    {
+      html: liveBlogHtml({updates: [{
+        '@type': 'Thing', nested: blogUpdate({articleBody: 'private nested body'})
+      }]}),
+      expected: {
+        recognizedRootTypes: ['NewsArticle', 'LiveBlogPosting'],
+        hasArticleBodyString: false,
+        hasLiveBlogUpdateArray: true,
+        directBlogPostingCount: 0,
+        directBlogPostingWithArticleBodyCount: 0,
+        directBlogPostingWithTextCount: 0,
+        rootLiveBlogHasArticleBody: false,
+        selectedNodeHasHeadline: false,
+        selectedNodeHasText: false,
+        selectedNodeHasDescription: false
+      }
+    },
+    {
+      html: liveBlogHtml({liveBlog: {articleBody: 'private root body'}, updates: []}),
+      expected: {
+        recognizedRootTypes: ['NewsArticle', 'LiveBlogPosting'],
+        hasArticleBodyString: false,
+        hasLiveBlogUpdateArray: true,
+        directBlogPostingCount: 0,
+        directBlogPostingWithArticleBodyCount: 0,
+        directBlogPostingWithTextCount: 0,
+        rootLiveBlogHasArticleBody: true,
+        selectedNodeHasHeadline: false,
+        selectedNodeHasText: false,
+        selectedNodeHasDescription: false
+      }
+    }
+  ];
+
+  const allFailureDiagnostics = [];
+  for (const {html, expected} of cases) {
+    const diagnostics = [];
+    const service = createCnbcArticleContentAcquisitionService({
+      fetchImpl: async () => response(html),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    await assert.rejects(
+      service.acquireArticleContent({candidate: candidate(), bounds: retrievalBounds}),
+      assertExtractionFailure('NO_USABLE_BODY')
+    );
+    assert.equal(diagnostics.length, 1);
+    assert.deepEqual(Object.keys(diagnostics[0]), diagnosticKeys);
+    assert.deepEqual(diagnostics[0], {
+      stage: 'cnbcArticleExtraction',
+      operation: 'SELECTED_ARTICLE',
+      discoveryRank: null,
+      failureType: 'NO_USABLE_BODY',
+      ...expected
+    });
+    assert.equal(Object.isFrozen(diagnostics[0]), true);
+    allFailureDiagnostics.push(diagnostics[0]);
+  }
+
+  const missingHeadlineDiagnostics = [];
+  const missingHeadlineHtml = articleHtml({
+    headline: undefined,
+    name: undefined,
+    text: 'private text field',
+    description: 'private description field'
+  });
+  const missingHeadlineService = createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(missingHeadlineHtml),
+    onDiagnostics: value => missingHeadlineDiagnostics.push(value)
+  });
+  await assert.rejects(
+    missingHeadlineService.acquireDiscoveredArticleContent({discovery, bounds: retrievalBounds}),
+    assertExtractionFailure('NO_USABLE_BODY')
+  );
+  assert.deepEqual(Object.keys(missingHeadlineDiagnostics[0]), diagnosticKeys);
+  assert.deepEqual(missingHeadlineDiagnostics[0], {
+    stage: 'cnbcArticleExtraction',
+    operation: 'DISCOVERED_ARTICLE',
+    discoveryRank: 2,
+    failureType: 'NO_USABLE_BODY',
+    recognizedRootTypes: ['NewsArticle'],
+    hasArticleBodyString: true,
+    hasLiveBlogUpdateArray: false,
+    directBlogPostingCount: 0,
+    directBlogPostingWithArticleBodyCount: 0,
+    directBlogPostingWithTextCount: 0,
+    rootLiveBlogHasArticleBody: false,
+    selectedNodeHasHeadline: false,
+    selectedNodeHasText: true,
+    selectedNodeHasDescription: true
+  });
+  allFailureDiagnostics.push(missingHeadlineDiagnostics[0]);
+
+  const serialized = JSON.stringify(allFailureDiagnostics);
+  for (const forbidden of [
+    'private text', 'private nested body', 'private root body', 'private description',
+    'Markets moved', 'Stocks closed', 'Search title', '<html', 'https://', 'articleBody'
+  ]) assert.equal(serialized.includes(forbidden), false);
+  assert.equal(serialized.includes('provider payload'), false);
+});
+
 test('accepts the expanded bounded global discovery rank and rejects ranks beyond it before fetch', async () => {
   let calls = 0;
   const service = createCnbcArticleContentAcquisitionService({
