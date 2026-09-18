@@ -43,7 +43,11 @@ function evidence(index, overrides = {}) {
   });
 }
 
-function input(horizons = ['COMPLETED_SESSION', 'COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT'], items) {
+function input(
+  horizons = ['COMPLETED_SESSION', 'COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT'],
+  items,
+  requiredSubjectIndexes = []
+) {
   return {
     marketContext: {
       market: 'US', exchangeTimezone: 'America/New_York', marketState: 'CLOSED',
@@ -51,7 +55,10 @@ function input(horizons = ['COMPLETED_SESSION', 'COMPLETED_SESSION', 'SUBSEQUENT
     },
     benchmarkTelemetry: [{reference: 't1', snapshot: snapshot()}],
     evidence: horizons.map((horizon, index) => ({
-      reference: `e${index + 1}`, horizon, item: items?.[index] || evidence(index + 1)
+      reference: `e${index + 1}`,
+      horizon,
+      requiresBroadMarketSubjects: requiredSubjectIndexes.includes(index),
+      item: items?.[index] || evidence(index + 1)
     }))
   };
 }
@@ -114,6 +121,67 @@ test('accepts only bounded provider-neutral subjects grounded in title or summar
     assert.equal(validateClaudeEvidenceRoleClassificationOutput(
       classifications({index: 0, value: {subjects}}), input()).valid, false);
   }
+});
+
+test('requires specific grounded subjects for retained broad-market material news', () => {
+  const items = [
+    evidence(28, {
+      title: 'Friday stock stories',
+      summary: 'US stocks rose as Microsoft and Apple advanced while Financials, Bank of America and Goldman Sachs led.'
+    }),
+    evidence(29, {
+      title: 'Technology leads the rebound',
+      summary: 'Tech shares led the broader market recovery.'
+    }),
+    evidence(30, {
+      title: 'Notable movers',
+      summary: 'Intel, Micron, Boeing, GE Vernova and Eaton were notable movers.'
+    })
+  ];
+  const source = input(
+    ['COMPLETED_SESSION', 'COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT'],
+    items,
+    [0, 1, 2]
+  );
+  const empty = classifications();
+  assert.deepEqual(validateClaudeEvidenceRoleClassificationOutput(empty, source).errors,
+    ['material broad-market news requires specific classification subjects']);
+
+  const valid = classifications();
+  valid.classifications[0].subjects = [
+    {kind: 'SECTOR', name: 'US stocks'},
+    {kind: 'COMPANY', name: 'Microsoft'},
+    {kind: 'COMPANY', name: 'Apple'},
+    {kind: 'SECTOR', name: 'Financials'}
+  ];
+  valid.classifications[1].subjects = [{kind: 'SECTOR', name: 'Tech'}];
+  valid.classifications[2] = {
+    ...valid.classifications[2],
+    materiality: 'MEDIUM',
+    roles: ['MATERIAL_EVENT'],
+    subjects: [
+      {kind: 'COMPANY', name: 'Intel'},
+      {kind: 'COMPANY', name: 'Micron'},
+      {kind: 'COMPANY', name: 'Boeing'},
+      {kind: 'COMPANY', name: 'GE Vernova'},
+      {kind: 'COMPANY', name: 'Eaton'}
+    ],
+    reason: 'Named companies were material broad-market movers.'
+  };
+  const output = createClaudeEvidenceRoleClassificationOutput(valid, source);
+  assert.equal(output.classifications[0].subjects.some(subject => subject.name === 'Microsoft'), true);
+  assert.equal(output.classifications[1].subjects[0].name, 'Tech');
+  assert.equal(output.classifications[2].subjects.length, 5);
+
+  valid.classifications[0].subjects = [{kind: 'SECTOR', name: 'US stocks'}];
+  assert.equal(validateClaudeEvidenceRoleClassificationOutput(valid, source).valid, false);
+});
+
+test('allows empty subjects when broad-market subjects are not required or evidence is not retained material news', () => {
+  assert.equal(validateClaudeEvidenceRoleClassificationOutput(classifications(), input()).valid, true);
+
+  const source = input(undefined, undefined, [2]);
+  assert.equal(validateClaudeEvidenceRoleClassificationOutput(classifications(), source).valid, true);
 });
 
 test('rejects a subsequent development classified as a principal catalyst', () => {
@@ -193,7 +261,8 @@ test('locks benchmark and evidence collection count boundaries', () => {
   const fiftyEvidence = input(Array.from({length: 50}, () => 'COMPLETED_SESSION'));
   assert.doesNotThrow(() => canonicalClassificationInput(fiftyEvidence));
   fiftyEvidence.evidence.push({
-    reference: 'e51', horizon: 'COMPLETED_SESSION', item: evidence(51)
+    reference: 'e51', horizon: 'COMPLETED_SESSION', requiresBroadMarketSubjects: false,
+    item: evidence(51)
   });
   assert.throws(() => canonicalClassificationInput(fiftyEvidence), /invalid bounded classification evidence/);
 });
@@ -225,6 +294,10 @@ test('builds a fixed server-owned request with no tools and no caller override s
     'must never be PRINCIPAL_CATALYST',
     'Use roles: []',
     'subjects only for materially significant broad-market companies or sectors',
+    'requiresBroadMarketSubjects is true',
+    'subjects must include the exact grounded names',
+    'subjects: [] is allowed only when requiresBroadMarketSubjects is false',
+    'Generic market or broad-index labels',
     'title or summary',
     'must not depend on portfolio membership or provider identity',
     'in supplied evidence order',

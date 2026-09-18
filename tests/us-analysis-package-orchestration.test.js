@@ -395,15 +395,26 @@ function roleClassificationSuccess(
     ok: true,
     type: 'SUCCESS',
     output: {
-      classifications: input.evidence.map(({reference}) => ({
-        reference,
-        materiality: materialityByReference[reference] || 'HIGH',
-        roles: rolesByReference[reference] || [],
-        subjects: subjectsByReference[reference] || [],
-        reason: rolesByReference[reference]?.includes('PRINCIPAL_CATALYST')
-          ? 'This evidence causally supports the completed-session move.'
-          : 'This evidence supports the assigned role assessment.'
-      }))
+      classifications: input.evidence.map(entry => {
+        const roles = rolesByReference[entry.reference] || [];
+        const materiality = materialityByReference[entry.reference] || 'HIGH';
+        const subjects = Object.hasOwn(subjectsByReference, entry.reference)
+          ? subjectsByReference[entry.reference]
+          : entry.requiresBroadMarketSubjects
+              && ['HIGH', 'MEDIUM'].includes(materiality)
+              && roles.includes('MATERIAL_EVENT')
+            ? [{kind: 'COMPANY', name: entry.item.title}]
+            : [];
+        return {
+          reference: entry.reference,
+          materiality,
+          roles,
+          subjects,
+          reason: roles.includes('PRINCIPAL_CATALYST')
+            ? 'This evidence causally supports the completed-session move.'
+            : 'This evidence supports the assigned role assessment.'
+        };
+      })
     }
   };
 }
@@ -1261,14 +1272,14 @@ test('filters five provisional CNBC items and compacts every retained reference-
 test('excludes generic market and broad-index labels from broad-market focus', async () => {
   const candidateOverrides = [
     {
-      title: 'US stocks and the S&P 500 rose',
-      summary: 'US stocks followed the S&P 500 higher.',
-      extract: 'US stocks and the S&P 500 rose.'
+      title: 'US stocks, the S&P 500 and Microsoft rose',
+      summary: 'US stocks followed the S&P 500 and Microsoft higher.',
+      extract: 'US stocks, the S&P 500 and Microsoft rose.'
     },
     {
-      title: 'Nasdaq, Dow, equities and the market advanced',
-      summary: 'Nasdaq and Dow gains lifted equities and the market.',
-      extract: 'Nasdaq, Dow, equities and the market advanced.'
+      title: 'Nasdaq, Dow, equities and Financials advanced',
+      summary: 'Nasdaq and Dow gains accompanied Financials strength.',
+      extract: 'Nasdaq, Dow, equities and Financials advanced.'
     },
     {
       title: 'Technology and Nvidia led US stocks',
@@ -1294,13 +1305,14 @@ test('excludes generic market and broad-index labels from broad-market focus', a
           {
             e4: [
               {kind: 'SECTOR', name: 'US stocks'},
-              {kind: 'SECTOR', name: 'S&P 500'}
+              {kind: 'SECTOR', name: 'S&P 500'},
+              {kind: 'COMPANY', name: 'Microsoft'}
             ],
             e5: [
               {kind: 'SECTOR', name: 'Nasdaq'},
               {kind: 'SECTOR', name: 'Dow'},
               {kind: 'SECTOR', name: 'equities'},
-              {kind: 'SECTOR', name: 'the market'}
+              {kind: 'SECTOR', name: 'Financials'}
             ],
             e6: [
               {kind: 'SECTOR', name: 'US stocks'},
@@ -1314,13 +1326,14 @@ test('excludes generic market and broad-index labels from broad-market focus', a
   });
 
   const output = await service.assemble(request());
-  assert.deepEqual(output.marketPackages[0].evidenceContext.broadMarketFocus, [{
-    evidenceRef: 'e6',
-    subjects: [
+  assert.deepEqual(output.marketPackages[0].evidenceContext.broadMarketFocus, [
+    {evidenceRef: 'e4', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]},
+    {evidenceRef: 'e5', subjects: [{kind: 'SECTOR', name: 'Financials'}]},
+    {evidenceRef: 'e6', subjects: [
       {kind: 'SECTOR', name: 'Technology'},
       {kind: 'COMPANY', name: 'Nvidia'}
-    ]
-  }]);
+    ]}
+  ]);
   assert.equal(validateClaudeAnalysisInput(output), true);
 
   const yahooArticle = yahooRecapArticle();
@@ -1349,6 +1362,41 @@ test('excludes generic market and broad-index labels from broad-market focus', a
   const genericOnlyOutput = await genericOnly.assemble(request());
   assert.deepEqual(genericOnlyOutput.marketPackages[0].evidenceContext.broadMarketFocus, []);
   assert.equal(validateClaudeAnalysisInput(genericOnlyOutput), true);
+});
+
+test('fails closed instead of silently omitting subjects for retained broad-market CNBC evidence', async () => {
+  let classifiedInput;
+  const {service} = harness({
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION'], [{
+          title: 'Microsoft, Apple and Financials lead the session',
+          summary: 'Microsoft and Apple rose while Financials, Bank of America and Goldman Sachs led.',
+          extract: 'Microsoft and Apple rose while Financials, Bank of America and Goldman Sachs led.'
+        }]);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        classifiedInput = input;
+        const reference = input.evidence.at(-1).reference;
+        return roleClassificationSuccess(
+          input,
+          {[reference]: ['MATERIAL_EVENT']},
+          {[reference]: []},
+          {[reference]: 'HIGH'}
+        );
+      }
+    }
+  });
+
+  await assert.rejects(
+    service.assemble(request()),
+    /material broad-market news requires specific classification subjects/
+  );
+  assert.equal(classifiedInput.evidence.at(-1).requiresBroadMarketSubjects, true);
+  assert.equal(classifiedInput.evidence.slice(0, -1)
+    .every(entry => entry.requiresBroadMarketSubjects === false), true);
 });
 
 test('admits provisional CNBC evidence only while the 50-item classifier bound remains safe', async () => {
@@ -1399,7 +1447,8 @@ test('keeps oversized provisional CNBC evidence optional at the 64 KiB classifie
       },
       benchmarkTelemetry: [{reference: 't1', snapshot: benchmark}],
       evidence: items.map((item, index) => ({
-        reference: `e${index + 1}`, horizon: 'COMPLETED_SESSION', item
+        reference: `e${index + 1}`, horizon: 'COMPLETED_SESSION',
+        requiresBroadMarketSubjects: false, item
       }))
     });
     return Buffer.byteLength(JSON.stringify(requestBody), 'utf8');
