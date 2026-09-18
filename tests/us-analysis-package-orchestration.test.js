@@ -1931,6 +1931,122 @@ test('every CNBC stage failure degrades to one deterministic package gap', async
   }
 });
 
+test('CNBC integration diagnostics distinguish strict failure subtypes without changing package behavior', async () => {
+  const cases = [
+    {
+      failureType: 'RESEARCH_NEWS_THROW',
+      researchNews() { throw new Error('simulated research failure'); }
+    },
+    {
+      failureType: 'INVALID_RESEARCH_RESULT',
+      researchNews() { return null; }
+    },
+    {
+      failureType: 'CANDIDATE_COVERAGE_MISMATCH',
+      researchNews({horizons}) {
+        const result = cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
+        return {...result, retrievedArticles: []};
+      }
+    },
+    {
+      failureType: 'CANDIDATE_REFERENCE_ORDERING_MISMATCH',
+      researchNews({horizons}) {
+        const result = cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
+        return {
+          ...result,
+          candidateCollection: {
+            ...result.candidateCollection,
+            candidates: [{...result.candidateCollection.candidates[0], reference: 'c2'}]
+          }
+        };
+      }
+    },
+    {
+      failureType: 'HORIZON_MISMATCH',
+      researchNews({horizons}) {
+        const result = cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
+        return {
+          ...result,
+          constructedEvidence: [{
+            ...result.constructedEvidence[0],
+            horizon: horizons.find(item => item.classification === 'SUBSEQUENT_DEVELOPMENT')
+          }]
+        };
+      }
+    },
+    {
+      failureType: 'CONSTRUCTED_EVIDENCE_MISMATCH',
+      researchNews({horizons}) {
+        const result = cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
+        const candidate = result.candidateCollection.candidates[0];
+        return {
+          ...result,
+          constructedEvidence: [{
+            ...result.constructedEvidence[0],
+            evidenceItem: createEvidenceItem({
+              sourceId: candidate.sourceId,
+              market: candidate.market,
+              evidenceCategory: candidate.evidenceCategory,
+              title: candidate.title,
+              summary: 'Different but otherwise canonical summary.',
+              canonicalUrl: candidate.canonicalUrl,
+              publishedAt: candidate.publishedAt,
+              symbols: candidate.symbols
+            })
+          }]
+        };
+      }
+    },
+    {
+      failureType: 'INTEGRATION_CONTRACT_MISMATCH',
+      researchNews({horizons}) {
+        const result = cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
+        const original = result.candidateCollection.candidates[0];
+        const evidenceItem = createEvidenceItem({
+          sourceId: 'us.reuters',
+          market: 'US',
+          evidenceCategory: 'news',
+          title: original.title,
+          summary: original.extract,
+          canonicalUrl: original.canonicalUrl,
+          publishedAt: original.publishedAt,
+          symbols: original.symbols
+        });
+        const candidate = {
+          ...original,
+          sourceId: 'us.reuters',
+          provenance: evidenceItem.provenance
+        };
+        return {
+          ...result,
+          candidateCollection: {...result.candidateCollection, candidates: [candidate]},
+          constructedEvidence: [{...result.constructedEvidence[0], evidenceItem}]
+        };
+      }
+    }
+  ];
+
+  for (const scenario of cases) {
+    const diagnostics = [];
+    const {service} = harness({
+      cnbcNewsResearch: {researchNews: scenario.researchNews},
+      onDiagnostics(value) { diagnostics.push(value); }
+    });
+    const output = await service.assemble(request());
+    const context = output.marketPackages[0].evidenceContext;
+    assert.equal(validateClaudeAnalysisInput(output), true, scenario.failureType);
+    assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false,
+      scenario.failureType);
+    assert.equal(context.unresolvedGaps.includes(CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP), true,
+      scenario.failureType);
+    assert.deepEqual(diagnostics.find(item => item.stage === 'cnbcNewsResearchIntegration'), {
+      stage: 'cnbcNewsResearchIntegration',
+      outcome: 'FAILURE',
+      failureType: scenario.failureType
+    });
+  }
+});
+
 test('unavailable or inconsistent canonical benchmark boundaries degrade CNBC only', async () => {
   const oneSession = createFiveSessionSnapshot({
     market: 'US', symbol: '^RUT', instrumentName: 'benchmark', instrumentType: 'INDEX',
@@ -1938,9 +2054,11 @@ test('unavailable or inconsistent canonical benchmark boundaries degrade CNBC on
     completedSessions: [snapshot('^RUT').completedSessions[1]], currentOverlay: null
   });
   let researchCalls = 0;
+  const diagnostics = [];
   const {service} = harness({
     createTelemetryAcquisition: () => ({async acquireSnapshot() { return oneSession; }}),
-    cnbcNewsResearch: {async researchNews() { researchCalls++; }}
+    cnbcNewsResearch: {async researchNews() { researchCalls++; }},
+    onDiagnostics(value) { diagnostics.push(value); }
   });
   const output = await service.assemble(request());
   assert.equal(researchCalls, 0);
@@ -1949,6 +2067,11 @@ test('unavailable or inconsistent canonical benchmark boundaries degrade CNBC on
     CNBC_RECAP_UNAVAILABLE_GAP,
     CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP
   ]);
+  assert.deepEqual(diagnostics.find(item => item.stage === 'cnbcNewsResearchIntegration'), {
+    stage: 'cnbcNewsResearchIntegration',
+    outcome: 'FAILURE',
+    failureType: 'MISSING_CANONICAL_HORIZONS'
+  });
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
