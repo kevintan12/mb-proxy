@@ -79,8 +79,8 @@ function input(overrides = {}) {
   };
 }
 
-function service(fetchImpl) {
-  return createYahooRecapArticleContentAcquisitionService({fetchImpl});
+function service(fetchImpl, options = {}) {
+  return createYahooRecapArticleContentAcquisitionService({fetchImpl, ...options});
 }
 
 test('exports the explicit bound and normalized article key contracts', () => {
@@ -124,6 +124,81 @@ test('extracts one immutable provider-owned Yahoo article result', async () => {
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.articleContent), true);
   assert.equal(Object.isFrozen(result.articleContent.publisher), true);
+});
+
+test('emits one bounded sanitized article-acquisition diagnostic for success', async () => {
+  const diagnostics = [];
+  let clock = 10;
+  const body = html();
+  const output = await service(async () => response(body), {
+    onDiagnostics(value) { diagnostics.push(value); },
+    monotonicNow() { return clock++; }
+  }).acquireArticleContent(input());
+  assert.equal(output.type, 'SUCCESS');
+  assert.deepEqual(diagnostics, [{
+    stage: 'yahooRecapArticleAcquisition',
+    outcome: 'SUCCESS',
+    httpStatus: 200,
+    responseBytes: Buffer.byteLength(body, 'utf8'),
+    contentType: 'HTML',
+    elapsedMs: 1,
+    failureType: null,
+    candidateRank: null
+  }]);
+  assert.equal(Object.isFrozen(diagnostics[0]), true);
+});
+
+test('diagnoses bounded Yahoo retrieval, size, JSON-LD and timestamp failures without payloads', async () => {
+  const cases = [
+    {
+      expectedResult: 'TIMEOUT', expectedDiagnostic: 'TIMEOUT',
+      fetchImpl: async () => { const error = new Error('secret timeout'); error.name = 'AbortError'; throw error; }
+    },
+    {
+      expectedResult: 'RETRIEVAL_FAILURE', expectedDiagnostic: 'RETRIEVAL_FAILURE',
+      fetchImpl: async () => { throw new Error('secret network'); }
+    },
+    {
+      expectedResult: 'RESPONSE_TOO_LARGE', expectedDiagnostic: 'RESPONSE_TOO_LARGE',
+      fetchImpl: async () => response('', {
+        headers: {get: name => name === 'content-type' ? 'text/html' : '1258292'}
+      })
+    },
+    {
+      expectedResult: 'INVALID_METADATA', expectedDiagnostic: 'INVALID_JSON_LD',
+      fetchImpl: async () => response('<html>rawHtml private provider response body</html>')
+    },
+    {
+      expectedResult: 'INVALID_METADATA', expectedDiagnostic: 'INVALID_DATE_PUBLISHED',
+      fetchImpl: async () => response(html(article({datePublished: 'invalid'})))
+    },
+    {
+      expectedResult: 'INVALID_METADATA', expectedDiagnostic: 'INVALID_DATE_MODIFIED',
+      fetchImpl: async () => response(html(article({dateModified: 'invalid'})))
+    }
+  ];
+  for (const item of cases) {
+    const diagnostics = [];
+    let clock = 0;
+    const output = await service(item.fetchImpl, {
+      onDiagnostics(value) { diagnostics.push(value); },
+      monotonicNow() { return clock++; }
+    }).acquireArticleContent(input());
+    assert.equal(output.type, item.expectedResult);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].stage, 'yahooRecapArticleAcquisition');
+    assert.equal(diagnostics[0].outcome, 'FAILURE');
+    assert.equal(diagnostics[0].failureType, item.expectedDiagnostic);
+    assert.deepEqual(Object.keys(diagnostics[0]), [
+      'stage', 'outcome', 'httpStatus', 'responseBytes', 'contentType',
+      'elapsedMs', 'failureType', 'candidateRank'
+    ]);
+    const serialized = JSON.stringify(diagnostics);
+    for (const forbidden of [
+      'articleBody', 'rawHtml', 'authorization', 'apiKey', 'secret',
+      'provider response body'
+    ]) assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
 });
 
 test('preserves explicit structured publisher identity independently of Yahoo hosting', async () => {

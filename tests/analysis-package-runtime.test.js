@@ -40,6 +40,8 @@ test('runtime composition includes bounded CNBC and Yahoo recap research but not
     'invokeClaudeEvidenceRoleClassification',
     'createUsAnalysisPackageOrchestrationService'
   ]) assert.match(source, new RegExp(component));
+  assert.match(source,
+    /createYahooRecapArticleContentAcquisitionService\(\{\s*fetchImpl,\s*onDiagnostics,/);
   assert.doesNotMatch(source, /invokeClaudeAnalysis|claude-analysis-invocation/);
 });
 

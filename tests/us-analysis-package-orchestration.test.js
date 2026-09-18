@@ -630,6 +630,40 @@ test('reports sanitized non-negative timings for existing package stages', async
   assert.equal(serialized.includes('Federal Reserve policy statement'), false);
 });
 
+test('attributes Yahoo recap timings without hiding or double-counting them in finalization', async () => {
+  let clock = 0;
+  const articleContent = yahooRecapArticle();
+  const diagnostics = [];
+  const instrumented = harness({
+    monotonicNow() { return clock; },
+    yahooRecapResearch: {
+      async discoverAndValidateRecap() { clock += 5; return yahooRecapResearchSuccess(); }
+    },
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() {
+        clock += 7;
+        return {ok: true, type: 'SUCCESS', articleContent};
+      }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) {
+        clock += 11;
+        return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+      }
+    },
+    onDiagnostics(value) { diagnostics.push(value); }
+  }).service;
+  await instrumented.assemble(request());
+  const timing = diagnostics.find(value => value.timing).timing;
+  assert.equal(timing.yahooRecapResearchMs, 5);
+  assert.equal(timing.yahooRecapArticleContentAcquisitionMs, 7);
+  assert.equal(timing.yahooRecapEvidenceConstructionMs, 11);
+  assert.equal(timing.packageRuntimeTotalMs, 23);
+  assert.equal(timing.packageAssemblyFinalizationMs, 0);
+  assert.equal(Object.values(timing).slice(0, -2).reduce((sum, value) => sum + value, 0)
+    + timing.packageAssemblyFinalizationMs, timing.packageRuntimeTotalMs);
+});
+
 test('integrates a validated Yahoo recap with package-owned ordering, identity and horizon', async () => {
   const article = yahooRecapArticle();
   const articleCalls = [];
@@ -796,7 +830,8 @@ test('maps Yahoo recap stage failures to sanitized deterministic gaps', async ()
   const cases = [
     {
       expectedGap: YAHOO_RECAP_RETRIEVAL_FAILURE_GAP,
-      expectedType: 'DISCOVERY_FAILURE',
+      expectedResearchType: 'DISCOVERY_FAILURE',
+      expectedType: 'UPSTREAM_FAILURE',
       overrides: {
         yahooRecapResearch: {
           async discoverAndValidateRecap() {
@@ -807,6 +842,7 @@ test('maps Yahoo recap stage failures to sanitized deterministic gaps', async ()
     },
     {
       expectedGap: YAHOO_RECAP_RETRIEVAL_FAILURE_GAP,
+      expectedResearchType: 'VALIDATED',
       expectedType: 'HTTP_FAILURE',
       overrides: {
         yahooRecapResearch: {async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }},
@@ -817,6 +853,7 @@ test('maps Yahoo recap stage failures to sanitized deterministic gaps', async ()
     },
     {
       expectedGap: YAHOO_RECAP_EVIDENCE_CONSTRUCTION_FAILURE_GAP,
+      expectedResearchType: 'VALIDATED',
       expectedType: 'EVIDENCE_CONTRACT_FAILURE',
       overrides: {
         yahooRecapResearch: {async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }},
@@ -842,12 +879,37 @@ test('maps Yahoo recap stage failures to sanitized deterministic gaps', async ()
       item.expectedGap, CNBC_RECAP_UNAVAILABLE_GAP
     ]);
     assert.deepEqual(diagnostics.find(value => value.stage === 'yahooRecapIntegration'), {
-      stage: 'yahooRecapIntegration', outcome: 'FAILURE', failureType: item.expectedType
+      stage: 'yahooRecapIntegration', outcome: 'FAILURE',
+      researchType: item.expectedResearchType,
+      failureType: item.expectedType,
+      candidateRank: null
     });
     const serialized = JSON.stringify(diagnostics);
     assert.equal(serialized.includes('articleText'), false);
     assert.equal(serialized.includes('canonicalUrl'), false);
   }
+});
+
+test('keeps thrown Yahoo recap failures sanitized in integration diagnostics', async () => {
+  const diagnostics = [];
+  const {service} = harness({
+    yahooRecapResearch: {
+      async discoverAndValidateRecap() { throw new Error('secret provider response body'); }
+    },
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  const output = await service.assemble(request());
+  assert.equal(output.marketPackages[0].evidenceContext.unresolvedGaps.includes(
+    YAHOO_RECAP_RETRIEVAL_FAILURE_GAP
+  ), true);
+  assert.deepEqual(diagnostics.find(value => value.stage === 'yahooRecapIntegration'), {
+    stage: 'yahooRecapIntegration', outcome: 'FAILURE', researchType: null,
+    failureType: 'THROWN_FAILURE', candidateRank: null
+  });
+  const serialized = JSON.stringify(diagnostics);
+  for (const forbidden of [
+    'articleBody', 'rawHtml', 'authorization', 'apiKey', 'secret', 'provider response body'
+  ]) assert.equal(serialized.includes(forbidden), false, forbidden);
 });
 
 test('skips Yahoo recap research when the canonical primary session date is null', async () => {
@@ -1252,6 +1314,16 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
       RETAINED_LIMIT: 0
     }
   });
+  assert.deepEqual(discoveryDiagnostic.retainedResults, [
+    {rank: 9, searchIndex: 1, path: '/2026/09/04/bodyless-market-page.html', outcome: 'RETAINED'},
+    {rank: 10, searchIndex: 1, path: '/2026/09/04/broadcom-semiconductor-leadership.html', outcome: 'RETAINED'},
+    {rank: 12, searchIndex: 2, path: '/2026/09/04/health-care-sector-advances.html', outcome: 'RETAINED'}
+  ]);
+  const failedAcquisition = cnbcDiagnostics.find(item =>
+    item.stage === 'cnbcDiscoveredArticleAcquisition');
+  assert.equal(failedAcquisition.rank, discoveryDiagnostic.retainedResults[0].rank);
+  assert.equal(discoveryDiagnostic.retainedResults[0].path,
+    new URL(unusableUrl).pathname);
   const acquisitionDiagnostic = cnbcDiagnostics.find(item => item.stage === 'cnbcCandidateAcquisition');
   assert.deepEqual(acquisitionDiagnostic, {
     stage: 'cnbcCandidateAcquisition',
@@ -1274,6 +1346,11 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
     constructedEvidenceCount: 2,
     materialityInvocationCount: 1
   });
+  const serializedDiagnostics = JSON.stringify(cnbcDiagnostics);
+  for (const forbidden of [
+    'articleBody', 'rawHtml', 'authorization', 'apiKey', 'secret', 'provider response body',
+    'Broadcom result', 'Health-care sector result'
+  ]) assert.equal(serializedDiagnostics.includes(forbidden), false, forbidden);
 
   const finalRequest = buildClaudeAnalysisRequest(output);
   const finalInput = JSON.parse(finalRequest.messages[0].content);

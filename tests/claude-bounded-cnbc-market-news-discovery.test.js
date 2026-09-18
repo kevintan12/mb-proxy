@@ -122,8 +122,10 @@ test('a full first-intent result set cannot starve company and sector discoverie
     result('https://www.cnbc.com/2026/09/11/constructive-sector.html', 'Sector')
   ];
   let call = 0;
+  const diagnostics = [];
   const service = createClaudeBoundedCnbcMarketNewsDiscoveryService({
-    apiKey: 'key', fetchImpl: async () => response(call++ === 0 ? firstIntent : secondIntent)
+    apiKey: 'key', onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async () => response(call++ === 0 ? firstIntent : secondIntent)
   });
 
   const output = await service.discoverCnbcMarketNews({targetSessionDate: '2026-09-11'});
@@ -134,6 +136,15 @@ test('a full first-intent result set cannot starve company and sector discoverie
     [3, 'Session 3'],
     [11, 'Company'],
     [12, 'Sector']
+  ]);
+  assert.deepEqual(diagnostics[0].retainedResults.map(item => [
+    item.rank, item.searchIndex, item.path, item.outcome
+  ]), [
+    [1, 1, '/2026/09/11/session-1.html', 'RETAINED'],
+    [2, 1, '/2026/09/11/session-2.html', 'RETAINED'],
+    [3, 1, '/2026/09/11/session-3.html', 'RETAINED'],
+    [11, 2, '/2026/09/11/non-portfolio-company.html', 'RETAINED'],
+    [12, 2, '/2026/09/11/constructive-sector.html', 'RETAINED']
   ]);
 });
 
@@ -161,6 +172,12 @@ test('emits bounded structural diagnostics without snippets or raw payloads', as
   assert.deepEqual(diagnostics[0].resultCount, 2);
   assert.equal(diagnostics[0].inspectedResultCount, 2);
   assert.equal(diagnostics[0].retainedResultCount, 1);
+  assert.deepEqual(diagnostics[0].retainedResults, [{
+    rank: 1,
+    searchIndex: 1,
+    path: '/2026/09/11/article.html',
+    outcome: 'RETAINED'
+  }]);
   assert.deepEqual(diagnostics[0].rejectionCounts, {
     INVALID_URL: 0,
     PATH_MISMATCH: 0,
@@ -170,7 +187,7 @@ test('emits bounded structural diagnostics without snippets or raw payloads', as
   });
   assert.equal(diagnostics[0].fetchCount, 2);
   const serialized = JSON.stringify(diagnostics);
-  for (const forbidden of ['article.html', 'CNBC market article', 'encrypted_content', 'server-key']) {
+  for (const forbidden of ['CNBC market article', 'encrypted_content', 'server-key']) {
     assert.equal(serialized.includes(forbidden), false);
   }
 });
