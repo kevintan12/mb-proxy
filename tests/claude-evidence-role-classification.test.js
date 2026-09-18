@@ -8,6 +8,8 @@ const {createCompletedRegularSession, createFiveSessionSnapshot} = require('../l
 const {
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_MODEL,
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES,
+  CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_OUTPUT_JSON_SCHEMA,
+  CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVIDER_JSON_SCHEMA,
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_SYSTEM_PROMPT,
   EVIDENCE_ROLES,
   MAX_CLASSIFICATION_REASON_BYTES,
@@ -230,6 +232,30 @@ test('builds a fixed server-owned request with no tools and no caller override s
   ]) assert.equal(request.system.includes(required), true, required);
   assert.equal(request.system.includes('Hard constraint: when an evidence item has horizon SUBSEQUENT_DEVELOPMENT, its roles may be only [] or [MATERIAL_EVENT]; never output PRINCIPAL_CATALYST for it, either alone or together with MATERIAL_EVENT.'), true);
   assert.throws(() => buildClaudeEvidenceRoleClassificationRequest({...input(), prompt: 'override'}));
+});
+
+test('uses a provider-compatible schema without weakening authoritative subject bounds', () => {
+  const authoritativeSubjects = CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_OUTPUT_JSON_SCHEMA
+    .properties.classifications.items.properties.subjects;
+  const providerSubjects = CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVIDER_JSON_SCHEMA
+    .properties.classifications.items.properties.subjects;
+  const request = buildClaudeEvidenceRoleClassificationRequest(input());
+
+  assert.equal(authoritativeSubjects.maxItems, 5);
+  assert.equal(Object.hasOwn(providerSubjects, 'maxItems'), false);
+  assert.equal(request.output_config.format.schema,
+    CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVIDER_JSON_SCHEMA);
+  assert.equal(Object.hasOwn(
+    request.output_config.format.schema.properties.classifications.items.properties.subjects,
+    'maxItems'
+  ), false);
+
+  const tooManySubjects = Array.from({length: 6}, () => ({
+    kind: 'COMPANY', name: 'Canonical evidence'
+  }));
+  assert.equal(validateClaudeEvidenceRoleClassificationOutput(
+    classifications({index: 0, value: {subjects: tooManySubjects}}), input()
+  ).valid, false);
 });
 
 test('makes exactly one Anthropic fetch with no retry and returns immutable output', async () => {
