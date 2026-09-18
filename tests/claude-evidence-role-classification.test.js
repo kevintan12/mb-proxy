@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
+const {isSpecificBroadMarketSubject} = require('../lib/broad-market-subjects');
 const {createCompletedRegularSession, createFiveSessionSnapshot} = require('../lib/five-session-snapshot');
 const {
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_MODEL,
@@ -19,6 +20,17 @@ const {
   validateClaudeEvidenceRoleClassificationOutput,
   invokeClaudeEvidenceRoleClassification
 } = require('../lib/claude-evidence-role-classification');
+
+test('rejects generic market and broad-index labels without rejecting specific names', () => {
+  for (const name of [
+    'US stocks', 'stocks', 'the market', 'equities', 'S&P 500', 'Nasdaq', 'Dow',
+    'market update', 'market leadership', 'notable movers', 'Wall Street'
+  ]) {
+    assert.equal(isSpecificBroadMarketSubject({kind: 'SECTOR', name}), false, name);
+  }
+  assert.equal(isSpecificBroadMarketSubject({kind: 'SECTOR', name: 'Technology'}), true);
+  assert.equal(isSpecificBroadMarketSubject({kind: 'COMPANY', name: 'Microsoft'}), true);
+});
 
 function snapshot(symbol = '^GSPC') {
   const session = createCompletedRegularSession({
@@ -112,7 +124,6 @@ test('accepts only bounded provider-neutral subjects grounded in title or summar
   ]);
   assert.equal(Object.isFrozen(output.classifications[0].subjects[0]), true);
   for (const subjects of [
-    [{kind: 'COMPANY', name: 'Unmatched company'}],
     [{kind: 'INDEX', name: 'Canonical evidence'}],
     [{kind: 'COMPANY', name: 'Canonical evidence'}, {kind: 'COMPANY', name: 'Canonical evidence'}],
     Array.from({length: 6}, (_, index) => ({kind: 'COMPANY', name: `Canonical evidence ${index}`})),
@@ -121,9 +132,20 @@ test('accepts only bounded provider-neutral subjects grounded in title or summar
     assert.equal(validateClaudeEvidenceRoleClassificationOutput(
       classifications({index: 0, value: {subjects}}), input()).valid, false);
   }
+
+  const filtered = createClaudeEvidenceRoleClassificationOutput(classifications({index: 0, value: {
+    subjects: [
+      {kind: 'SECTOR', name: 'market'},
+      {kind: 'COMPANY', name: 'Unmatched company'},
+      {kind: 'COMPANY', name: 'Canonical evidence'}
+    ]
+  }}), input());
+  assert.deepEqual(filtered.classifications[0].subjects, [
+    {kind: 'COMPANY', name: 'Canonical evidence'}
+  ]);
 });
 
-test('requires specific grounded subjects for retained broad-market material news', () => {
+test('requests grounded subjects for retained broad-market material news without making omission fatal', () => {
   const items = [
     evidence(28, {
       title: 'Friday stock stories',
@@ -144,8 +166,7 @@ test('requires specific grounded subjects for retained broad-market material new
     [0, 1, 2]
   );
   const empty = classifications();
-  assert.deepEqual(validateClaudeEvidenceRoleClassificationOutput(empty, source).errors,
-    ['material broad-market news requires specific classification subjects']);
+  assert.equal(validateClaudeEvidenceRoleClassificationOutput(empty, source).valid, true);
 
   const valid = classifications();
   valid.classifications[0].subjects = [
@@ -174,7 +195,8 @@ test('requires specific grounded subjects for retained broad-market material new
   assert.equal(output.classifications[2].subjects.length, 5);
 
   valid.classifications[0].subjects = [{kind: 'SECTOR', name: 'US stocks'}];
-  assert.equal(validateClaudeEvidenceRoleClassificationOutput(valid, source).valid, false);
+  const genericOnly = createClaudeEvidenceRoleClassificationOutput(valid, source);
+  assert.deepEqual(genericOnly.classifications[0].subjects, []);
 });
 
 test('allows empty subjects when broad-market subjects are not required or evidence is not retained material news', () => {
@@ -295,8 +317,10 @@ test('builds a fixed server-owned request with no tools and no caller override s
     'Use roles: []',
     'subjects only for materially significant broad-market companies or sectors',
     'requiresBroadMarketSubjects is true',
-    'subjects must include the exact grounded names',
-    'subjects: [] is allowed only when requiresBroadMarketSubjects is false',
+    'subjects must include their exact grounded names',
+    'Use subjects: [] only when no qualifying company or sector is explicitly supported',
+    'Subject assignment is independent of materiality and roles',
+    'never lower materiality or remove MATERIAL_EVENT',
     'Generic market or broad-index labels',
     'title or summary',
     'must not depend on portfolio membership or provider identity',

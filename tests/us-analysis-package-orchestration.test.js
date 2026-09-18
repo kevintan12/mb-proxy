@@ -1364,39 +1364,73 @@ test('excludes generic market and broad-index labels from broad-market focus', a
   assert.equal(validateClaudeAnalysisInput(genericOnlyOutput), true);
 });
 
-test('fails closed instead of silently omitting subjects for retained broad-market CNBC evidence', async () => {
+test('localizes missing or generic CNBC subjects while preserving valid peers and material roles', async () => {
   let classifiedInput;
   const {service} = harness({
     cnbcNewsResearch: {
       async researchNews({horizons}) {
-        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION'], [{
-          title: 'Microsoft, Apple and Financials lead the session',
-          summary: 'Microsoft and Apple rose while Financials, Bank of America and Goldman Sachs led.',
-          extract: 'Microsoft and Apple rose while Financials, Bank of America and Goldman Sachs led.'
-        }]);
+        return cnbcResearchSuccess(horizons, [
+          'COMPLETED_SESSION', 'COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT'
+        ], [
+          {
+            title: 'Microsoft, Apple and Financials lead the session',
+            summary: 'Microsoft and Apple rose while Financials, Bank of America and Goldman Sachs led.',
+            extract: 'Microsoft and Apple rose while Financials, Bank of America and Goldman Sachs led.'
+          },
+          {
+            title: 'US stocks rebound after the selloff',
+            summary: 'US stocks and the S&P 500 recovered.',
+            extract: 'US stocks and the S&P 500 recovered.'
+          },
+          {
+            title: 'Intel, Micron and Boeing lead notable movers',
+            summary: 'Intel, Micron, Boeing, GE Vernova and Eaton moved on company developments.',
+            extract: 'Intel, Micron, Boeing, GE Vernova and Eaton moved on company developments.'
+          }
+        ]);
       }
     },
     evidenceRoleClassification: {
       async classifyEvidenceRoles(input) {
         classifiedInput = input;
-        const reference = input.evidence.at(-1).reference;
         return roleClassificationSuccess(
           input,
-          {[reference]: ['MATERIAL_EVENT']},
-          {[reference]: []},
-          {[reference]: 'HIGH'}
+          {e4: ['MATERIAL_EVENT'], e5: ['MATERIAL_EVENT'], e6: ['MATERIAL_EVENT']},
+          {
+            e4: [],
+            e5: [{kind: 'SECTOR', name: 'US stocks'}],
+            e6: [
+              {kind: 'COMPANY', name: 'Intel'},
+              {kind: 'COMPANY', name: 'Micron'},
+              {kind: 'COMPANY', name: 'Boeing'},
+              {kind: 'COMPANY', name: 'GE Vernova'},
+              {kind: 'COMPANY', name: 'Eaton'}
+            ]
+          },
+          {e4: 'HIGH', e5: 'MEDIUM', e6: 'HIGH'}
         );
       }
     }
   });
 
-  await assert.rejects(
-    service.assemble(request()),
-    /material broad-market news requires specific classification subjects/
-  );
-  assert.equal(classifiedInput.evidence.at(-1).requiresBroadMarketSubjects, true);
-  assert.equal(classifiedInput.evidence.slice(0, -1)
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.deepEqual(context.materialEvents.slice(-3), ['e4', 'e5', 'e6']);
+  assert.deepEqual(context.broadMarketFocus, [{
+    evidenceRef: 'e6',
+    subjects: [
+      {kind: 'COMPANY', name: 'Intel'},
+      {kind: 'COMPANY', name: 'Micron'},
+      {kind: 'COMPANY', name: 'Boeing'},
+      {kind: 'COMPANY', name: 'GE Vernova'},
+      {kind: 'COMPANY', name: 'Eaton'}
+    ]
+  }]);
+  assert.equal(classifiedInput.evidence.slice(-3)
+    .every(entry => entry.requiresBroadMarketSubjects === true), true);
+  assert.equal(classifiedInput.evidence.slice(0, -3)
     .every(entry => entry.requiresBroadMarketSubjects === false), true);
+  assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
 test('admits provisional CNBC evidence only while the 50-item classifier bound remains safe', async () => {
@@ -1720,6 +1754,13 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
   assert.equal(validateClaudeAnalysisOutput(finalOutput, output).valid, true);
   assert.deepEqual(finalOutput.sections[3].evidenceRefs, ['e8', 'e9']);
   assert.deepEqual(finalOutput.sections[7].evidenceRefs, ['e9']);
+
+  const leakedBroadMarketReference = JSON.parse(JSON.stringify(finalOutput));
+  leakedBroadMarketReference.sections[4].evidenceRefs = ['e8'];
+  leakedBroadMarketReference.sections[4].telemetryRefs = [];
+  assert.equal(validateClaudeAnalysisOutput(
+    leakedBroadMarketReference, output
+  ).errors.includes('sections[4]: evidence references must belong to the initiating list'), true);
 });
 
 test('Further Readings deduplicates general CNBC evidence against mandatory recap anchors by canonical URL', async () => {

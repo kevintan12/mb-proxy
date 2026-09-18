@@ -25,14 +25,14 @@ const {
 
 function canonicalInput({
   includeSecondEvidence = false,
-  evidenceTitle = 'Market update',
+  evidenceTitle = 'Technology sector update',
   evidenceSummary,
   materialEvents = ['e1'],
   principalCatalysts = ['e1'],
   supportingEvidence = ['e1'],
   subsequentDevelopments = [],
   sessionAssociations = [],
-  broadMarketFocus = [{evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Market update'}]}]
+  broadMarketFocus = [{evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Technology'}]}]
 } = {}) {
   const item = createEvidenceItem({
     sourceId: 'sg.reuters', market: 'SG', evidenceCategory: 'news', title: evidenceTitle,
@@ -90,7 +90,7 @@ function sections(content = 'Supported analysis.') {
   return REPORT_SECTION_NAMES.map((name, index) => ({
     name,
     content: index === 10 ? null : index === 4 ? EMPTY_INITIATING_LIST_CONTENT.myStocks
-      : content === null ? null : index === 3 ? 'Supported Market update analysis.' : content,
+      : content === null ? null : index === 3 ? 'Supported Technology analysis.' : content,
     evidenceRefs: index === 10 || index === 4 || content === null ? [] : ['e1'],
     telemetryRefs: index === 10 || index === 4 || content === null ? [] : ['t1'],
     uncertainties: []
@@ -193,7 +193,7 @@ test('accepts the provisional request-size boundary and rejects one byte above w
 });
 
 test('reports deterministic sanitized request sizes and provider usage on success', async () => {
-  const input = canonicalInput({evidenceTitle: '亚洲 market update'});
+  const input = canonicalInput({evidenceTitle: '亚洲 Technology sector update'});
   const request = buildClaudeAnalysisRequest(input);
   const serializedRequest = JSON.stringify(request);
   const canonicalPackage = JSON.parse(request.messages[0].content);
@@ -267,7 +267,7 @@ test('reports deterministic sanitized request sizes and provider usage on succes
   assert.equal(Object.isFrozen(diagnostics[0].timing), true);
   assert.equal(Object.isFrozen(diagnostics[0].usage), true);
   const serializedDiagnostics = JSON.stringify(diagnostics[0]);
-  assert.equal(serializedDiagnostics.includes('亚洲 market update'), false);
+  assert.equal(serializedDiagnostics.includes('亚洲 Technology sector update'), false);
   assert.equal(serializedDiagnostics.includes('^STI'), false);
   assert.equal(serializedDiagnostics.includes('Analyze only'), false);
   assert.equal(serializedDiagnostics.includes('test-key'), false);
@@ -343,7 +343,7 @@ test('reports only sanitized Section 4 structure when populated content lacks ev
   assert.deepEqual(diagnostics[0].usage, {input_tokens: 321, output_tokens: 45});
   const serialized = JSON.stringify(diagnostics[0]);
   for (const forbidden of [
-    'PRIVATE SECTION PROSE', '亚洲 market update', '^STI', 'https://',
+    'PRIVATE SECTION PROSE', '亚洲 Technology sector update', '^STI', 'https://',
     'Analyze only', 'test-key'
   ]) assert.equal(serialized.includes(forbidden), false, forbidden);
   assert.equal(Object.isFrozen(diagnostics[0].contractFailure), true);
@@ -682,6 +682,27 @@ test('deterministically nulls impossible Sections 2-4 and recomputes first-use r
     assert.equal(result.output.evidenceGaps.includes(message), true);
   }
   assert.deepEqual(result.output.evidenceReferences, ['e2', 'e1']);
+});
+
+test('localizes empty broad-market focus to Section 4 without removing valid driver evidence', async () => {
+  const input = canonicalInput({broadMarketFocus: []});
+  const output = normalOutput(input);
+
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+  });
+
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.notEqual(result.output.sections[1].content, null);
+  assert.notEqual(result.output.sections[2].content, null);
+  assert.deepEqual(result.output.sections[3], {
+    name: REPORT_SECTION_NAMES[3],
+    content: null,
+    evidenceRefs: [],
+    telemetryRefs: [],
+    uncertainties: ['Validated broad-market company or sector evidence was unavailable.']
+  });
 });
 
 test('does not normalize hard-gate violations when the package supplies eligible evidence', async () => {

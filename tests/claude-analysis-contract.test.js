@@ -39,8 +39,8 @@ function evidence(market, overrides = {}) {
     sourceId: config.news,
     market,
     evidenceCategory: 'news',
-    title: `${market} market update`,
-    summary: 'A supported market observation.',
+    title: `${market} Technology sector update`,
+    summary: 'A supported Technology sector observation.',
     canonicalUrl: `https://www.reuters.com/markets/${market.toLowerCase()}-example`,
     publishedAt: '2026-09-06T08:00:00Z',
     symbols: [config.symbol],
@@ -96,8 +96,8 @@ function marketPackage(market, {
     ? packageItems[0]?.evidenceCategory === 'news'
       ? [{evidenceRef, subjects: [{
           kind: 'SECTOR',
-          name: packageItems[0].title.includes('market update')
-            ? 'market update' : packageItems[0].title
+          name: packageItems[0].title.includes('Technology')
+            ? 'Technology' : packageItems[0].title
         }]}]
       : []
     : broadMarketFocus;
@@ -158,7 +158,7 @@ function sections({content = 'Supported analysis.', evidenceRefs = ['e1'], telem
     name,
     content: index === REPORT_SECTION_NAMES.length - 1 ? null
       : index === 4 ? EMPTY_INITIATING_LIST_CONTENT[initiatingList]
-        : content === null ? null : index === 3 ? 'Supported market update analysis.' : content,
+        : content === null ? null : index === 3 ? 'Supported Technology analysis.' : content,
     evidenceRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 4 ? [] : evidenceRefs.slice(),
     telemetryRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 4 ? [] : telemetryRefs.slice(),
     uncertainties: []
@@ -655,7 +655,7 @@ test('binds Sections 2-4 to canonical driver, catalyst, and broad-market focus e
 
 test('rejects malformed, unknown, duplicate, reordered, and ungrounded broad-market focus', () => {
   const items = [
-    evidence('SG', {title: 'Technology companies led the market'}),
+    evidence('SG', {title: 'US stocks and Technology companies led the market'}),
     evidence('SG', {
       title: 'Banks lagged the broader market',
       canonicalUrl: 'https://www.reuters.com/markets/sg-banks-example'
@@ -686,6 +686,7 @@ test('rejects malformed, unknown, duplicate, reordered, and ungrounded broad-mar
       {evidenceRef: 'e2', subjects: [{kind: 'COMPANY', name: 'Banks'}]},
       {evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Technology'}]}
     ],
+    [{evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'US stocks'}]}],
     [{evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Unmentioned issuer'}]}],
     [{evidenceRef: 'e1', subjects: Array.from({length: 6}, (_, index) => ({
       kind: 'SECTOR', name: index === 0 ? 'Technology' : `Technology ${index}`
@@ -740,7 +741,7 @@ test('accepts a fully grounded realistic US response using Yahoo, Federal Reserv
     }),
     createEvidenceItem({
       sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news',
-      title: 'CNBC market leadership report', summary: 'Supported sector and mover context.',
+      title: 'CNBC Technology sector leadership report', summary: 'Supported Technology sector and mover context.',
       canonicalUrl: 'https://www.cnbc.com/2026/09/04/market-leadership.html',
       publishedAt: '2026-09-04T21:30:00Z'
     })
@@ -757,7 +758,7 @@ test('accepts a fully grounded realistic US response using Yahoo, Federal Reserv
   packageInput.evidenceContext.principalCatalysts = ['e2'];
   packageInput.evidenceContext.supportingEvidence = ['e1', 'e2'];
   packageInput.evidenceContext.broadMarketFocus = [{
-    evidenceRef: 'e3', subjects: [{kind: 'SECTOR', name: 'market leadership'}]
+    evidenceRef: 'e3', subjects: [{kind: 'SECTOR', name: 'Technology'}]
   }];
   const input = createClaudeAnalysisInput({
     analysisRequest: {
