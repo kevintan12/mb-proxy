@@ -12,13 +12,17 @@ const {
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_OUTPUT_JSON_SCHEMA,
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVIDER_JSON_SCHEMA,
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_SYSTEM_PROMPT,
+  CLAUDE_EVIDENCE_SUBJECT_REPAIR_SYSTEM_PROMPT,
   EVIDENCE_ROLES,
   MAX_CLASSIFICATION_REASON_BYTES,
   buildClaudeEvidenceRoleClassificationRequest,
+  buildClaudeEvidenceSubjectRepairRequest,
   canonicalClassificationInput,
   createClaudeEvidenceRoleClassificationOutput,
+  createClaudeEvidenceSubjectRepairOutput,
   validateClaudeEvidenceRoleClassificationOutput,
-  invokeClaudeEvidenceRoleClassification
+  invokeClaudeEvidenceRoleClassification,
+  invokeClaudeEvidenceSubjectRepair
 } = require('../lib/claude-evidence-role-classification');
 
 test('rejects generic market and broad-index labels without rejecting specific names', () => {
@@ -92,6 +96,23 @@ function response(output, extras = {}) {
     async json() {
       return {content: [{type: 'text', text: JSON.stringify(output)}], usage: {input_tokens: 300, output_tokens: 80}, ...extras};
     }
+  };
+}
+
+function subjectRepairInput() {
+  return {
+    evidence: [
+      {
+        reference: 'e28',
+        title: 'Friday stock stories',
+        summary: `${'Market context. '.repeat(100)}Microsoft and Apple advanced while Financials, Bank of America and Goldman Sachs led.`
+      },
+      {
+        reference: 'e30',
+        title: 'Notable movers',
+        summary: 'Intel, Micron, Boeing, GE Vernova and Eaton were notable movers.'
+      }
+    ]
   };
 }
 
@@ -355,6 +376,78 @@ test('uses a provider-compatible schema without weakening authoritative subject 
   ).valid, false);
 });
 
+test('subject-only repair remains bounded, exactly grounded, and rejects generic or aliased names', () => {
+  const source = subjectRepairInput();
+  const output = createClaudeEvidenceSubjectRepairOutput({repairs: [
+    {
+      reference: 'e28',
+      subjects: [
+        {kind: 'SECTOR', name: 'US stocks'},
+        {kind: 'COMPANY', name: 'Microsoft'},
+        {kind: 'COMPANY', name: 'Apple'},
+        {kind: 'SECTOR', name: 'Financials'},
+        {kind: 'COMPANY', name: 'Bank of America'}
+      ]
+    },
+    {
+      reference: 'e30',
+      subjects: [
+        {kind: 'COMPANY', name: 'Intel'},
+        {kind: 'COMPANY', name: 'GE-Vernova'},
+        {kind: 'COMPANY', name: 'GE Vernova'},
+        {kind: 'COMPANY', name: 'Eaton'}
+      ]
+    }
+  ]}, source);
+  assert.deepEqual(output.repairs[0].subjects, [
+    {kind: 'COMPANY', name: 'Microsoft'},
+    {kind: 'COMPANY', name: 'Apple'},
+    {kind: 'SECTOR', name: 'Financials'},
+    {kind: 'COMPANY', name: 'Bank of America'}
+  ]);
+  assert.deepEqual(output.repairs[1].subjects, [
+    {kind: 'COMPANY', name: 'Intel'},
+    {kind: 'COMPANY', name: 'GE Vernova'},
+    {kind: 'COMPANY', name: 'Eaton'}
+  ]);
+  assert.equal(Object.isFrozen(output.repairs[0].subjects), true);
+  assert.throws(() => createClaudeEvidenceSubjectRepairOutput({repairs: [
+    {reference: 'e30', subjects: []}, {reference: 'e28', subjects: []}
+  ]}, source), /references must match supplied order/);
+});
+
+test('builds and invokes one fixed subject-only repair request without tools or retries', async () => {
+  const source = subjectRepairInput();
+  const request = buildClaudeEvidenceSubjectRepairRequest(source);
+  assert.equal(request.model, CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_MODEL);
+  assert.equal(request.system, CLAUDE_EVIDENCE_SUBJECT_REPAIR_SYSTEM_PROMPT);
+  assert.equal('tools' in request, false);
+  assert.deepEqual(Object.keys(JSON.parse(request.messages[0].content).evidence[0]),
+    ['reference', 'title', 'summary']);
+  let calls = 0;
+  const diagnostics = [];
+  const result = await invokeClaudeEvidenceSubjectRepair({
+    input: source,
+    apiKey: 'secret',
+    fetchImpl: async () => {
+      calls++;
+      return response({repairs: [
+        {reference: 'e28', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]},
+        {reference: 'e30', subjects: [{kind: 'COMPANY', name: 'Boeing'}]}
+      ]});
+    },
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 1);
+  assert.equal(diagnostics[0].stage, 'evidenceSubjectRepairInvocation');
+  assert.equal(diagnostics[0].counts.evidenceCount, 2);
+  const serialized = JSON.stringify(diagnostics);
+  for (const forbidden of ['Microsoft', 'Boeing', 'Market context', 'secret']) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
 test('makes exactly one Anthropic fetch with no retry and returns immutable output', async () => {
   let fetchCount = 0;
   const source = input();
@@ -372,6 +465,39 @@ test('makes exactly one Anthropic fetch with no retry and returns immutable outp
   assert.equal(fetchCount, 1);
   assert.equal(Object.isFrozen(result.output.classifications[0]), true);
   assert.equal(source.evidence[0].item.title, 'Canonical evidence 1');
+});
+
+test('diagnoses primary subject omission separately from subjects sanitized to empty', async () => {
+  const source = input(
+    ['COMPLETED_SESSION', 'COMPLETED_SESSION'],
+    [
+      evidence(1, {title: 'Microsoft advances', summary: 'Microsoft advanced.'}),
+      evidence(2, {title: 'US stocks advance', summary: 'US stocks advanced.'})
+    ],
+    [0, 1]
+  );
+  const raw = {classifications: [
+    {
+      reference: 'e1', materiality: 'HIGH', roles: ['MATERIAL_EVENT'], subjects: [],
+      reason: 'Material company move.'
+    },
+    {
+      reference: 'e2', materiality: 'MEDIUM', roles: ['MATERIAL_EVENT'],
+      subjects: [{kind: 'SECTOR', name: 'US stocks'}], reason: 'Material market move.'
+    }
+  ]};
+  const diagnostics = [];
+  const result = await invokeClaudeEvidenceRoleClassification({
+    input: source, apiKey: 'secret', fetchImpl: async () => response(raw),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.subjectCoverage, {
+    eligibleReferenceCount: 2,
+    primaryOmittedSubjectCount: 1,
+    primarySanitizedEmptySubjectCount: 1
+  });
+  assert.deepEqual(diagnostics[0].subjectCoverage, result.subjectCoverage);
 });
 
 test('never retries network, HTTP, malformed-envelope, or contract failures', async () => {
@@ -414,11 +540,17 @@ test('captures only sanitized size, counts, request-id, timing, usage, and fetch
   assert.equal(result.ok, true);
   assert.equal(diagnostics.length, 1);
   assert.deepEqual(Object.keys(diagnostics[0]), [
-    'model', 'requestId', 'requestSize', 'counts', 'timing', 'usage', 'fetchCount'
+    'model', 'requestId', 'requestSize', 'counts', 'timing', 'usage', 'fetchCount',
+    'subjectCoverage'
   ]);
   assert.deepEqual(diagnostics[0].counts, {evidenceCount: 3, benchmarkTelemetryCount: 1});
   assert.deepEqual(diagnostics[0].usage, {input_tokens: 300, output_tokens: 80});
   assert.equal(diagnostics[0].fetchCount, 1);
+  assert.deepEqual(diagnostics[0].subjectCoverage, {
+    eligibleReferenceCount: 0,
+    primaryOmittedSubjectCount: 0,
+    primarySanitizedEmptySubjectCount: 0
+  });
   const serialized = JSON.stringify(diagnostics[0]);
   for (const forbidden of ['Canonical evidence', 'Bounded evidence', 'cnbc.com', 'TOP_SECRET', 'Classify every']) {
     assert.equal(serialized.includes(forbidden), false, forbidden);

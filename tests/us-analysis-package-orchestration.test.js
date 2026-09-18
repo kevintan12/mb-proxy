@@ -300,7 +300,7 @@ function harness(overrides = {}) {
     factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
     yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [],
     cnbcRecapResearch: [], cnbc: [],
-    evidenceRoleClassification: []
+    evidenceRoleClassification: [], evidenceSubjectRepair: []
   };
   const dependencies = {
     createTelemetryAcquisition: ({generatedAt}) => {
@@ -375,6 +375,16 @@ function harness(overrides = {}) {
               subjects: [],
               reason: 'No supported evidence role.'
             }))
+          }
+        };
+      },
+      async repairEvidenceSubjects(input) {
+        calls.evidenceSubjectRepair.push(input);
+        return {
+          ok: true,
+          type: 'SUCCESS',
+          output: {
+            repairs: input.evidence.map(({reference}) => ({reference, subjects: []}))
           }
         };
       }
@@ -1036,7 +1046,7 @@ test('rejects overlap between supplied anchors and either portfolio list before 
       factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
       yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [],
       cnbcRecapResearch: [], cnbc: [],
-      evidenceRoleClassification: []
+      evidenceRoleClassification: [], evidenceSubjectRepair: []
     });
   }
 });
@@ -1213,6 +1223,7 @@ test('integrates completed and subsequent CNBC evidence after Yahoo and Fed with
 });
 
 test('filters five provisional CNBC items and compacts every retained reference-bearing path', async () => {
+  let repairInput;
   const {service} = harness({
     cnbcNewsResearch: {
       async researchNews({horizons}) {
@@ -1232,12 +1243,18 @@ test('filters five provisional CNBC items and compacts every retained reference-
             e8: ['MATERIAL_EVENT']
           },
           {
-            e5: [{kind: 'COMPANY', name: 'CNBC market news item 2'}],
+            e5: [],
             e7: [{kind: 'SECTOR', name: 'CNBC market news item 4'}],
             e8: [{kind: 'COMPANY', name: 'CNBC market news item 5'}]
           },
           {e4: 'LOW', e5: 'HIGH', e6: 'MEDIUM', e7: 'MEDIUM', e8: 'LOW'}
         );
+      },
+      async repairEvidenceSubjects(input) {
+        repairInput = input;
+        return {ok: true, type: 'SUCCESS', output: {repairs: [{
+          reference: 'e4', subjects: [{kind: 'COMPANY', name: 'CNBC market news item 2'}]
+        }]}};
       }
     }
   });
@@ -1262,6 +1279,9 @@ test('filters five provisional CNBC items and compacts every retained reference-
   assert.deepEqual(context.furtherReadings, [
     {evidenceRef: 'e4', sessionDate: '2026-09-04'},
     {evidenceRef: 'e5', sessionDate: '2026-09-04'}
+  ]);
+  assert.deepEqual(repairInput.evidence.map(entry => [entry.reference, entry.title]), [
+    ['e4', 'CNBC market news item 2']
   ]);
   assert.equal(JSON.stringify(output).includes('CNBC market news item 1'), false);
   assert.equal(JSON.stringify(output).includes('CNBC market news item 3'), false);
@@ -1366,11 +1386,13 @@ test('excludes generic market and broad-index labels from broad-market focus', a
 
 test('localizes missing or generic CNBC subjects while preserving valid peers and material roles', async () => {
   let classifiedInput;
+  let repairInput;
+  const diagnostics = [];
   const {service} = harness({
     cnbcNewsResearch: {
       async researchNews({horizons}) {
         return cnbcResearchSuccess(horizons, [
-          'COMPLETED_SESSION', 'COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT'
+          'COMPLETED_SESSION', 'COMPLETED_SESSION', 'COMPLETED_SESSION'
         ], [
           {
             title: 'Microsoft, Apple and Financials lead the session',
@@ -1395,42 +1417,171 @@ test('localizes missing or generic CNBC subjects while preserving valid peers an
         classifiedInput = input;
         return roleClassificationSuccess(
           input,
-          {e4: ['MATERIAL_EVENT'], e5: ['MATERIAL_EVENT'], e6: ['MATERIAL_EVENT']},
+          {e4: ['MATERIAL_EVENT'], e5: ['MATERIAL_EVENT'], e6: ['PRINCIPAL_CATALYST']},
           {
             e4: [],
             e5: [{kind: 'SECTOR', name: 'US stocks'}],
-            e6: [
+            e6: []
+          },
+          {e4: 'HIGH', e5: 'MEDIUM', e6: 'HIGH'}
+        );
+      },
+      async repairEvidenceSubjects(input) {
+        repairInput = input;
+        return {
+          ok: true,
+          type: 'SUCCESS',
+          output: {repairs: [
+            {reference: 'e4', subjects: [
+              {kind: 'COMPANY', name: 'Microsoft'},
+              {kind: 'COMPANY', name: 'Apple'},
+              {kind: 'SECTOR', name: 'Financials'},
+              {kind: 'COMPANY', name: 'Bank of America'},
+              {kind: 'COMPANY', name: 'Goldman Sachs'}
+            ]},
+            {reference: 'e5', subjects: [{kind: 'SECTOR', name: 'US stocks'}]},
+            {reference: 'e6', subjects: [
               {kind: 'COMPANY', name: 'Intel'},
               {kind: 'COMPANY', name: 'Micron'},
               {kind: 'COMPANY', name: 'Boeing'},
               {kind: 'COMPANY', name: 'GE Vernova'},
               {kind: 'COMPANY', name: 'Eaton'}
-            ]
-          },
-          {e4: 'HIGH', e5: 'MEDIUM', e6: 'HIGH'}
-        );
+            ]}
+          ]}
+        };
       }
-    }
+    },
+    onDiagnostics: value => diagnostics.push(value)
   });
 
   const output = await service.assemble(request());
   const context = output.marketPackages[0].evidenceContext;
-  assert.deepEqual(context.materialEvents.slice(-3), ['e4', 'e5', 'e6']);
-  assert.deepEqual(context.broadMarketFocus, [{
-    evidenceRef: 'e6',
-    subjects: [
+  assert.deepEqual(context.materialEvents.slice(-2), ['e4', 'e5']);
+  assert.deepEqual(context.principalCatalysts, ['e6']);
+  assert.deepEqual(context.broadMarketFocus, [
+    {evidenceRef: 'e4', subjects: [
+      {kind: 'COMPANY', name: 'Microsoft'},
+      {kind: 'COMPANY', name: 'Apple'},
+      {kind: 'SECTOR', name: 'Financials'},
+      {kind: 'COMPANY', name: 'Bank of America'},
+      {kind: 'COMPANY', name: 'Goldman Sachs'}
+    ]},
+    {evidenceRef: 'e6', subjects: [
       {kind: 'COMPANY', name: 'Intel'},
       {kind: 'COMPANY', name: 'Micron'},
       {kind: 'COMPANY', name: 'Boeing'},
       {kind: 'COMPANY', name: 'GE Vernova'},
       {kind: 'COMPANY', name: 'Eaton'}
-    ]
-  }]);
+    ]}
+  ]);
+  assert.deepEqual(repairInput.evidence.map(entry => entry.reference), ['e4', 'e5', 'e6']);
+  assert.deepEqual(Object.keys(repairInput.evidence[0]), ['reference', 'title', 'summary']);
+  const repairDiagnostic = diagnostics.find(value => value.stage === 'evidenceSubjectRepair');
+  assert.deepEqual(repairDiagnostic, {
+    stage: 'evidenceSubjectRepair',
+    primaryOmittedSubjectCount: null,
+    primarySanitizedEmptySubjectCount: null,
+    attemptedReferenceCount: 3,
+    repairedReferenceCount: 2,
+    outcome: 'PARTIAL_SUCCESS',
+    failureType: null
+  });
   assert.equal(classifiedInput.evidence.slice(-3)
     .every(entry => entry.requiresBroadMarketSubjects === true), true);
   assert.equal(classifiedInput.evidence.slice(0, -3)
     .every(entry => entry.requiresBroadMarketSubjects === false), true);
   assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('keeps subject repair failure local and skips repair when primary subjects are valid', async () => {
+  let failedRepairCalls = 0;
+  const diagnostics = [];
+  const failing = harness({
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION'], [{
+          title: 'Microsoft and Financials lead',
+          summary: 'Microsoft rose as Financials led the session.',
+          extract: 'Microsoft rose as Financials led the session.'
+        }]);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(input, {e4: ['MATERIAL_EVENT']}, {e4: []});
+      },
+      async repairEvidenceSubjects() {
+        failedRepairCalls++;
+        return {ok: false, type: 'UPSTREAM_FAILURE', message: 'sanitized'};
+      }
+    },
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const failedOutput = await failing.service.assemble(request());
+  const failedContext = failedOutput.marketPackages[0].evidenceContext;
+  assert.equal(failedRepairCalls, 1);
+  assert.deepEqual(failedContext.materialEvents, ['e4']);
+  assert.deepEqual(failedContext.broadMarketFocus, []);
+  assert.equal(validateClaudeAnalysisInput(failedOutput), true);
+  assert.equal(diagnostics.find(value => value.stage === 'evidenceSubjectRepair').outcome,
+    'FAILURE');
+  assert.equal(diagnostics.find(value => value.stage === 'evidenceSubjectRepair').failureType,
+    'UPSTREAM_FAILURE');
+
+  const emptyDiagnostics = [];
+  const emptyRepair = harness({
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION'], [{
+          title: 'US stocks advance', summary: 'US stocks advanced.', extract: 'US stocks advanced.'
+        }]);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(input, {e4: ['MATERIAL_EVENT']}, {e4: []});
+      },
+      async repairEvidenceSubjects(input) {
+        return {ok: true, type: 'SUCCESS', output: {repairs: input.evidence.map(entry => ({
+          reference: entry.reference, subjects: [{kind: 'SECTOR', name: 'US stocks'}]
+        }))}};
+      }
+    },
+    onDiagnostics: value => emptyDiagnostics.push(value)
+  });
+  const emptyOutput = await emptyRepair.service.assemble(request());
+  assert.deepEqual(emptyOutput.marketPackages[0].evidenceContext.broadMarketFocus, []);
+  assert.equal(emptyDiagnostics.find(value => value.stage === 'evidenceSubjectRepair').outcome,
+    'REMAINED_EMPTY');
+
+  let unnecessaryRepairCalls = 0;
+  const valid = harness({
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION'], [{
+          title: 'Microsoft and Financials lead',
+          summary: 'Microsoft rose as Financials led the session.',
+          extract: 'Microsoft rose as Financials led the session.'
+        }]);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(input, {e5: ['MATERIAL_EVENT']}, {
+          e5: [{kind: 'COMPANY', name: 'Microsoft'}]
+        });
+      },
+      async repairEvidenceSubjects() { unnecessaryRepairCalls++; }
+    }
+  });
+  const validOutput = await valid.service.assemble(request('US', {
+    myStocks: [{market: 'US', symbol: 'AAPL'}]
+  }));
+  assert.equal(unnecessaryRepairCalls, 0);
+  assert.deepEqual(validOutput.marketPackages[0].evidenceContext.broadMarketFocus, [{
+    evidenceRef: 'e5', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]
+  }]);
+  assert.deepEqual(validOutput.portfolioContext.myStocks[0].evidenceRefs, ['e2']);
 });
 
 test('admits provisional CNBC evidence only while the 50-item classifier bound remains safe', async () => {
