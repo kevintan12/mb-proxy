@@ -1258,6 +1258,99 @@ test('filters five provisional CNBC items and compacts every retained reference-
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
+test('excludes generic market and broad-index labels from broad-market focus', async () => {
+  const candidateOverrides = [
+    {
+      title: 'US stocks and the S&P 500 rose',
+      summary: 'US stocks followed the S&P 500 higher.',
+      extract: 'US stocks and the S&P 500 rose.'
+    },
+    {
+      title: 'Nasdaq, Dow, equities and the market advanced',
+      summary: 'Nasdaq and Dow gains lifted equities and the market.',
+      extract: 'Nasdaq, Dow, equities and the market advanced.'
+    },
+    {
+      title: 'Technology and Nvidia led US stocks',
+      summary: 'Technology shares and Nvidia outperformed US stocks.',
+      extract: 'Technology and Nvidia led US stocks.'
+    }
+  ];
+  const {service} = harness({
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(
+          horizons,
+          ['COMPLETED_SESSION', 'COMPLETED_SESSION', 'COMPLETED_SESSION'],
+          candidateOverrides
+        );
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(
+          input,
+          {e4: ['MATERIAL_EVENT'], e5: ['MATERIAL_EVENT'], e6: ['MATERIAL_EVENT']},
+          {
+            e4: [
+              {kind: 'SECTOR', name: 'US stocks'},
+              {kind: 'SECTOR', name: 'S&P 500'}
+            ],
+            e5: [
+              {kind: 'SECTOR', name: 'Nasdaq'},
+              {kind: 'SECTOR', name: 'Dow'},
+              {kind: 'SECTOR', name: 'equities'},
+              {kind: 'SECTOR', name: 'the market'}
+            ],
+            e6: [
+              {kind: 'SECTOR', name: 'US stocks'},
+              {kind: 'SECTOR', name: 'Technology'},
+              {kind: 'COMPANY', name: 'Nvidia'}
+            ]
+          }
+        );
+      }
+    }
+  });
+
+  const output = await service.assemble(request());
+  assert.deepEqual(output.marketPackages[0].evidenceContext.broadMarketFocus, [{
+    evidenceRef: 'e6',
+    subjects: [
+      {kind: 'SECTOR', name: 'Technology'},
+      {kind: 'COMPANY', name: 'Nvidia'}
+    ]
+  }]);
+  assert.equal(validateClaudeAnalysisInput(output), true);
+
+  const yahooArticle = yahooRecapArticle();
+  const genericOnly = harness({
+    yahooRecapResearch: {
+      async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }
+    },
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() {
+        return {ok: true, type: 'SUCCESS', articleContent: yahooArticle};
+      }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence({articleContent, horizon}) {
+        return yahooRecapEvidenceSuccess(articleContent, horizon);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(input, {e2: ['MATERIAL_EVENT']}, {
+          e2: [{kind: 'SECTOR', name: 'US stocks'}]
+        });
+      }
+    }
+  }).service;
+  const genericOnlyOutput = await genericOnly.assemble(request());
+  assert.deepEqual(genericOnlyOutput.marketPackages[0].evidenceContext.broadMarketFocus, []);
+  assert.equal(validateClaudeAnalysisInput(genericOnlyOutput), true);
+});
+
 test('admits provisional CNBC evidence only while the 50-item classifier bound remains safe', async () => {
   let classifiedInput = null;
   const {service} = harness({
