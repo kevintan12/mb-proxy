@@ -239,7 +239,7 @@ test('skips stale candidates and returns the later exact target-session recap', 
   assert.equal(result.validation.targetSessionDate, target);
 });
 
-test('skips a timestamp-reversed candidate and considers the next bounded result', async () => {
+test('retains a same-session candidate with reversed optional modification metadata', async () => {
   const firstUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-reversed.html';
   const secondUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-valid.html';
   const calls = [];
@@ -258,17 +258,18 @@ test('skips a timestamp-reversed candidate and considers the next bounded result
     }, url), {url});
   }, {onDiagnostics: value => diagnostics.push(value)})
     .discoverAndValidateRecap({targetSessionDate});
-  assert.deepEqual(calls, ['https://api.anthropic.com/v1/messages', firstUrl, secondUrl]);
+  assert.deepEqual(calls, ['https://api.anthropic.com/v1/messages', firstUrl]);
   assert.equal(result.type, 'VALIDATED');
-  assert.equal(result.discovery.url, secondUrl);
-  assert.equal(result.validation.url, secondUrl);
+  assert.equal(result.discovery.url, firstUrl);
+  assert.equal(result.validation.url, firstUrl);
+  assert.equal(result.validation.dateModified, null);
   assert.equal(result.validation.targetSessionDate, targetSessionDate);
   assert.deepEqual(diagnostics.filter(value => value.stage === 'yahooRecapSessionCandidateValidation')
     .map(value => [value.rank, value.outcome]), [
-    [1, 'NOT_VALIDATED'], [2, 'VALIDATED']
+    [1, 'VALIDATED']
   ]);
   assert.deepEqual(diagnostics.filter(value => value.stage === 'yahooRecapSessionValidation')
-    .map(value => value.outcomeType), ['NOT_VALIDATED_TIMESTAMP_ORDER', 'VALIDATED']);
+    .map(value => value.outcomeType), ['VALIDATED']);
 });
 
 test('returns optional absence without stale substitution after the bounded attempt ceiling', async () => {

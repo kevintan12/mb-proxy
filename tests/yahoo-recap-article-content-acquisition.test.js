@@ -837,7 +837,7 @@ test('treats validated dateModified as a nullable non-regressing lower bound', a
   assert.equal(removed.type, 'INVALID_METADATA');
 });
 
-test('rejects an acquisition dateModified before datePublished', async () => {
+test('ignores reversed acquisition dateModified only when validation had no update', async () => {
   const diagnostics = [];
   const result = await service(async () => response(html(article({
     dateModified: '2026-09-09T16:29:59-04:00'
@@ -846,13 +846,21 @@ test('rejects an acquisition dateModified before datePublished', async () => {
       ...input(),
       validation: frozenValidation({dateModified: null})
     });
-  assert.equal(result.type, 'INVALID_METADATA');
-  assert.equal(diagnostics[0].failureType, 'DATE_MODIFIED_BEFORE_PUBLISHED');
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(result.articleContent.updatedAt, null);
+  assert.equal(diagnostics[0].outcome, 'SUCCESS');
   const serialized = JSON.stringify(diagnostics[0]);
   for (const forbidden of [
     '2026-09-09T16:29:59-04:00', canonicalUrl,
     'Stock market today: September 9 recap', 'Yahoo Finance', 'articleBody'
   ]) assert.equal(serialized.includes(forbidden), false, forbidden);
+
+  const withValidatedUpdate = await service(async () => response(html(article({
+    dateModified: '2026-09-09T16:29:59-04:00'
+  }))), {onDiagnostics(value) { diagnostics.push(value); }})
+    .acquireArticleContent(input());
+  assert.equal(withValidatedUpdate.type, 'INVALID_METADATA');
+  assert.equal(diagnostics[1].failureType, 'DATE_MODIFIED_BEFORE_PUBLISHED');
 });
 
 test('enforces article-text and normalized-result bounds atomically without truncation', async () => {

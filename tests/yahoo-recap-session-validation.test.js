@@ -127,15 +127,17 @@ test('dateModified cannot override a mismatched datePublished', async () => {
   assert.equal(result.type, 'NOT_VALIDATED');
 });
 
-test('same-session dateModified before datePublished is skipped with a sanitized diagnostic', async () => {
+test('same-session reversed dateModified is ignored as optional metadata', async () => {
   const diagnostics = [];
   const html = articleHtml({dateModified: '2026-09-09T16:29:59-04:00'});
   const result = await service(async () => response(html), {
     onDiagnostics: value => diagnostics.push(value)
   }).validateYahooRecapSession(input());
-  assert.deepEqual(result, {ok: true, type: 'NOT_VALIDATED', validation: null});
+  assert.equal(result.type, 'VALIDATED');
+  assert.equal(result.validation.dateModified, null);
+  assert.equal(result.validation.datePublished, '2026-09-09T20:30:00.000Z');
   assert.equal(diagnostics.length, 1);
-  assert.equal(diagnostics[0].outcomeType, 'NOT_VALIDATED_TIMESTAMP_ORDER');
+  assert.equal(diagnostics[0].outcomeType, 'VALIDATED');
   assert.equal(diagnostics[0].fetchCount, 1);
   assert.equal(JSON.stringify(diagnostics).includes(currentUrl), false);
   assert.equal(JSON.stringify(diagnostics).includes('2026-09-09T16:29:59'), false);
@@ -149,7 +151,7 @@ test('dateModified equal to datePublished remains valid', async () => {
   assert.equal(result.validation.dateModified, result.validation.datePublished);
 });
 
-test('skips a reversed-timestamp JSON-LD node and validates a later matching node', async () => {
+test('prefers a later fully valid JSON-LD node over reversed-modification fallback', async () => {
   const bad = articleHtml({dateModified: '2026-09-09T16:29:59-04:00'});
   const goodNode = {
     '@type': 'LiveBlogPosting', headline: 'Validated September 9 recap',
