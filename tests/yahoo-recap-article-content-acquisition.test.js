@@ -201,6 +201,73 @@ test('diagnoses bounded Yahoo retrieval, size, JSON-LD and timestamp failures wi
   }
 });
 
+test('subtypes generic metadata failures without changing acquisition results or leaking values', async () => {
+  const missingPublisher = article();
+  delete missingPublisher.publisher;
+  const cases = [
+    {
+      expectedDiagnostic: 'MISSING_METADATA_URL',
+      articleValue: article({mainEntityOfPage: undefined})
+    },
+    {
+      expectedDiagnostic: 'MISSING_HEADLINE',
+      articleValue: article({headline: ' '})
+    },
+    {
+      expectedDiagnostic: 'HEADLINE_TOO_LARGE',
+      articleValue: article({headline: 'x'.repeat(513)}),
+      inputValue: {...input(), validation: frozenValidation({headline: null})}
+    },
+    {
+      expectedDiagnostic: 'INVALID_PUBLISHER',
+      articleValue: article({publisher: {name: ' private-publisher'}})
+    },
+    {
+      expectedDiagnostic: 'PUBLISHER_MISSING',
+      articleValue: missingPublisher
+    },
+    {
+      expectedDiagnostic: 'PUBLISHER_CONFLICT',
+      articleValue: [
+        article({publisher: {name: 'Yahoo Finance'}}),
+        article({publisher: {name: 'Other Private Publisher'}})
+      ]
+    },
+    {
+      expectedDiagnostic: 'DATE_MODIFIED_CONFLICT',
+      articleValue: [
+        article(),
+        article({dateModified: '2026-09-09T17:01:00-04:00'})
+      ]
+    },
+    {
+      expectedDiagnostic: 'DATE_MODIFIED_MISMATCH',
+      articleValue: article({dateModified: '2026-09-09T17:01:00-04:00'})
+    }
+  ];
+  for (const item of cases) {
+    const diagnostics = [];
+    const output = await service(async () => response(html(item.articleValue)), {
+      onDiagnostics(value) { diagnostics.push(value); }
+    }).acquireArticleContent(item.inputValue || input());
+    assert.equal(output.type, 'INVALID_METADATA', item.expectedDiagnostic);
+    assert.equal(output.articleContent, null);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].stage, 'yahooRecapArticleAcquisition');
+    assert.equal(diagnostics[0].outcome, 'FAILURE');
+    assert.equal(diagnostics[0].failureType, item.expectedDiagnostic);
+    assert.deepEqual(Object.keys(diagnostics[0]), [
+      'stage', 'outcome', 'httpStatus', 'responseBytes', 'contentType',
+      'elapsedMs', 'failureType', 'candidateRank'
+    ]);
+    const serialized = JSON.stringify(diagnostics[0]);
+    for (const forbidden of [
+      'private-publisher', 'Other Private Publisher', canonicalUrl,
+      '2026-09-09T17:01:00-04:00', 'articleBody'
+    ]) assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+});
+
 test('preserves explicit structured publisher identity independently of Yahoo hosting', async () => {
   const result = await service(async () => response(html(article({
     publisher: {'@type': 'Organization', name: 'Independent Publisher'}
