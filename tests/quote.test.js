@@ -119,11 +119,11 @@ function claudeAnalysisOutput(input) {
     },
     sections: REPORT_SECTION_NAMES.map((name, index) => ({
       name,
-      content: index === 10 ? null : index === 4
-        ? EMPTY_INITIATING_LIST_CONTENT.myStocks : index === 3
+      content: index === 7 ? null : index === 3
+        ? EMPTY_INITIATING_LIST_CONTENT.myStocks : index === 2
           ? 'Technology led the broad market.' : 'Supported analysis.',
-      evidenceRefs: index === 10 || index === 4 ? [] : ['e1'],
-      telemetryRefs: index === 10 || index === 4 ? [] : ['t1'],
+      evidenceRefs: index === 7 || index === 3 ? [] : ['e1'],
+      telemetryRefs: index === 7 || index === 3 ? [] : ['t1'],
       uncertainties: []
     })),
     evidenceReferences: ['e1'],

@@ -84,10 +84,10 @@ test('thin fixture remains canonical and supports deterministic degraded output'
   assert.equal(validateClaudeAnalysisInput(input), true);
   const output = supportedOutput(input, {opportunity: false});
   assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
-  assert.equal(output.sections[7].content, null);
-  assert.deepEqual(output.sections[7].evidenceRefs, []);
-  assert.deepEqual(output.sections[7].uncertainties, ['No defensible opportunity is supported.']);
-  assert.deepEqual(output.sections[3], {
+  assert.match(output.sections[5].content, /risk/i);
+  assert.doesNotMatch(output.sections[5].content, /opportunity/i);
+  assert.deepEqual(output.sections[5].evidenceRefs, ['e3']);
+  assert.deepEqual(output.sections[2], {
     name: 'STOCKS & SECTORS IN FOCUS',
     content: null,
     evidenceRefs: [],
@@ -95,8 +95,7 @@ test('thin fixture remains canonical and supports deterministic degraded output'
     uncertainties: ['Validated broad-market company or sector evidence was unavailable.']
   });
   assert.deepEqual(output.evidenceGaps, [
-    'Validated broad-market company or sector evidence was unavailable.',
-    'No defensible evidence-supported opportunity was available.'
+    'Validated broad-market company or sector evidence was unavailable.'
   ]);
 });
 
@@ -111,17 +110,59 @@ test('post-close and portfolio overlap fixtures retain separate temporal and lis
   assert.deepEqual(input.portfolioContext.watchlist[0].evidenceRefs, []);
 });
 
-test('supported opportunity and Sections 7-10 grounding pass the complete validator', () => {
+test('combined supported risk and opportunity pass the complete validator', () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
   assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
-  assert.deepEqual(output.sections[3].evidenceRefs, ['e4', 'e5']);
-  assert.deepEqual(output.sections[3].telemetryRefs, ['t1']);
-  assert.deepEqual(output.sections[4].evidenceRefs, ['e2']);
-  assert.deepEqual(output.sections[4].telemetryRefs, ['t2']);
-  assert.deepEqual(output.sections[7].evidenceRefs, ['e5']);
-  assert.match(output.sections[7].content, /why|support|Constructive/i);
-  assert.doesNotMatch(output.sections[7].content, /guarantee|certain return/i);
+  assert.deepEqual(output.sections[2].evidenceRefs, ['e4', 'e5']);
+  assert.deepEqual(output.sections[2].telemetryRefs, ['t1']);
+  assert.deepEqual(output.sections[3].evidenceRefs, ['e2']);
+  assert.deepEqual(output.sections[3].telemetryRefs, ['t2']);
+  assert.deepEqual(output.sections[5].evidenceRefs, ['e3', 'e5']);
+  assert.match(output.sections[5].content, /why|support|Constructive/i);
+  assert.doesNotMatch(output.sections[5].content, /guarantee|certain return/i);
+});
+
+test('Section 6 keeps risk-only output while localizing unsupported or generic opportunities', async () => {
+  const input = richCompletedUsWeekInput();
+  const risksOnly = supportedOutput(input, {opportunity: false});
+  assert.equal(validateClaudeAnalysisOutput(risksOnly, input).valid, true);
+
+  const opportunityOnly = supportedOutput(input);
+  opportunityOnly.sections[5].content =
+    'Constructive health-care developments support a qualified sector opportunity.';
+  opportunityOnly.sections[5].evidenceRefs = ['e5'];
+  assert.equal(validateClaudeAnalysisOutput(opportunityOnly, input).valid, true);
+
+  for (const [content, expectedCategory] of [
+    ['Policy uncertainty is a risk, while an unrelated company rally is a constructive opportunity.',
+      'UNSUPPORTED_OPPORTUNITY_CLAIM'],
+    ['Policy uncertainty is a risk, while an oversold rebound creates a buy-the-dip opportunity.',
+      'GENERIC_OPPORTUNITY_CLAIM']
+  ]) {
+    const output = supportedOutput(input);
+    output.sections[5].content = content;
+    output.sections[5].evidenceRefs = ['e3'];
+    assert.equal(validateClaudeAnalysisOutput(output, input).valid, false);
+    const diagnostics = [];
+    const result = await invokeFixture(input, output, diagnostics);
+    assert.equal(result.type, 'SUCCESS', result.message);
+    assert.equal(result.output.status, 'DEGRADED');
+    assert.deepEqual(result.output.sections[5], {
+      name: 'KEY RISKS & OPPORTUNITIES', content: null,
+      evidenceRefs: [], telemetryRefs: [],
+      uncertainties: [
+        'Constructive opportunity support could not be validated from the generated citation set.'
+      ]
+    });
+    assert.deepEqual(diagnostics.filter(value =>
+      value.stage === 'claudeAnalysisSectionNormalization'), [{
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 5,
+      violationCategory: expectedCategory, suppliedReferenceCount: 1,
+      allowedReferenceCount: 2, offendingReferenceCount: 1
+    }]);
+    assert.equal(JSON.stringify(diagnostics).includes(content), false);
+  }
 });
 
 test('rich and thin fixtures survive the complete final invocation boundary without network access', async () => {
@@ -153,7 +194,7 @@ test('rich and thin fixtures survive the complete final invocation boundary with
 
 test('NORMAL cannot contain a null analytical section, while localized DEGRADED output remains valid', () => {
   const input = richCompletedUsWeekInput();
-  for (const index of [3, 7]) {
+  for (const index of [2, 5]) {
     const normalWithNull = supportedOutput(input);
     normalWithNull.sections[index] = {
       name: normalWithNull.sections[index].name,
@@ -177,53 +218,53 @@ test('an optional provider gap does not force DEGRADED when supported analytical
   const output = supportedOutput(input);
   assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
   assert.equal(output.status, 'NORMAL');
-  assert.equal(output.sections.every((section, index) => index === 10 || section.content !== null), true);
+  assert.equal(output.sections.every((section, index) => index === 7 || section.content !== null), true);
 });
 
-test('Section 4 rejects a portfolio reference without independent broad-market focus', async () => {
+test('Section 3 rejects a portfolio reference without independent broad-market focus', async () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
-  output.sections[3].evidenceRefs = ['e2', 'e4', 'e5'];
+  output.sections[2].evidenceRefs = ['e2', 'e4', 'e5'];
   output.evidenceReferences = ['e2', 'e3', 'e4', 'e5', 'e1'];
   assert.equal(validateClaudeAnalysisOutput(output, input).errors.includes(
-    'sections[3]: evidence references must belong to broad-market focus'), true);
+    'sections[2]: evidence references must belong to broad-market focus'), true);
   const originalFocus = input.marketPackages[0].evidenceContext.broadMarketFocus;
   const diagnostics = [];
   const result = await invokeFixture(input, output, diagnostics);
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.status, 'DEGRADED');
-  assert.deepEqual(result.output.sections[3], {
+  assert.deepEqual(result.output.sections[2], {
     name: 'STOCKS & SECTORS IN FOCUS', content: null, evidenceRefs: [], telemetryRefs: [],
-    uncertainties: ['Broad-market company and sector support could not be validated from the generated Section 4 scope.']
+    uncertainties: ['Broad-market company and sector support could not be validated from the generated Section 3 scope.']
   });
-  assert.deepEqual(result.output.sections[4].evidenceRefs, ['e2']);
-  assert.deepEqual(result.output.sections[4].telemetryRefs, ['t2']);
+  assert.deepEqual(result.output.sections[3].evidenceRefs, ['e2']);
+  assert.deepEqual(result.output.sections[3].telemetryRefs, ['t2']);
   assert.deepEqual(input.marketPackages[0].evidenceContext.broadMarketFocus, originalFocus);
   assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization'), [{
-    stage: 'claudeAnalysisSectionNormalization', sectionIndex: 3,
+    stage: 'claudeAnalysisSectionNormalization', sectionIndex: 2,
     violationCategory: 'NON_FOCUS_EVIDENCE', suppliedReferenceCount: 3,
     allowedReferenceCount: 2, offendingReferenceCount: 1
   }]);
   assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
 });
 
-test('Section 4 accepts focus evidence and benchmark telemetry but localizes stock telemetry', async () => {
+test('Section 3 accepts focus evidence and benchmark telemetry but localizes stock telemetry', async () => {
   const input = richCompletedUsWeekInput();
   const valid = supportedOutput(input);
   assert.equal(validateClaudeAnalysisOutput(valid, input).valid, true);
-  assert.deepEqual(valid.sections[3].telemetryRefs, ['t1']);
+  assert.deepEqual(valid.sections[2].telemetryRefs, ['t1']);
   const invalid = supportedOutput(input);
-  invalid.sections[3].telemetryRefs = ['t1', 't2'];
+  invalid.sections[2].telemetryRefs = ['t1', 't2'];
   assert.equal(validateClaudeAnalysisOutput(invalid, input).errors.includes(
-    'sections[3]: telemetry references must belong to benchmark telemetry'), true);
+    'sections[2]: telemetry references must belong to benchmark telemetry'), true);
   const result = await invokeFixture(input, invalid);
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.equal(result.output.sections[3].content, null);
-  assert.deepEqual(result.output.sections[3].telemetryRefs, []);
-  assert.deepEqual(result.output.sections[4].telemetryRefs, ['t2']);
+  assert.equal(result.output.sections[2].content, null);
+  assert.deepEqual(result.output.sections[2].telemetryRefs, []);
+  assert.deepEqual(result.output.sections[3].telemetryRefs, ['t2']);
 });
 
-test('Section 4 localizes uncited portfolio symbols and instrument names, but allows independently focused companies', async () => {
+test('Section 3 localizes uncited portfolio symbols and instrument names, but allows independently focused companies', async () => {
   const input = richCompletedUsWeekInput({stockInstrumentName: 'Microsoft'});
   for (const prose of [
     'Broadcom led semiconductor shares while MSFT also advanced.',
@@ -231,17 +272,17 @@ test('Section 4 localizes uncited portfolio symbols and instrument names, but al
     'Broadcom led semiconductor shares while watchlist name AAPL also advanced.'
   ]) {
     const output = supportedOutput(input);
-    output.sections[3].content = prose;
+    output.sections[2].content = prose;
     assert.equal(validateClaudeAnalysisOutput(output, input).errors.includes(
-      'sections[3]: portfolio company requires independent broad-market focus'), true);
+      'sections[2]: portfolio company requires independent broad-market focus'), true);
     const diagnostics = [];
     const result = await invokeFixture(input, output, diagnostics);
     assert.equal(result.type, 'SUCCESS', result.message);
-    assert.equal(result.output.sections[3].content, null);
-    assert.deepEqual(result.output.sections[3].evidenceRefs, []);
-    assert.deepEqual(result.output.sections[4].evidenceRefs, ['e2']);
+    assert.equal(result.output.sections[2].content, null);
+    assert.deepEqual(result.output.sections[2].evidenceRefs, []);
+    assert.deepEqual(result.output.sections[3].evidenceRefs, ['e2']);
     assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization'), [{
-      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 3,
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 2,
       violationCategory: 'UNFOCUSED_PORTFOLIO_MENTION', suppliedReferenceCount: 0,
       allowedReferenceCount: 0, offendingReferenceCount: 1
     }]);
@@ -252,16 +293,16 @@ test('Section 4 localizes uncited portfolio symbols and instrument names, but al
     stockInstrumentName: 'Microsoft', includeFollowedFocus: true
   });
   const output = supportedOutput(focused);
-  output.sections[3].content = 'Microsoft and Broadcom led their respective groups; MSFT remained in focus.';
+  output.sections[2].content = 'Microsoft and Broadcom led their respective groups; MSFT remained in focus.';
   assert.equal(validateClaudeAnalysisOutput(output, focused).errors.includes(
-    'sections[3]: portfolio company requires independent broad-market focus'), true);
-  output.sections[3].evidenceRefs = ['e2', 'e4', 'e5'];
+    'sections[2]: portfolio company requires independent broad-market focus'), true);
+  output.sections[2].evidenceRefs = ['e2', 'e4', 'e5'];
   assert.equal(validateClaudeAnalysisOutput(output, focused).valid, true);
   const result = await invokeFixture(focused, output);
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.status, 'NORMAL');
+  assert.deepEqual(result.output.sections[2], output.sections[2]);
   assert.deepEqual(result.output.sections[3], output.sections[3]);
-  assert.deepEqual(result.output.sections[4], output.sections[4]);
 });
 
 test('a repaired broad-market focus package preserves valid causal and initiating-list sections', async () => {
@@ -274,35 +315,35 @@ test('a repaired broad-market focus package preserves valid causal and initiatin
   const result = await invokeFixture(input, output);
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.deepEqual(result.output, output);
-  assert.deepEqual(result.output.sections[2].evidenceRefs, ['e2', 'e3']);
-  assert.deepEqual(result.output.sections[3].evidenceRefs, ['e4', 'e5']);
-  assert.deepEqual(result.output.sections[4].evidenceRefs, ['e2']);
-  assert.deepEqual(result.output.sections[4].telemetryRefs, ['t2']);
+  assert.deepEqual(result.output.sections[1].evidenceRefs, ['e2', 'e3']);
+  assert.deepEqual(result.output.sections[2].evidenceRefs, ['e4', 'e5']);
+  assert.deepEqual(result.output.sections[3].evidenceRefs, ['e2']);
+  assert.deepEqual(result.output.sections[3].telemetryRefs, ['t2']);
   assert.deepEqual(input.marketPackages[0].evidenceContext.materialEvents, originalRoles.materialEvents);
   assert.deepEqual(input.marketPackages[0].evidenceContext.principalCatalysts,
     originalRoles.principalCatalysts);
   assert.deepEqual(input.portfolioContext.myStocks[0].evidenceRefs, ['e2']);
 });
 
-test('localizes uncited causality and broad-market evidence leaking into Section 5 independently', async () => {
+test('localizes uncited driver causality and broad-market evidence leaking into Section 4 independently', async () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
-  output.sections[2].evidenceRefs = ['e1', 'e5'];
-  output.sections[4].evidenceRefs = ['e2', 'e4'];
+  output.sections[1].evidenceRefs = ['e1', 'e5'];
+  output.sections[3].evidenceRefs = ['e2', 'e4'];
   const rawErrors = validateClaudeAnalysisOutput(output, input).errors;
-  assert.equal(rawErrors.includes('sections[2]: market causality requires a principal catalyst'), true);
-  assert.equal(rawErrors.includes('sections[4]: evidence references must belong to the initiating list'), true);
+  assert.equal(rawErrors.includes('sections[1]: market causality requires a principal catalyst'), true);
+  assert.equal(rawErrors.includes('sections[3]: evidence references must belong to the initiating list'), true);
 
   const diagnostics = [];
   const result = await invokeFixture(input, output, diagnostics);
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.status, 'DEGRADED');
-  assert.deepEqual(result.output.sections[2], {
-    name: 'WHAT DROVE / IS DRIVING THE MARKET', content: null,
+  assert.deepEqual(result.output.sections[1], {
+    name: 'KEY MARKET DRIVERS', content: null,
     evidenceRefs: [], telemetryRefs: [],
     uncertainties: ['Supported market causality could not be established from the generated citation set.']
   });
-  assert.deepEqual(result.output.sections[4], {
+  assert.deepEqual(result.output.sections[3], {
     name: 'MY STOCKS & WATCHLIST - MATERIAL MOVEMENTS', content: null,
     evidenceRefs: [], telemetryRefs: [],
     uncertainties: ['Initiating-list support could not be validated from the generated citation set.']
@@ -311,17 +352,17 @@ test('localizes uncited causality and broad-market evidence leaking into Section
     'Supported market causality could not be established from the generated citation set.',
     'Initiating-list support could not be validated from the generated citation set.'
   ]);
-  assert.deepEqual(result.output.sections[1].evidenceRefs, ['e3']);
-  assert.deepEqual(result.output.sections[3].evidenceRefs, ['e4', 'e5']);
+  assert.deepEqual(result.output.sections[1].evidenceRefs, []);
+  assert.deepEqual(result.output.sections[2].evidenceRefs, ['e4', 'e5']);
   assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
   assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization'), [
     {
-      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 2,
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 1,
       violationCategory: 'MISSING_PRINCIPAL_CATALYST',
       suppliedReferenceCount: 2, allowedReferenceCount: 3, offendingReferenceCount: 2
     },
     {
-      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 4,
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 3,
       violationCategory: 'NON_INITIATING_EVIDENCE',
       suppliedReferenceCount: 2, allowedReferenceCount: 1, offendingReferenceCount: 1
     }
@@ -335,24 +376,24 @@ test('localizes uncited causality and broad-market evidence leaking into Section
     ['e1', 'e2', 'e3', 'e4', 'e5']);
 });
 
-test('localizes non-initiating Section 5 telemetry without filtering references into unsupported prose', async () => {
+test('localizes non-initiating Section 4 telemetry without filtering references into unsupported prose', async () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
-  output.sections[4].telemetryRefs = ['t1', 't2'];
+  output.sections[3].telemetryRefs = ['t1', 't2'];
   assert.equal(validateClaudeAnalysisOutput(output, input).errors.includes(
-    'sections[4]: telemetry references must belong to the initiating list'), true);
+    'sections[3]: telemetry references must belong to the initiating list'), true);
   const diagnostics = [];
   const result = await invokeFixture(input, output, diagnostics);
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.status, 'DEGRADED');
-  assert.equal(result.output.sections[4].content, null);
-  assert.deepEqual(result.output.sections[4].evidenceRefs, []);
-  assert.deepEqual(result.output.sections[4].telemetryRefs, []);
-  assert.deepEqual(result.output.sections[4].uncertainties,
+  assert.equal(result.output.sections[3].content, null);
+  assert.deepEqual(result.output.sections[3].evidenceRefs, []);
+  assert.deepEqual(result.output.sections[3].telemetryRefs, []);
+  assert.deepEqual(result.output.sections[3].uncertainties,
     ['Initiating-list support could not be validated from the generated citation set.']);
-  assert.deepEqual(result.output.sections[3].evidenceRefs, ['e4', 'e5']);
+  assert.deepEqual(result.output.sections[2].evidenceRefs, ['e4', 'e5']);
   assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization'), [{
-    stage: 'claudeAnalysisSectionNormalization', sectionIndex: 4,
+    stage: 'claudeAnalysisSectionNormalization', sectionIndex: 3,
     violationCategory: 'NON_INITIATING_TELEMETRY',
     suppliedReferenceCount: 2, allowedReferenceCount: 1, offendingReferenceCount: 1
   }]);
@@ -362,9 +403,9 @@ test('localizes non-initiating Section 5 telemetry without filtering references 
 test('does not launder unknown global references through section-local normalization', async () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
+  output.sections[1].evidenceRefs = ['e999'];
   output.sections[2].evidenceRefs = ['e999'];
   output.sections[3].evidenceRefs = ['e999'];
-  output.sections[4].evidenceRefs = ['e999'];
   const diagnostics = [];
   const result = await invokeFixture(input, output, diagnostics);
   assert.equal(result.type, 'CONTRACT_FAILURE');
@@ -377,14 +418,14 @@ test('preserves the deterministic empty initiating-list statement', async () => 
   input.portfolioContext.myStocks = [];
   assert.equal(validateClaudeAnalysisInput(input), true);
   const output = supportedOutput(input);
-  output.sections[4] = {
-    name: output.sections[4].name,
+  output.sections[3] = {
+    name: output.sections[3].name,
     content: 'No securities are configured in My Stocks.',
     evidenceRefs: [], telemetryRefs: [], uncertainties: []
   };
   const result = await invokeFixture(input, output);
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.deepEqual(result.output.sections[4], output.sections[4]);
+  assert.deepEqual(result.output.sections[3], output.sections[3]);
 });
 
 test('plain-English fixtures characterize the prompt-owned quality boundary without runtime jargon rejection', () => {

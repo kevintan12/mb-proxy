@@ -157,10 +157,10 @@ function sections({content = 'Supported analysis.', evidenceRefs = ['e1'], telem
   return REPORT_SECTION_NAMES.map((name, index) => ({
     name,
     content: index === REPORT_SECTION_NAMES.length - 1 ? null
-      : index === 4 ? EMPTY_INITIATING_LIST_CONTENT[initiatingList]
-        : content === null ? null : index === 3 ? 'Supported Technology analysis.' : content,
-    evidenceRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 4 ? [] : evidenceRefs.slice(),
-    telemetryRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 4 ? [] : telemetryRefs.slice(),
+      : index === 3 ? EMPTY_INITIATING_LIST_CONTENT[initiatingList]
+        : content === null ? null : index === 2 ? 'Supported Technology analysis.' : content,
+    evidenceRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 3 ? [] : evidenceRefs.slice(),
+    telemetryRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 3 ? [] : telemetryRefs.slice(),
     uncertainties: []
   }));
 }
@@ -168,7 +168,7 @@ function sections({content = 'Supported analysis.', evidenceRefs = ['e1'], telem
 function normalOutput(input, overrides = {}) {
   const reportSections = sections({initiatingList: input.analysisRequest.initiatingList});
   const firstFocus = input.marketPackages.flatMap(item => item.evidenceContext.broadMarketFocus)[0];
-  if (firstFocus) reportSections[3].content = `Supported ${firstFocus.subjects[0].name} analysis.`;
+  if (firstFocus) reportSections[2].content = `Supported ${firstFocus.subjects[0].name} analysis.`;
   return {
     status: 'NORMAL',
     reportContext: reportContext(input),
@@ -188,10 +188,9 @@ test('creates the frozen MARKET_BRIEF package with deterministic shape and requi
   assert.equal(REPORT_HEADER, 'REPORT HEADER / ANALYSIS CONTEXT');
   assert.deepEqual(REPORT_SECTION_NAMES, [
     'EXECUTIVE MARKET SUMMARY', 'KEY MARKET DRIVERS',
-    'WHAT DROVE / IS DRIVING THE MARKET', 'STOCKS & SECTORS IN FOCUS',
+    'STOCKS & SECTORS IN FOCUS',
     'MY STOCKS & WATCHLIST - MATERIAL MOVEMENTS', 'MARKET INTERPRETATION',
-    'KEY RISKS', 'OPPORTUNITIES', 'WHAT TO WATCH FOR NEXT',
-    'MARKETBRIEF TAKEAWAY', 'FURTHER READINGS'
+    'KEY RISKS & OPPORTUNITIES', 'WHAT TO WATCH FOR NEXT', 'FURTHER READINGS'
   ]);
   assert.deepEqual(Object.keys(input), CLAUDE_ANALYSIS_INPUT_KEYS);
   assert.equal(input.analysisRequest.generatedAt, '2026-09-06T10:00:00.000Z');
@@ -202,6 +201,23 @@ test('creates the frozen MARKET_BRIEF package with deterministic shape and requi
   assert.deepEqual(input.outputRequirements.sections, REPORT_SECTION_REQUIREMENTS);
   assert.equal(input.outputRequirements.maximumWords, 2500);
   assert.equal(validateClaudeAnalysisInput(input), true);
+});
+
+test('rejects removed headings and any report that is not exactly eight ordered sections', () => {
+  const input = canonicalInput();
+  const valid = normalOutput(input);
+  assert.equal(valid.sections.length, 8);
+  assert.equal(valid.sections[7].name, 'FURTHER READINGS');
+  assert.equal(validateClaudeAnalysisOutput(valid, input).valid, true);
+  for (const removed of ['WHAT DROVE / IS DRIVING THE MARKET', 'MARKETBRIEF TAKEAWAY',
+    'KEY RISKS', 'OPPORTUNITIES']) {
+    const output = structuredClone(valid);
+    output.sections[5].name = removed;
+    assert.equal(validateClaudeAnalysisOutput(output, input).valid, false, removed);
+  }
+  const extra = structuredClone(valid);
+  extra.sections.push({...extra.sections[7], name: 'MARKETBRIEF TAKEAWAY'});
+  assert.equal(validateClaudeAnalysisOutput(extra, input).errors.includes('invalid report sections'), true);
 });
 
 test('enforces selected scope and deterministic US, SG, HK ordering for ALL', () => {
@@ -458,11 +474,11 @@ function portfolioScopedInput(initiatingList) {
   });
 }
 
-test('limits Section 5 references to the initiating list without changing portfolio membership', () => {
+test('limits Section 4 references to the initiating list without changing portfolio membership', () => {
   const input = portfolioScopedInput('myStocks');
   const valid = normalOutput(input);
-  valid.sections[4] = {
-    name: REPORT_SECTION_NAMES[4], content: 'D05 moved materially.',
+  valid.sections[3] = {
+    name: REPORT_SECTION_NAMES[3], content: 'D05 moved materially.',
     evidenceRefs: ['e2'], telemetryRefs: ['t2'], uncertainties: []
   };
   valid.evidenceReferences = ['e1', 'e2'];
@@ -471,8 +487,8 @@ test('limits Section 5 references to the initiating list without changing portfo
   assert.deepEqual(input.portfolioContext.watchlist.map(item => item.symbol), ['^STI']);
 
   const wrongList = JSON.parse(JSON.stringify(valid));
-  wrongList.sections[4].evidenceRefs = ['e1'];
-  wrongList.sections[4].telemetryRefs = ['t1'];
+  wrongList.sections[3].evidenceRefs = ['e1'];
+  wrongList.sections[3].telemetryRefs = ['t1'];
   wrongList.evidenceReferences = ['e1'];
   const validation = validateClaudeAnalysisOutput(wrongList, input);
   assert.equal(validation.valid, false);
@@ -480,35 +496,35 @@ test('limits Section 5 references to the initiating list without changing portfo
 
   const watchlistInput = portfolioScopedInput('watchlist');
   const watchlistOutput = normalOutput(watchlistInput);
-  watchlistOutput.sections[4] = {
-    name: REPORT_SECTION_NAMES[4], content: 'The STI moved materially.',
+  watchlistOutput.sections[3] = {
+    name: REPORT_SECTION_NAMES[3], content: 'The STI moved materially.',
     evidenceRefs: ['e1'], telemetryRefs: ['t1'], uncertainties: []
   };
   assert.equal(validateClaudeAnalysisOutput(watchlistOutput, watchlistInput).valid, true);
-  watchlistOutput.sections[4].evidenceRefs = ['e2'];
-  watchlistOutput.sections[4].telemetryRefs = ['t2'];
+  watchlistOutput.sections[3].evidenceRefs = ['e2'];
+  watchlistOutput.sections[3].telemetryRefs = ['t2'];
   watchlistOutput.evidenceReferences = ['e1', 'e2'];
   assert.equal(validateClaudeAnalysisOutput(watchlistOutput, watchlistInput).valid, false);
 });
 
-test('allows only initiating-list upcoming-event evidence in Section 5', () => {
+test('allows only initiating-list upcoming-event evidence in Section 4', () => {
   const input = portfolioScopedInput('myStocks');
   const output = normalOutput(input);
-  output.sections[4] = {
-    name: REPORT_SECTION_NAMES[4], content: 'D05 has a relevant upcoming event.',
+  output.sections[3] = {
+    name: REPORT_SECTION_NAMES[3], content: 'D05 has a relevant upcoming event.',
     evidenceRefs: ['e3'], telemetryRefs: ['t2'], uncertainties: []
   };
   output.evidenceReferences = ['e1', 'e3'];
   assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
 
-  output.sections[4].evidenceRefs = ['e4'];
+  output.sections[3].evidenceRefs = ['e4'];
   output.evidenceReferences = ['e1', 'e4'];
   const validation = validateClaudeAnalysisOutput(output, input);
   assert.equal(validation.valid, false);
   assert.match(validation.errors.join(' '), /initiating list/);
 });
 
-test('requires the deterministic empty-list Section 5 statement without downgrade or substitution', () => {
+test('requires the deterministic empty-list Section 4 statement without downgrade or substitution', () => {
   const input = createClaudeAnalysisInput({
     analysisRequest: {
       selectedScope: 'SG', initiatingList: 'watchlist', generatedAt: '2026-09-06T10:00:00Z',
@@ -523,14 +539,14 @@ test('requires the deterministic empty-list Section 5 statement without downgrad
     }
   });
   const output = normalOutput(input);
-  assert.equal(output.sections[4].content, 'No securities are configured in Watchlist.');
-  assert.deepEqual(output.sections[4].evidenceRefs, []);
-  assert.deepEqual(output.sections[4].telemetryRefs, []);
+  assert.equal(output.sections[3].content, 'No securities are configured in Watchlist.');
+  assert.deepEqual(output.sections[3].evidenceRefs, []);
+  assert.deepEqual(output.sections[3].telemetryRefs, []);
   assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
 
   const substituted = JSON.parse(JSON.stringify(output));
-  substituted.sections[4] = {
-    name: REPORT_SECTION_NAMES[4], content: 'The other list moved.',
+  substituted.sections[3] = {
+    name: REPORT_SECTION_NAMES[3], content: 'The other list moved.',
     evidenceRefs: ['e1'], telemetryRefs: ['t1'], uncertainties: []
   };
   assert.equal(validateClaudeAnalysisOutput(substituted, input).valid, false);
@@ -581,7 +597,7 @@ test('rejects reordered sections, unknown references, model URLs and mismatched 
   contextMismatch.reportContext.selectedScope = 'US';
   assert.equal(validateClaudeAnalysisOutput(contextMismatch, input).valid, false);
   const malformedReferences = normalOutput(input);
-  malformedReferences.sections[10].evidenceRefs = null;
+  malformedReferences.sections[7].evidenceRefs = null;
   assert.equal(validateClaudeAnalysisOutput(malformedReferences, input).valid, false);
   const malformedUncertainties = normalOutput(input);
   malformedUncertainties.sections[0].uncertainties = {text: 'not an array'};
@@ -591,15 +607,15 @@ test('rejects reordered sections, unknown references, model URLs and mismatched 
   assert.equal(validateClaudeAnalysisOutput(telemetryOnly, input).valid, false);
 });
 
-test('rejects populated Section 4 with telemetry but no supplied evidence reference', () => {
+test('rejects populated Section 3 with telemetry but no supplied evidence reference', () => {
   const input = canonicalInput();
   const output = normalOutput(input);
-  output.sections[3].content = 'A factual stocks and sectors assessment.';
-  output.sections[3].evidenceRefs = [];
-  output.sections[3].telemetryRefs = ['t1'];
+  output.sections[2].content = 'A factual stocks and sectors assessment.';
+  output.sections[2].evidenceRefs = [];
+  output.sections[2].telemetryRefs = ['t1'];
   assert.deepEqual(validateClaudeAnalysisOutput(output, input).errors, [
-    'sections[3]: stocks and sectors require broad-market focus evidence',
-    'sections[3]: factual content requires supplied evidence'
+    'sections[2]: stocks and sectors require broad-market focus evidence',
+    'sections[2]: factual content requires supplied evidence'
   ]);
   assert.throws(
     () => createClaudeAnalysisOutput(output, input),
@@ -607,7 +623,7 @@ test('rejects populated Section 4 with telemetry but no supplied evidence refere
   );
 });
 
-test('binds Sections 2-4 to canonical driver, catalyst, and broad-market focus evidence', () => {
+test('binds Drivers to material roles and causal claims to catalysts while preserving focus scope', () => {
   const supportingOnlyPackage = marketPackage('SG');
   supportingOnlyPackage.evidenceContext.materialEvents = [];
   supportingOnlyPackage.evidenceContext.principalCatalysts = [];
@@ -625,8 +641,8 @@ test('binds Sections 2-4 to canonical driver, catalyst, and broad-market focus e
     'sections[1]: key market drivers require a material event or principal catalyst'
   ), true);
   assert.equal(supportingErrors.includes(
-    'sections[2]: market causality requires a principal catalyst'
-  ), true);
+    'sections[1]: market causality requires a principal catalyst'
+  ), false);
 
   const materialOnlyPackage = marketPackage('SG');
   materialOnlyPackage.evidenceContext.principalCatalysts = [];
@@ -636,19 +652,45 @@ test('binds Sections 2-4 to canonical driver, catalyst, and broad-market focus e
     portfolioContext: {myStocks: [], watchlist: []}
   });
   const materialOnlyOutput = normalOutput(materialOnlyInput);
+  materialOnlyOutput.sections[1].content = 'The policy report drove the market move.';
   const materialOnlyErrors = validateClaudeAnalysisOutput(
     materialOnlyOutput, materialOnlyInput
   ).errors;
-  assert.equal(materialOnlyErrors.some(error => error.startsWith('sections[1]:')), false);
+  assert.equal(materialOnlyErrors.some(error => error.includes('key market drivers require')), false);
   assert.equal(materialOnlyErrors.includes(
-    'sections[2]: market causality requires a principal catalyst'
+    'sections[1]: market causality requires a principal catalyst'
   ), true);
+
+  const nonCausal = normalOutput(materialOnlyInput);
+  for (const content of [
+    'The release pushed rate expectations higher.',
+    'Inflation data remained an important driver.',
+    'The policy report is a material market development.'
+  ]) {
+    nonCausal.sections[1].content = content;
+    assert.equal(validateClaudeAnalysisOutput(nonCausal, materialOnlyInput).valid, true, content);
+  }
+  for (const content of [
+    'Inflation data sent stocks higher.',
+    'The Fed decision drove the S&P 500 lower.',
+    'Inflation sparked a rally in equities.',
+    'Stocks were driven lower by the policy surprise.',
+    'The supported policy report drove the market move.'
+  ]) {
+    const unsupportedCausal = normalOutput(materialOnlyInput);
+    unsupportedCausal.sections[1].content = content;
+    assert.equal(validateClaudeAnalysisOutput(unsupportedCausal, materialOnlyInput).errors.includes(
+      'sections[1]: market causality requires a principal catalyst'), true, content);
+    const supportedCausal = normalOutput(canonicalInput());
+    supportedCausal.sections[1].content = content;
+    assert.equal(validateClaudeAnalysisOutput(supportedCausal, canonicalInput()).valid, true, content);
+  }
 
   const input = canonicalInput();
   const missingSubject = normalOutput(input);
-  missingSubject.sections[3].content = 'A generic broad-market assessment.';
+  missingSubject.sections[2].content = 'A generic broad-market assessment.';
   assert.equal(validateClaudeAnalysisOutput(missingSubject, input).errors.includes(
-    'sections[3]: stocks and sectors must mention a validated broad-market subject'
+    'sections[2]: stocks and sectors must mention a validated broad-market subject'
   ), true);
   assert.equal(validateClaudeAnalysisOutput(normalOutput(input), input).valid, true);
 });
@@ -694,11 +736,11 @@ test('rejects malformed, unknown, duplicate, reordered, and ungrounded broad-mar
   ]) assert.throws(() => createWithFocus(focus), /broad-market focus/);
 });
 
-test('enforces factual grounding and canonical content for Sections 7-10 including watch items', () => {
+test('enforces factual grounding and canonical content for risks and watch items', () => {
   const input = canonicalInput();
-  for (const index of [6, 7, 8, 9]) {
+  for (const index of [5, 6]) {
     const telemetryOnly = normalOutput(input);
-    telemetryOnly.sections[index].content = index === 8
+    telemetryOnly.sections[index].content = index === 6
       ? 'Monitor the scheduled policy announcement next week.'
       : 'A qualified forward-looking interpretation.';
     telemetryOnly.sections[index].evidenceRefs = [];
@@ -708,7 +750,7 @@ test('enforces factual grounding and canonical content for Sections 7-10 includi
     ), true);
 
     const supported = normalOutput(input);
-    supported.sections[index].content = index === 8
+    supported.sections[index].content = index === 6
       ? 'Monitor the evidence-supported policy announcement next week.'
       : 'An evidence-supported qualified forward-looking interpretation.';
     supported.sections[index].evidenceRefs = ['e1'];
@@ -716,13 +758,35 @@ test('enforces factual grounding and canonical content for Sections 7-10 includi
   }
 
   const blankWatch = normalOutput(input);
-  blankWatch.sections[8].content = '   ';
-  blankWatch.sections[8].evidenceRefs = [];
+  blankWatch.sections[6].content = '   ';
+  blankWatch.sections[6].evidenceRefs = [];
   assert.deepEqual(validateClaudeAnalysisOutput(blankWatch, input).errors.filter(error =>
-    error.startsWith('sections[8]:')), [
-    'sections[8]: invalid content',
-    'sections[8]: factual content requires supplied evidence'
+    error.startsWith('sections[6]:')), [
+    'sections[6]: invalid content',
+    'sections[6]: factual content requires supplied evidence'
   ]);
+});
+
+test('combined risks and opportunities accepts both, risks alone, or supported opportunities alone', () => {
+  const input = canonicalInput();
+  for (const content of [
+    'Policy uncertainty is a downside risk; the supported Technology recovery is a constructive opportunity.',
+    'Policy uncertainty is a downside risk to monitor.',
+    'The supplied Technology development presents a qualified constructive opportunity.'
+  ]) {
+    const output = normalOutput(input);
+    output.sections[5].content = content;
+    assert.equal(validateClaudeAnalysisOutput(output, input).valid, true, content);
+  }
+  const unsupported = normalOutput(input);
+  unsupported.sections[5].content = 'A company rally is a constructive opportunity.';
+  unsupported.sections[5].evidenceRefs = [];
+  assert.equal(validateClaudeAnalysisOutput(unsupported, input).errors.includes(
+    'sections[5]: factual content requires supplied evidence'), true);
+  const generic = normalOutput(input);
+  generic.sections[5].content = 'The market is oversold, creating a buy-the-dip opportunity.';
+  assert.equal(validateClaudeAnalysisOutput(generic, input).errors.includes(
+    'sections[5]: generic opportunity claim is not permitted'), true);
 });
 
 test('accepts a fully grounded realistic US response using Yahoo, Federal Reserve, and CNBC evidence', () => {
@@ -768,13 +832,12 @@ test('accepts a fully grounded realistic US response using Yahoo, Federal Reserv
     marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}
   });
   const output = normalOutput(input);
-  output.sections[2].evidenceRefs = ['e2'];
-  output.sections[3].evidenceRefs = ['e3'];
-  output.sections[6].evidenceRefs = ['e2'];
-  output.sections[7].evidenceRefs = ['e3'];
-  output.sections[8].content = 'Monitor the supplied policy calendar and later market developments.';
-  output.sections[8].evidenceRefs = ['e2', 'e3'];
-  output.sections[9].evidenceRefs = ['e1'];
+  output.sections[1].evidenceRefs = ['e2'];
+  output.sections[2].evidenceRefs = ['e3'];
+  output.sections[4].evidenceRefs = ['e2'];
+  output.sections[5].evidenceRefs = ['e3'];
+  output.sections[6].content = 'Monitor the supplied policy calendar and later market developments.';
+  output.sections[6].evidenceRefs = ['e2', 'e3'];
   output.evidenceReferences = ['e1', 'e2', 'e3'];
   assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
 });
@@ -782,8 +845,8 @@ test('accepts a fully grounded realistic US response using Yahoo, Federal Reserv
 test('enforces NORMAL, DEGRADED and FAILED semantics separately from contract failure', () => {
   const input = canonicalInput();
   const degradedSections = sections();
-  degradedSections[7] = {
-    name: REPORT_SECTION_NAMES[7], content: null, evidenceRefs: [], telemetryRefs: [],
+  degradedSections[5] = {
+    name: REPORT_SECTION_NAMES[5], content: null, evidenceRefs: [], telemetryRefs: [],
     uncertainties: ['Opportunity evidence is incomplete.']
   };
   assert.equal(validateClaudeAnalysisOutput({
@@ -823,8 +886,8 @@ test('requires Further Readings to exactly match MarketBrief-owned supplied refe
 test('exports an immutable provider schema while runtime validation remains authoritative', () => {
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.additionalProperties, false);
   assert.deepEqual(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.required, CLAUDE_ANALYSIS_OUTPUT_KEYS);
-  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.minItems, 11);
-  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.maxItems, 11);
+  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.minItems, 8);
+  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.maxItems, 8);
   assert.equal(Object.isFrozen(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA), true);
   assert.equal(Object.isFrozen(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.items), true);
 });

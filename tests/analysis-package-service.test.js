@@ -261,7 +261,7 @@ test('returns a complete canonical envelope with server-derived fields', async (
   assert.equal(output.analysisRequest.initiatingList, 'myStocks');
   assert.equal(output.analysisRequest.userTimezone, 'UTC');
   assert.equal(output.outputRequirements.header, 'REPORT HEADER / ANALYSIS CONTEXT');
-  assert.equal(output.outputRequirements.sections.length, 11);
+  assert.equal(output.outputRequirements.sections.length, 8);
   assert.equal(Object.isFrozen(output), true);
   assert.equal(Object.isFrozen(output.outputRequirements.sections), true);
 });

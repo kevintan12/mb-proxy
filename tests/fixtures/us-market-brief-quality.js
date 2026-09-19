@@ -140,48 +140,43 @@ function supportedOutput(input, {opportunity = true, plainEnglish = true} = {}) 
   const ordinaryContent = plainEnglish
     ? [
         'The market finished higher as company and policy evidence shaped the session.',
-        'Federal Reserve policy context and company developments were the main supported drivers.',
-        'The recap and policy evidence support the reported completed-session move.',
+        'Federal Reserve policy context and company developments drove stocks higher in the completed session.',
         broadMarketAvailable
           ? 'Broadcom led semiconductor shares, while health-care stocks also advanced.'
           : 'The two market recaps describe broad closing-session conditions.',
         'Microsoft was material to the initiating My Stocks list.',
         'The evidence points to broader participation beyond the initiating list.',
-        'Policy uncertainty remains a material risk to the market outlook.',
-        'Constructive health-care developments support a specific sector opportunity.',
-        'The later Yahoo recap and policy calendar identify the next developments to monitor.',
-        'Company leadership broadened, but policy risk remains important.'
+        opportunity
+          ? 'Policy uncertainty remains a risk; constructive health-care developments support a sector opportunity.'
+          : 'Policy uncertainty remains a material risk to the market outlook.',
+        'The later Yahoo recap and policy calendar identify the next developments to monitor.'
       ]
-    : Array(10).fill('Equity positioning reflected rate-path expectations and reallocation momentum.');
+    : Array(7).fill('Equity positioning reflected rate-path expectations and reallocation momentum.');
   if (!plainEnglish && broadMarketAvailable) {
-    ordinaryContent[3] = 'Broadcom equity positioning reflected reallocation momentum.';
+    ordinaryContent[2] = 'Broadcom equity positioning reflected reallocation momentum.';
   }
   const evidenceRefs = [
-    ['e2', 'e3'], ['e3'], ['e2', 'e3'], broadMarketAvailable ? ['e4', 'e5'] : ['e1', 'e2'],
-    ['e2'], broadMarketAvailable ? ['e4', 'e5'] : ['e2'], ['e3'], ['e5'], ['e1', 'e3'], ['e1']
+    ['e2', 'e3'], ['e2', 'e3'], broadMarketAvailable ? ['e4', 'e5'] : ['e1', 'e2'],
+    ['e2'], broadMarketAvailable ? ['e4', 'e5'] : ['e2'], opportunity ? ['e3', 'e5'] : ['e3'],
+    ['e1', 'e3']
   ];
   const sections = REPORT_SECTION_NAMES.map((name, index) => ({
     name,
-    content: index === 10 || (index === 3 && !broadMarketAvailable)
-      ? null : index === 7 && !opportunity ? null : ordinaryContent[index],
-    evidenceRefs: index === 10 || (index === 3 && !broadMarketAvailable)
-      || (index === 7 && !opportunity) ? [] : evidenceRefs[index],
-    telemetryRefs: index === 10 || (index === 3 && !broadMarketAvailable)
-      || (index === 7 && !opportunity) ? []
-      : index === 4 ? ['t2'] : ['t1'],
-    uncertainties: index === 3 && !broadMarketAvailable
-      ? ['Validated broad-market company or sector evidence was unavailable.']
-      : index === 7 && !opportunity ? ['No defensible opportunity is supported.'] : []
+    content: index === 7 || (index === 2 && !broadMarketAvailable)
+      ? null : ordinaryContent[index],
+    evidenceRefs: index === 7 || (index === 2 && !broadMarketAvailable)
+      ? [] : evidenceRefs[index],
+    telemetryRefs: index === 7 || (index === 2 && !broadMarketAvailable)
+      ? [] : index === 3 ? ['t2'] : ['t1'],
+    uncertainties: index === 2 && !broadMarketAvailable
+      ? ['Validated broad-market company or sector evidence was unavailable.'] : []
   }));
   const evidenceGaps = [];
   if (!broadMarketAvailable) {
     evidenceGaps.push('Validated broad-market company or sector evidence was unavailable.');
   }
-  if (!opportunity) {
-    evidenceGaps.push('No defensible evidence-supported opportunity was available.');
-  }
   return {
-    status: opportunity && broadMarketAvailable ? 'NORMAL' : 'DEGRADED',
+    status: broadMarketAvailable ? 'NORMAL' : 'DEGRADED',
     reportContext: reportContext(input), sections,
     evidenceReferences: broadMarketAvailable
       ? ['e2', 'e3', 'e4', 'e5', 'e1'] : ['e2', 'e3', 'e1'],

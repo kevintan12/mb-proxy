@@ -1965,14 +1965,14 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
     ]);
   const sections = REPORT_SECTION_NAMES.map((name, index) => ({
     name,
-    content: index === 10 ? null
-      : index === 3 ? 'Broadcom led semiconductor shares and health-care stocks advanced.'
-        : index === 4 ? 'Apple was material to the initiating My Stocks list.'
-          : index === 7 ? 'Constructive health-care developments support a sector opportunity.'
+    content: index === 7 ? null
+      : index === 2 ? 'Broadcom led semiconductor shares and health-care stocks advanced.'
+        : index === 3 ? 'Apple was material to the initiating My Stocks list.'
+          : index === 5 ? 'Constructive Health-care sector developments support an opportunity.'
             : 'The supplied evidence supports this market conclusion.',
-    evidenceRefs: index === 10 ? [] : index === 3 ? ['e8', 'e9'] : index === 4 ? ['e2']
-      : index === 7 ? ['e9'] : ['e8'],
-    telemetryRefs: index === 10 ? [] : index === 4 ? ['t2'] : ['t1'],
+    evidenceRefs: index === 7 ? [] : index === 2 ? ['e8', 'e9'] : index === 3 ? ['e2']
+      : index === 5 ? ['e9'] : ['e8'],
+    telemetryRefs: index === 7 ? [] : index === 3 ? ['t2'] : ['t1'],
     uncertainties: []
   }));
   const finalOutput = {
@@ -1991,15 +1991,15 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
     evidenceGaps: []
   };
   assert.equal(validateClaudeAnalysisOutput(finalOutput, output).valid, true);
-  assert.deepEqual(finalOutput.sections[3].evidenceRefs, ['e8', 'e9']);
-  assert.deepEqual(finalOutput.sections[7].evidenceRefs, ['e9']);
+  assert.deepEqual(finalOutput.sections[2].evidenceRefs, ['e8', 'e9']);
+  assert.deepEqual(finalOutput.sections[5].evidenceRefs, ['e9']);
 
   const leakedBroadMarketReference = JSON.parse(JSON.stringify(finalOutput));
-  leakedBroadMarketReference.sections[4].evidenceRefs = ['e8'];
-  leakedBroadMarketReference.sections[4].telemetryRefs = [];
+  leakedBroadMarketReference.sections[3].evidenceRefs = ['e8'];
+  leakedBroadMarketReference.sections[3].telemetryRefs = [];
   assert.equal(validateClaudeAnalysisOutput(
     leakedBroadMarketReference, output
-  ).errors.includes('sections[4]: evidence references must belong to the initiating list'), true);
+  ).errors.includes('sections[3]: evidence references must belong to the initiating list'), true);
 });
 
 test('Further Readings deduplicates general CNBC evidence against mandatory recap anchors by canonical URL', async () => {

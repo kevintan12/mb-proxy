@@ -89,10 +89,10 @@ function reportContext(input) {
 function sections(content = 'Supported analysis.') {
   return REPORT_SECTION_NAMES.map((name, index) => ({
     name,
-    content: index === 10 ? null : index === 4 ? EMPTY_INITIATING_LIST_CONTENT.myStocks
-      : content === null ? null : index === 3 ? 'Supported Technology analysis.' : content,
-    evidenceRefs: index === 10 || index === 4 || content === null ? [] : ['e1'],
-    telemetryRefs: index === 10 || index === 4 || content === null ? [] : ['t1'],
+    content: index === 7 ? null : index === 3 ? EMPTY_INITIATING_LIST_CONTENT.myStocks
+      : content === null ? null : index === 2 ? 'Supported Technology analysis.' : content,
+    evidenceRefs: index === 7 || index === 3 || content === null ? [] : ['e1'],
+    telemetryRefs: index === 7 || index === 3 || content === null ? [] : ['t1'],
     uncertainties: []
   }));
 }
@@ -100,7 +100,7 @@ function sections(content = 'Supported analysis.') {
 function normalOutput(input, overrides = {}) {
   const reportSections = sections();
   const firstFocus = input.marketPackages.flatMap(item => item.evidenceContext.broadMarketFocus)[0];
-  if (firstFocus) reportSections[3].content = `Supported ${firstFocus.subjects[0].name} analysis.`;
+  if (firstFocus) reportSections[2].content = `Supported ${firstFocus.subjects[0].name} analysis.`;
   return {
     status: 'NORMAL', reportContext: reportContext(input), sections: reportSections,
     evidenceReferences: ['e1'], furtherReadings: [], evidenceGaps: [], ...overrides
@@ -306,9 +306,9 @@ test('reports request sizes and optional usage on later contract failure', async
 test('reports only sanitized Section 4 structure when populated content lacks evidence', async () => {
   const input = canonicalInput();
   const invalidOutput = normalOutput(input);
-  invalidOutput.sections[3].content = 'PRIVATE SECTION PROSE';
-  invalidOutput.sections[3].evidenceRefs = [];
-  invalidOutput.sections[3].telemetryRefs = ['t1'];
+  invalidOutput.sections[2].content = 'PRIVATE SECTION PROSE';
+  invalidOutput.sections[2].evidenceRefs = [];
+  invalidOutput.sections[2].telemetryRefs = ['t1'];
   const diagnostics = [];
   const result = await invokeClaudeAnalysis({
     input,
@@ -328,12 +328,12 @@ test('reports only sanitized Section 4 structure when populated content lacks ev
   assert.deepEqual(result, {
     ok: false,
     type: 'CONTRACT_FAILURE',
-    message: 'Invalid Claude analysis output: sections[3]: stocks and sectors require broad-market focus evidence; sections[3]: factual content requires supplied evidence',
+    message: 'Invalid Claude analysis output: sections[2]: stocks and sectors require broad-market focus evidence; sections[2]: factual content requires supplied evidence',
     upstreamStatus: 200
   });
   assert.equal(diagnostics.length, 1);
   assert.deepEqual(diagnostics[0].contractFailure, {
-    sectionIndex: 3,
+    sectionIndex: 2,
     sectionName: 'STOCKS & SECTORS IN FOCUS',
     contentIsNull: false,
     evidenceRefCount: 0,
@@ -349,7 +349,7 @@ test('reports only sanitized Section 4 structure when populated content lacks ev
   assert.equal(Object.isFrozen(diagnostics[0].contractFailure), true);
 });
 
-test('gives Claude explicit validator-sensitive Section 5 and Further Readings instructions', () => {
+test('gives Claude explicit validator-sensitive Section 4 and Further Readings instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
     'determine the initiating list from analysisRequest.initiatingList',
@@ -361,8 +361,8 @@ test('gives Claude explicit validator-sensitive Section 5 and Further Readings i
     'Never use securities, evidenceRefs, or telemetryRefs from the non-initiating list',
     'No securities are configured in My Stocks.',
     'No securities are configured in Watchlist.',
-    'Section 5 evidenceRefs, telemetryRefs, and uncertainties must all be empty arrays',
-    'Section 11 must be exactly {"name":"FURTHER READINGS","content":null,"evidenceRefs":[],"telemetryRefs":[],"uncertainties":[]}',
+    'Section 4 evidenceRefs, telemetryRefs, and uncertainties must all be empty arrays',
+    'Section 8 must be exactly {"name":"FURTHER READINGS","content":null,"evidenceRefs":[],"telemetryRefs":[],"uncertainties":[]}',
     'MarketBrief resolves and renders Further Readings separately',
     "evidenceRef values from each market package's evidenceContext.furtherReadings",
     'If none are supplied, top-level furtherReadings must be []',
@@ -392,31 +392,31 @@ test('gives Claude the exact top-level evidenceGaps status relationship', () => 
 test('gives Claude the global NORMAL null-section status rule', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
-    'NORMAL requires non-null content for every analytical section, Sections 1-10',
-    'If any analytical section in Sections 1-10 is null, NORMAL must not be used',
+    'NORMAL requires non-null content for every analytical section, Sections 1-7',
+    'If any analytical section in Sections 1-7 is null, NORMAL must not be used',
     'If a section is null because material evidence is unavailable, status must be DEGRADED',
     'that null section must include a genuine section uncertainty',
     'the corresponding material evidence gap must be included in the top-level evidenceGaps array',
-    'Section 11 FURTHER READINGS remains the required null placeholder and does not force DEGRADED'
+    'Section 8 FURTHER READINGS remains the required null placeholder and does not force DEGRADED'
   ]) {
     assert.equal(system.includes(requirement), true, requirement);
   }
 });
 
-test('gives Claude evidence-bound Section 9 fallback instructions', () => {
+test('gives Claude evidence-bound Section 7 fallback instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
-    'Hard output constraint for Sections 7-10',
+    'Hard output constraint for Sections 6-7',
     'content must be either null or a non-empty already-trimmed string',
     'evidenceRefs must contain at least one valid supplied evidence reference',
     'telemetryRefs alone never satisfy this grounding requirement',
     'Every factual claim or qualified interpretation in a populated section must be grounded in its listed supplied evidenceRefs',
-    'For Section 9 WHAT TO WATCH FOR NEXT',
-    'every factual or watch-next statement must be grounded in one or more valid supplied evidenceRefs listed in Section 9',
+    'For Section 7 WHAT TO WATCH FOR NEXT',
+    'every factual or watch-next statement must be grounded in one or more valid supplied evidenceRefs listed in Section 7',
     'Cite each scheduled event or catalyst with its supplied supporting evidenceRef',
     'Omit unsupported factual predictions, events, dates, earnings, macro releases, catalysts, or forward-looking developments',
     'do not invent them or attach an unrelated reference',
-    'If the supplied package does not support a meaningful Section 9, set content to null, evidenceRefs and telemetryRefs to [], and status to DEGRADED',
+    'If the supplied package does not support a meaningful Section 7, set content to null, evidenceRefs and telemetryRefs to [], and status to DEGRADED',
     'include at least one genuine section uncertainty',
     'add the corresponding material evidence gap to the top-level evidenceGaps array'
   ]) {
@@ -434,13 +434,13 @@ test('gives Claude supplied-evidence-only Section 2 macro comparison instruction
     'Use only values explicitly supplied in the package',
     'do not invent any missing comparison value',
     'do not force immaterial macro items into a three-number format',
-    'do not repeat the same comparison unnecessarily across Sections 1, 2, and 3'
+    'do not repeat the same comparison unnecessarily across Sections 1 and 2'
   ]) {
     assert.equal(system.includes(requirement), true, requirement);
   }
 });
 
-test('gives Sections 1-3 exact concise prioritization and causal instructions', () => {
+test('gives Sections 1-2 concise prioritization and supported causal instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
     'For Section 1 EXECUTIVE MARKET SUMMARY, write two or three concise paragraphs',
@@ -450,17 +450,18 @@ test('gives Sections 1-3 exact concise prioritization and causal instructions', 
     'present only a small prioritized set of the most material supported drivers',
     'distinguish established facts, developing conditions, and qualified interpretation',
     'never invent a driver merely to fill the section',
-    'For Section 3 WHAT DROVE / IS DRIVING THE MARKET',
-    'explain interactions among drivers where materially relevant',
+    'For Section 2 KEY MARKET DRIVERS',
+    'Explain supported interactions among drivers where materially relevant',
+    'If no principal catalyst supports causality, describe the material drivers without claiming they caused the move',
     'Temporal proximity alone is not causality',
     'never present a SUBSEQUENT_DEVELOPMENT as causing an earlier completed-session move'
   ]) assert.equal(system.includes(requirement), true, requirement);
 });
 
-test('gives Section 4 non-causal broad-market session-association instructions', () => {
+test('gives Section 3 non-causal broad-market session-association instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
-    'For Section 4 STOCKS & SECTORS IN FOCUS',
+    'For Section 3 STOCKS & SECTORS IN FOCUS',
     'Review evidenceContext.sessionAssociations',
     'when materially relevant',
     'independently in broadMarketFocus',
@@ -470,51 +471,47 @@ test('gives Section 4 non-causal broad-market session-association instructions',
     'broad-market leadership and laggards, notable individual movers, closing-session breadth, sector rotation',
     'Never present post-close session-associated evidence as having caused the earlier completed-session move',
     'never treat session association as PRINCIPAL_CATALYST eligibility',
-    'Section 4 must remain broad-market and independent of My Stocks and Watchlist',
-    'membership in either list must not determine which broad-market movers Section 4 discusses',
-    'Do not require Section 4 to use every associated reference',
+    'Section 3 must remain broad-market and independent of My Stocks and Watchlist',
+    'membership in either list must not determine which broad-market movers Section 3 discusses',
+    'Do not require Section 3 to use every associated reference',
     'or use an association that is immaterial',
     'all materially relevant broad-market materialEvents, supportingEvidence, recap and general CNBC evidence',
     'Rank the significant companies and sectors',
     'explaining why each matters and comparing it with the broader market where useful',
     'Do not produce a generic mover list',
     'If the evidence is insufficient, use qualified analysis or the existing null/DEGRADED behavior',
-    'When Section 4 uses a session-associated broad-market evidence reference that is also in broadMarketFocus, cite that reference in Section 4 evidenceRefs',
-    'Section 4 evidenceRefs may contain only broadMarketFocus references',
+    'When Section 3 uses a session-associated broad-market evidence reference that is also in broadMarketFocus, cite that reference in Section 3 evidenceRefs',
+    'Section 3 evidenceRefs may contain only broadMarketFocus references',
     'telemetryRefs may contain only benchmark telemetry references',
     'never portfolio or watchlist stock telemetry',
-    'Discuss a My Stocks or Watchlist company in Section 4 only when it is independently present as a validated COMPANY subject in broadMarketFocus',
+    'Discuss a My Stocks or Watchlist company in Section 3 only when it is independently present as a validated COMPANY subject in broadMarketFocus',
     "cite that company's focus reference",
-    'Do not copy such a reference into Section 5 merely because it is session-associated, broad-market evidence',
+    'Do not copy such a reference into Section 4 merely because it is session-associated, broad-market evidence',
     'relevant to market leadership, sectors, movers, breadth, or rotation',
-    "Section 5 remains strictly limited to the initiating-list securities' permitted telemetryRefs, permitted direct evidenceRefs, and permitted upcoming-event evidenceRefs",
-    'a reference may appear in Section 5 only when it independently satisfies those existing initiating-list eligibility rules'
+    "Section 4 remains strictly limited to the initiating-list securities' permitted telemetryRefs, permitted direct evidenceRefs, and permitted upcoming-event evidenceRefs",
+    'a reference may appear in Section 4 only when it independently satisfies those existing initiating-list eligibility rules'
   ]) {
     assert.equal(system.includes(requirement), true, requirement);
   }
 });
 
-test('gives Sections 6-8 and 10 exact interpretation, risk, opportunity and takeaway instructions', () => {
+test('gives Sections 5-6 interpretation and combined risk/opportunity instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
-    'For Section 6 MARKET INTERPRETATION',
+    'For Section 5 MARKET INTERPRETATION',
     'supported sentiment, risk appetite, breadth, momentum, and rotation',
     'continuation, reversal, consolidation, or a change in narrative',
     'participation is broad or concentrated',
-    'For Section 7 KEY RISKS',
-    'Distinguish an identifiable risk from a prediction',
-    'do not add a generic balanced list merely to populate the section',
-    'For Section 8 OPPORTUNITIES',
-    'specific evidence-supported broad-market sectors, themes, or companies',
-    'distinguish positive evidence from a speculative scenario',
-    'never present an opportunity as guaranteed or as a recommendation',
-    'never use generic filler such as treating a possible rebound as a buying opportunity',
-    'never attach an unrelated reference merely to satisfy validation',
-    'If no defensible opportunity is supported, set content to null',
-    'use DEGRADED status',
-    'For Section 10 MARKETBRIEF TAKEAWAY, write two to four concise sentences',
-    'Do not simply repeat Section 1',
-    'do not make an unsupported recommendation'
+    'For Section 6 KEY RISKS & OPPORTUNITIES',
+    'specific constructive broad-market opportunities in supported sectors, themes, or companies',
+    'clearly label or otherwise distinguish risk from opportunity',
+    'distinguish positive constructive evidence from a speculative scenario',
+    'Each opportunity claim must cite its own relevant broadMarketFocus evidenceRef',
+    'a risk citation cannot support an unrelated opportunity',
+    'Never use a rebound, buy-the-dip, oversold condition, or similar price-decline filler as an opportunity without specific constructive evidence',
+    'Risks alone may populate Section 6 when no defensible opportunity is supported',
+    'Supported opportunities alone may also populate it',
+    'If neither is supported, set content to null'
   ]) assert.equal(system.includes(requirement), true, requirement);
 });
 
@@ -523,7 +520,7 @@ test('keeps overlapping evidence concise without merging the frozen section role
   assert.match(system, /Keep the report sections distinct/);
   assert.match(system, /place each supported fact or conclusion where it adds the most value/);
   assert.match(system, /do not repeat the same sentence or substantially identical explanation/);
-  assert.match(system, /Sections 1, 2, 3, 6, 7, 9, and 10/);
+  assert.match(system, /Sections 1, 2, 5, 6, and 7/);
 });
 
 test('gives Claude time-safe materially relevant subsequent-development instructions', () => {
@@ -534,9 +531,9 @@ test('gives Claude time-safe materially relevant subsequent-development instruct
     'Never cite subsequentDevelopments as causes of the earlier primary completed-session move',
     'When materially relevant',
     'using their supplied evidence references',
-    'appropriate forward-looking Sections 7-10',
-    'especially Section 9 WHAT TO WATCH FOR NEXT',
-    'material risks, opportunities, next-session watch items, and takeaway implications',
+    'appropriate forward-looking Sections 6-7',
+    'especially Section 7 WHAT TO WATCH FOR NEXT',
+    'material risks, opportunities, and next-session watch items',
     'Do not include subsequentDevelopments when they are immaterial to the report'
   ]) {
     assert.equal(system.includes(requirement), true, requirement);
@@ -589,15 +586,15 @@ test('provider schema is derived without weakening authoritative runtime validat
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.evidenceGaps.items.minLength, 1);
   assert.equal(Object.hasOwn(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sections, 'minItems'), false);
   assert.equal(Object.hasOwn(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sections, 'maxItems'), false);
-  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.minItems, 11);
-  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.maxItems, 11);
+  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.minItems, 8);
+  assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.maxItems, 8);
 });
 
 test('accepts valid NORMAL, DEGRADED and FAILED structured reports with one request each', async () => {
   const input = canonicalInput();
   const degradedSections = sections();
-  degradedSections[7] = {
-    name: REPORT_SECTION_NAMES[7], content: null, evidenceRefs: [], telemetryRefs: [],
+  degradedSections[5] = {
+    name: REPORT_SECTION_NAMES[5], content: null, evidenceRefs: [], telemetryRefs: [],
     uncertainties: ['Evidence is incomplete.']
   };
   const outputs = [
@@ -634,8 +631,8 @@ test('accepts valid NORMAL, DEGRADED and FAILED structured reports with one requ
 test('deterministically downgrades evidence-limited NORMAL output while preserving strict validation', async () => {
   const input = canonicalInput();
   const output = normalOutput(input);
-  output.sections[7] = {
-    name: REPORT_SECTION_NAMES[7], content: null, evidenceRefs: [], telemetryRefs: [], uncertainties: []
+  output.sections[5] = {
+    name: REPORT_SECTION_NAMES[5], content: null, evidenceRefs: [], telemetryRefs: [], uncertainties: []
   };
   const strictValidation = validateClaudeAnalysisOutput(output, input);
   assert.deepEqual(strictValidation.errors, ['NORMAL requires every analysis section']);
@@ -644,11 +641,11 @@ test('deterministically downgrades evidence-limited NORMAL output while preservi
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
   });
 
-  const message = 'The supplied evidence did not support a reliable OPPORTUNITIES section.';
+  const message = 'The supplied evidence did not support a reliable KEY RISKS & OPPORTUNITIES section.';
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.status, 'DEGRADED');
-  assert.deepEqual(result.output.sections[7], {
-    name: REPORT_SECTION_NAMES[7], content: null, evidenceRefs: [], telemetryRefs: [],
+  assert.deepEqual(result.output.sections[5], {
+    name: REPORT_SECTION_NAMES[5], content: null, evidenceRefs: [], telemetryRefs: [],
     uncertainties: [message]
   });
   assert.deepEqual(result.output.evidenceGaps, [message]);
@@ -664,8 +661,8 @@ test('deterministically nulls impossible Sections 2-4 and recomputes first-use r
   const output = normalOutput(input);
   output.sections[0].evidenceRefs = ['e2'];
   output.sections[1].uncertainties = ['Model-supplied uncertainty must be replaced.'];
+  output.sections[1].uncertainties = ['Model-supplied uncertainty must be replaced.'];
   output.sections[2].uncertainties = ['Model-supplied uncertainty must be replaced.'];
-  output.sections[3].uncertainties = ['Model-supplied uncertainty must be replaced.'];
   output.evidenceReferences = ['e1'];
 
   const result = await invokeClaudeAnalysis({
@@ -676,7 +673,6 @@ test('deterministically nulls impossible Sections 2-4 and recomputes first-use r
   assert.equal(result.output.status, 'DEGRADED');
   const expected = [
     'The supplied evidence did not establish a material market driver.',
-    'The supplied evidence did not establish a supported principal catalyst for the market move.',
     'Validated broad-market company or sector evidence was unavailable.'
   ];
   for (const [offset, message] of expected.entries()) {
@@ -690,7 +686,7 @@ test('deterministically nulls impossible Sections 2-4 and recomputes first-use r
   assert.deepEqual(result.output.evidenceReferences, ['e2', 'e1']);
 });
 
-test('localizes empty broad-market focus to Section 4 without removing valid driver evidence', async () => {
+test('localizes empty broad-market focus to Section 3 without removing valid driver evidence', async () => {
   const input = canonicalInput({broadMarketFocus: []});
   const output = normalOutput(input);
 
@@ -701,9 +697,9 @@ test('localizes empty broad-market focus to Section 4 without removing valid dri
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.status, 'DEGRADED');
   assert.notEqual(result.output.sections[1].content, null);
-  assert.notEqual(result.output.sections[2].content, null);
-  assert.deepEqual(result.output.sections[3], {
-    name: REPORT_SECTION_NAMES[3],
+  assert.notEqual(result.output.sections[1].content, null);
+  assert.deepEqual(result.output.sections[2], {
+    name: REPORT_SECTION_NAMES[2],
     content: null,
     evidenceRefs: [],
     telemetryRefs: [],
@@ -716,7 +712,7 @@ test('keeps unrelated driver and broad-market hard-gate violations strict', asyn
   const invalidDriver = normalOutput(input);
   invalidDriver.sections[1].evidenceRefs = [];
   const invalidFocus = normalOutput(input);
-  invalidFocus.sections[3].content = 'Generic index commentary.';
+  invalidFocus.sections[2].content = 'Generic index commentary.';
 
   for (const output of [invalidDriver, invalidFocus]) {
     const result = await invokeClaudeAnalysis({
@@ -729,12 +725,12 @@ test('keeps unrelated driver and broad-market hard-gate violations strict', asyn
 test('does not normalize structurally inconsistent null sections or unusable reports', async () => {
   const input = canonicalInput();
   const referencedNull = normalOutput(input);
-  referencedNull.sections[7] = {
-    name: REPORT_SECTION_NAMES[7], content: null, evidenceRefs: ['e1'], telemetryRefs: [],
+  referencedNull.sections[5] = {
+    name: REPORT_SECTION_NAMES[5], content: null, evidenceRefs: ['e1'], telemetryRefs: [],
     uncertainties: []
   };
   const allUnavailable = normalOutput(input);
-  allUnavailable.sections = allUnavailable.sections.map((section, index) => index === 10
+  allUnavailable.sections = allUnavailable.sections.map((section, index) => index === 7
     ? section
     : {...section, content: null, evidenceRefs: [], telemetryRefs: [], uncertainties: []});
 
@@ -803,7 +799,7 @@ test('classifies malformed or contract-invalid structured reports as CONTRACT_FA
   const missing = normalOutput(input);
   missing.sections.pop();
   const extra = normalOutput(input);
-  extra.sections.push({...extra.sections[10]});
+  extra.sections.push({...extra.sections[7]});
   const renamed = normalOutput(input);
   renamed.sections[0].name = 'RENAMED SECTION';
   const reordered = normalOutput(input);
@@ -822,8 +818,8 @@ test('rejects model-supplied URLs, provenance and unknown references', async () 
   const outputs = [
     {...normalOutput(input), canonicalUrl: 'https://example.com/'},
     normalOutput(input, {sections: REPORT_SECTION_NAMES.map((name, index) => ({
-      name, content: index === 10 ? null : 'Finding.',
-      evidenceRefs: index === 10 ? [] : ['e2'], telemetryRefs: index === 10 ? [] : ['t1'],
+      name, content: index === 7 ? null : 'Finding.',
+      evidenceRefs: index === 7 ? [] : ['e2'], telemetryRefs: index === 7 ? [] : ['t1'],
       uncertainties: []
     }))})
   ];
