@@ -239,6 +239,112 @@ test('analysis package route forwards the exact body once and returns the canoni
   }
 });
 
+test('package diagnostics correlate valid IDs without changing bodies or responses', async () => {
+  const originalGetter = analysisPackageRuntime.getAnalysisPackageRuntime;
+  const originalInfo = console.info;
+  const generationId = '123E4567-E89B-42D3-A456-426614174000';
+  const requestBody = analysisPackageRequest();
+  const envelope = usAnalysisPackageEnvelope();
+  const logs = [];
+  console.info = (...args) => logs.push(args);
+  analysisPackageRuntime.getAnalysisPackageRuntime = () => ({
+    async assemble(body) {
+      assert.equal(body, requestBody);
+      assert.equal(JSON.stringify(body).includes(generationId), false);
+      analysisPackageRuntime.logAnalysisPackageDiagnostics({stage: 'testPackageStage'});
+      await Promise.resolve();
+      analysisPackageRuntime.logAnalysisPackageDiagnostics({timing: {packageRuntimeTotalMs: 1}});
+      return envelope;
+    }
+  });
+  try {
+    const res = mockRes();
+    await handler({method: 'POST', query: {analysisPackage: '1', generationId}, body: requestBody}, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body, envelope);
+    assert.equal(JSON.stringify(res.body).includes('generationId'), false);
+    assert.deepEqual(logs.map(([prefix, value]) => [prefix, JSON.parse(value)]), [
+      ['[analysis-package.stages]', {stage: 'testPackageStage', generationId: generationId.toLowerCase()}],
+      ['[analysis-package.stages]', {timing: {packageRuntimeTotalMs: 1}, generationId: generationId.toLowerCase()}]
+    ]);
+  } finally {
+    analysisPackageRuntime.getAnalysisPackageRuntime = originalGetter;
+    console.info = originalInfo;
+  }
+});
+
+test('package diagnostics omit missing, malformed, duplicate, and oversized IDs', async () => {
+  const originalGetter = analysisPackageRuntime.getAnalysisPackageRuntime;
+  const originalInfo = console.info;
+  const valid = '123e4567-e89b-42d3-a456-426614174000';
+  const logs = [];
+  console.info = (...args) => logs.push(args);
+  analysisPackageRuntime.getAnalysisPackageRuntime = () => ({
+    async assemble() {
+      analysisPackageRuntime.logAnalysisPackageDiagnostics({stage: 'testPackageStage'});
+      return usAnalysisPackageEnvelope();
+    }
+  });
+  try {
+    for (const generationId of [undefined, '', ` ${valid}`, `${valid} `,
+      [valid, valid], {value: valid}, `${valid}extra`]) {
+      const res = mockRes();
+      await handler({method: 'POST', query: {analysisPackage: '1', generationId},
+        body: analysisPackageRequest()}, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(JSON.stringify(res.body).includes('generationId'), false);
+    }
+    assert.equal(logs.length, 7);
+    for (const [prefix, value] of logs) {
+      assert.equal(prefix, '[analysis-package.stages]');
+      assert.deepEqual(JSON.parse(value), {stage: 'testPackageStage'});
+    }
+  } finally {
+    analysisPackageRuntime.getAnalysisPackageRuntime = originalGetter;
+    console.info = originalInfo;
+  }
+});
+
+test('overlapping package requests keep their diagnostic IDs isolated', async () => {
+  const originalGetter = analysisPackageRuntime.getAnalysisPackageRuntime;
+  const originalInfo = console.info;
+  const ids = [
+    '123e4567-e89b-42d3-a456-426614174000',
+    '123e4567-e89b-72d3-b456-426614174001'
+  ];
+  const logs = [];
+  const releases = [];
+  const waits = ids.map(() => new Promise(resolve => releases.push(resolve)));
+  let index = 0;
+  console.info = (...args) => logs.push(args);
+  analysisPackageRuntime.getAnalysisPackageRuntime = () => ({
+    async assemble() {
+      const current = index++;
+      await waits[current];
+      analysisPackageRuntime.logAnalysisPackageDiagnostics({stage: 'testPackageStage', index: current});
+      return usAnalysisPackageEnvelope();
+    }
+  });
+  try {
+    const responses = ids.map((generationId) => {
+      const res = mockRes();
+      return handler({method: 'POST', query: {analysisPackage: '1', generationId},
+        body: analysisPackageRequest()}, res).then(() => res);
+    });
+    releases[1]();
+    releases[0]();
+    const results = await Promise.all(responses);
+    assert.deepEqual(results.map(res => res.statusCode), [200, 200]);
+    assert.deepEqual(logs.map(([, value]) => JSON.parse(value)), [
+      {stage: 'testPackageStage', index: 1, generationId: ids[1]},
+      {stage: 'testPackageStage', index: 0, generationId: ids[0]}
+    ]);
+  } finally {
+    analysisPackageRuntime.getAnalysisPackageRuntime = originalGetter;
+    console.info = originalInfo;
+  }
+});
+
 test('temporary news materiality measurement mode is no longer exposed', async () => {
   let fetches = 0;
   global.fetch = async () => { fetches++; throw new Error('provider work must not run'); };
@@ -286,6 +392,10 @@ test('analysis package route separates invalid requests from sanitized assembly 
 
 test('structured Claude route returns validated analysis with one server-owned request', async () => {
   const previousKey = process.env.ANTHROPIC_API_KEY;
+  const originalInfo = console.info;
+  const logs = [];
+  const generationId = '123E4567-E89B-42D3-A456-426614174000';
+  console.info = (...args) => logs.push(args);
   process.env.ANTHROPIC_API_KEY = 'test-key';
   const calls = [];
   const input = claudeAnalysisInput();
@@ -302,7 +412,7 @@ test('structured Claude route returns validated analysis with one server-owned r
   };
   try {
     const res = mockRes();
-    await handler({method: 'POST', query: {claudeAnalysis: '1'}, body: input}, res);
+    await handler({method: 'POST', query: {claudeAnalysis: '1', generationId}, body: input}, res);
     assert.equal(res.statusCode, 200);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages');
@@ -311,7 +421,46 @@ test('structured Claude route returns validated analysis with one server-owned r
     assert.equal(requestBody.max_tokens, 4000);
     assert.equal(Object.hasOwn(requestBody, 'tools'), false);
     assert.deepEqual(res.body, {result: output});
+    assert.equal(JSON.stringify(requestBody).includes('generationId'), false);
+    assert.equal(JSON.stringify(res.body).includes('generationId'), false);
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0][0], '[claude-analysis.invocation]');
+    assert.equal(JSON.parse(logs[0][1]).generationId, generationId.toLowerCase());
   } finally {
+    console.info = originalInfo;
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+  }
+});
+
+test('structured Claude diagnostics omit absent or invalid generation IDs', async () => {
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  const originalInfo = console.info;
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+  const input = claudeAnalysisInput();
+  const output = claudeAnalysisOutput(input);
+  const logs = [];
+  console.info = (...args) => logs.push(args);
+  global.fetch = async (url, options) => {
+    assert.equal(JSON.parse(options.body).messages[0].content.includes('generationId'), false);
+    return {ok: true, status: 200,
+      async json() { return {content: [{type: 'text', text: JSON.stringify(output)}]}; }};
+  };
+  try {
+    for (const generationId of [undefined, ['123e4567-e89b-42d3-a456-426614174000'],
+      ' 123e4567-e89b-42d3-a456-426614174000', {id: 'invalid'}, 'x'.repeat(100)]) {
+      const res = mockRes();
+      await handler({method: 'POST', query: {claudeAnalysis: '1', generationId}, body: input}, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(JSON.stringify(res.body).includes('generationId'), false);
+    }
+    assert.equal(logs.length, 5);
+    for (const [prefix, value] of logs) {
+      assert.equal(prefix, '[claude-analysis.invocation]');
+      assert.equal(Object.hasOwn(JSON.parse(value), 'generationId'), false);
+    }
+  } finally {
+    console.info = originalInfo;
     if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = previousKey;
   }

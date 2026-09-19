@@ -4,8 +4,32 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   YAHOO_RECAP_PACKAGE_PRODUCTION_BOUNDS,
-  createAnalysisPackageRuntime
+  createAnalysisPackageRuntime,
+  canonicalGenerationId,
+  runWithGenerationId,
+  correlatedDiagnostics
 } = require('../lib/analysis-package-runtime');
+
+test('accepts only canonical opaque UUIDs and keeps asynchronous generation contexts isolated', async () => {
+  const first = '123E4567-E89B-42D3-A456-426614174000';
+  const second = '123e4567-e89b-72d3-b456-426614174001';
+  assert.equal(canonicalGenerationId(first), first.toLowerCase());
+  for (const value of [undefined, null, [first, second], {id: first}, ` ${first}`,
+    `${first} `, `${first}x`, '123e4567-e89b-02d3-a456-426614174000']) {
+    assert.equal(canonicalGenerationId(value), null);
+  }
+  let releaseFirst;
+  const firstWait = new Promise(resolve => { releaseFirst = resolve; });
+  const pending = runWithGenerationId(first, async () => {
+    await firstWait;
+    return correlatedDiagnostics({stage: 'first'});
+  });
+  const other = await runWithGenerationId(second, async () => correlatedDiagnostics({stage: 'second'}));
+  releaseFirst();
+  assert.deepEqual(other, {stage: 'second', generationId: second});
+  assert.deepEqual(await pending, {stage: 'first', generationId: first.toLowerCase()});
+  assert.deepEqual(correlatedDiagnostics({stage: 'outside'}), {stage: 'outside'});
+});
 
 test('runtime composer exposes a frozen US orchestration service without eager database access', async () => {
   let databaseCalls = 0;
