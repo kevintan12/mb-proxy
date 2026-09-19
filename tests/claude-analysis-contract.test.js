@@ -789,6 +789,36 @@ test('combined risks and opportunities accepts both, risks alone, or supported o
     'sections[5]: generic opportunity claim is not permitted'), true);
 });
 
+test('permits rebound wording only with cited focus evidence and an exact grounded subject', () => {
+  const input = canonicalInput();
+  for (const content of [
+    'Technology has specific constructive support for a qualified buy-the-dip opportunity.',
+    'Technology has specific constructive support for a qualified rebound opportunity.',
+    'Policy uncertainty is a risk, while Technology has specific constructive support for a qualified rebound opportunity.'
+  ]) {
+    const output = normalOutput(input);
+    output.sections[5].content = content;
+    assert.equal(validateClaudeAnalysisOutput(output, input).valid, true, content);
+  }
+
+  const missingFocusCitation = normalOutput(input);
+  missingFocusCitation.sections[5].content =
+    'Technology has specific constructive support for a qualified buy-the-dip opportunity.';
+  missingFocusCitation.sections[5].evidenceRefs = [];
+  const missingFocusErrors = validateClaudeAnalysisOutput(missingFocusCitation, input).errors;
+  assert.equal(missingFocusErrors.includes('sections[5]: generic opportunity claim is not permitted'), true);
+  assert.equal(missingFocusErrors.includes(
+    'sections[5]: opportunity requires relevant broad-market focus evidence'), true);
+
+  const missingGroundedSubject = normalOutput(input);
+  missingGroundedSubject.sections[5].content =
+    'A supported issuer has specific constructive support for a qualified rebound opportunity.';
+  const missingSubjectErrors = validateClaudeAnalysisOutput(missingGroundedSubject, input).errors;
+  assert.equal(missingSubjectErrors.includes('sections[5]: generic opportunity claim is not permitted'), true);
+  assert.equal(missingSubjectErrors.includes(
+    'sections[5]: opportunity must name a cited broad-market subject'), true);
+});
+
 test('accepts a fully grounded realistic US response using Yahoo, Federal Reserve, and CNBC evidence', () => {
   const items = [
     createEvidenceItem({

@@ -124,25 +124,56 @@ test('combined supported risk and opportunity pass the complete validator', () =
 });
 
 test('Section 6 keeps risk-only output while localizing unsupported or generic opportunities', async () => {
-  const input = richCompletedUsWeekInput();
+  const input = JSON.parse(JSON.stringify(richCompletedUsWeekInput()));
+  const focusEvidence = input.marketPackages[0].evidenceContext.evidence.find(entry =>
+    entry.reference === 'e5').item;
+  focusEvidence.title =
+    'DuPont, Eaton, GE Vernova, Broadcom and Palo Alto Networks show constructive company developments';
+  focusEvidence.summary =
+    'DuPont, Eaton, GE Vernova, Broadcom and Palo Alto Networks supplied bounded constructive evidence.';
+  input.marketPackages[0].evidenceContext.broadMarketFocus.find(entry =>
+    entry.evidenceRef === 'e5').subjects = [
+    {kind: 'COMPANY', name: 'DuPont'},
+    {kind: 'COMPANY', name: 'Eaton'},
+    {kind: 'COMPANY', name: 'GE Vernova'},
+    {kind: 'COMPANY', name: 'Broadcom'},
+    {kind: 'COMPANY', name: 'Palo Alto Networks'}
+  ];
+  assert.equal(validateClaudeAnalysisInput(input), true);
   const risksOnly = supportedOutput(input, {opportunity: false});
   assert.equal(validateClaudeAnalysisOutput(risksOnly, input).valid, true);
 
   const opportunityOnly = supportedOutput(input);
   opportunityOnly.sections[5].content =
-    'Constructive health-care developments support a qualified sector opportunity.';
+    'Constructive Eaton developments support a qualified company opportunity.';
   opportunityOnly.sections[5].evidenceRefs = ['e5'];
   assert.equal(validateClaudeAnalysisOutput(opportunityOnly, input).valid, true);
+
+  for (const content of [
+    'Constructive Eaton evidence supports a qualified buy-the-dip opportunity.',
+    'Policy uncertainty is a risk, while Broadcom evidence supports a qualified rebound opportunity.'
+  ]) {
+    const supportedGenericWording = supportedOutput(input);
+    supportedGenericWording.sections[5].content = content;
+    supportedGenericWording.sections[5].evidenceRefs = content.includes('Broadcom') ? ['e3', 'e5'] : ['e5'];
+    assert.equal(validateClaudeAnalysisOutput(supportedGenericWording, input).valid, true, content);
+    const result = await invokeFixture(input, supportedGenericWording);
+    assert.equal(result.type, 'SUCCESS', result.message);
+    assert.equal(result.output.status, 'NORMAL');
+    assert.equal(result.output.sections[5].content, content);
+  }
 
   for (const [content, expectedCategory] of [
     ['Policy uncertainty is a risk, while an unrelated company rally is a constructive opportunity.',
       'UNSUPPORTED_OPPORTUNITY_CLAIM'],
     ['Policy uncertainty is a risk, while an oversold rebound creates a buy-the-dip opportunity.',
+      'GENERIC_OPPORTUNITY_CLAIM'],
+    ['Policy uncertainty is a risk, while a supported issuer has a qualified rebound opportunity.',
       'GENERIC_OPPORTUNITY_CLAIM']
   ]) {
     const output = supportedOutput(input);
     output.sections[5].content = content;
-    output.sections[5].evidenceRefs = ['e3'];
+    output.sections[5].evidenceRefs = content.includes('supported issuer') ? ['e5'] : ['e3'];
     assert.equal(validateClaudeAnalysisOutput(output, input).valid, false);
     const diagnostics = [];
     const result = await invokeFixture(input, output, diagnostics);
