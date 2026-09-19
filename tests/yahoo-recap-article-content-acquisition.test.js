@@ -180,7 +180,7 @@ test('diagnoses bounded Yahoo retrieval, size, JSON-LD and timestamp failures wi
       fetchImpl: async () => response(html(article({datePublished: 'invalid'})))
     },
     {
-      expectedResult: 'INVALID_METADATA', expectedDiagnostic: 'INVALID_DATE_MODIFIED',
+      expectedResult: 'INVALID_METADATA', expectedDiagnostic: 'INVALID_DATE_MODIFIED_FORMAT',
       fetchImpl: async () => response(html(article({dateModified: 'invalid'})))
     }
   ];
@@ -203,7 +203,8 @@ test('diagnoses bounded Yahoo retrieval, size, JSON-LD and timestamp failures wi
     const serialized = JSON.stringify(diagnostics);
     for (const forbidden of [
       'articleBody', 'rawHtml', 'authorization', 'apiKey', 'secret',
-      'provider response body'
+      'provider response body', canonicalUrl,
+      'Stock market today: September 9 recap', 'Yahoo Finance'
     ]) assert.equal(serialized.includes(forbidden), false, forbidden);
   }
 });
@@ -846,7 +847,12 @@ test('rejects an acquisition dateModified before datePublished', async () => {
       validation: frozenValidation({dateModified: null})
     });
   assert.equal(result.type, 'INVALID_METADATA');
-  assert.equal(diagnostics[0].failureType, 'INVALID_DATE_MODIFIED');
+  assert.equal(diagnostics[0].failureType, 'DATE_MODIFIED_BEFORE_PUBLISHED');
+  const serialized = JSON.stringify(diagnostics[0]);
+  for (const forbidden of [
+    '2026-09-09T16:29:59-04:00', canonicalUrl,
+    'Stock market today: September 9 recap', 'Yahoo Finance', 'articleBody'
+  ]) assert.equal(serialized.includes(forbidden), false, forbidden);
 });
 
 test('enforces article-text and normalized-result bounds atomically without truncation', async () => {
