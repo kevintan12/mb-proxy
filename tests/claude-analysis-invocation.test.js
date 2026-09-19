@@ -705,16 +705,14 @@ test('localizes empty broad-market focus to Section 4 without removing valid dri
   });
 });
 
-test('does not normalize hard-gate violations when the package supplies eligible evidence', async () => {
+test('keeps unrelated driver and broad-market hard-gate violations strict', async () => {
   const input = canonicalInput();
   const invalidDriver = normalOutput(input);
   invalidDriver.sections[1].evidenceRefs = [];
-  const invalidCatalyst = normalOutput(input);
-  invalidCatalyst.sections[2].evidenceRefs = [];
   const invalidFocus = normalOutput(input);
   invalidFocus.sections[3].content = 'Generic index commentary.';
 
-  for (const output of [invalidDriver, invalidCatalyst, invalidFocus]) {
+  for (const output of [invalidDriver, invalidFocus]) {
     const result = await invokeClaudeAnalysis({
       input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
     });
