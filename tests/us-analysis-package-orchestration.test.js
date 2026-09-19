@@ -11,6 +11,13 @@ const {
   CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS,
   createCnbcNewsResearchRuntime
 } = require('../lib/cnbc-news-research-runtime');
+const {createYahooRecapResearchRuntime} = require('../lib/yahoo-recap-research-runtime');
+const {
+  createYahooRecapArticleContentAcquisitionService
+} = require('../lib/yahoo-recap-article-content-acquisition');
+const {
+  createYahooRecapEvidenceConstructionService
+} = require('../lib/yahoo-recap-evidence-construction');
 const {
   REPORT_HEADER,
   REPORT_SECTION_NAMES,
@@ -759,6 +766,87 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
     evidenceRef: 'e2', sessionDate: '2026-09-04'
   }]);
   assert.equal(JSON.stringify(output).includes('c1'), false);
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('real Yahoo validation, article acquisition and evidence construction reach Further Readings', async () => {
+  const url = 'https://finance.yahoo.com/markets/live/stock-market-today-september-4.html';
+  const title = 'Stock market today: September 4 recap';
+  const publishedAt = '2026-09-04T20:03:54Z';
+  const updatedAt = '2026-09-04T20:20:00Z';
+  const html = `<link rel="canonical" href="${url}"><script type="application/ld+json">${JSON.stringify({
+    '@type': 'LiveBlogPosting', headline: title, datePublished: publishedAt,
+    dateModified: updatedAt, url,
+    publisher: {'@type': 'Organization', name: 'Yahoo Finance'},
+    articleBody: 'The US stock market finished the September 4 session higher.'
+  })}</script>`;
+  const requests = [];
+  const fetchImpl = async requestedUrl => {
+    requests.push(requestedUrl);
+    if (requestedUrl === 'https://api.anthropic.com/v1/messages') {
+      return {
+        ok: true, status: 200, headers: {get: () => null},
+        async json() {
+          return {content: [{type: 'web_search_tool_result', content: [{
+            type: 'web_search_result', title, url
+          }]}]};
+        }
+      };
+    }
+    assert.equal(requestedUrl, url);
+    return {
+      ok: true, status: 200, url,
+      headers: {get: name => name === 'content-type' ? 'text/html; charset=utf-8' : null},
+      async text() { return html; }
+    };
+  };
+  const {service} = harness({
+    yahooRecapResearch: createYahooRecapResearchRuntime({apiKey: 'test-key', fetchImpl}),
+    yahooRecapArticleContentAcquisition:
+      createYahooRecapArticleContentAcquisitionService({fetchImpl}),
+    yahooRecapEvidenceConstruction: createYahooRecapEvidenceConstructionService({
+      evidenceConstructionBounds: {
+        maxHeadlineBytes: 512, maxPublisherNameBytes: 256,
+        maxEvidenceTextBytes: 8192, maxResultBytes: 12288
+      }
+    })
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.deepEqual(requests, ['https://api.anthropic.com/v1/messages', url, url]);
+  assert.equal(context.evidence[1].reference, 'e2');
+  assert.equal(context.evidence[1].item.sourceId, 'us.yahoo-finance');
+  assert.equal(context.evidence[1].item.canonicalUrl, url);
+  assert.equal(context.evidence[1].item.publishedAt, '2026-09-04T20:03:54.000Z');
+  assert.equal(context.evidence[1].item.provenance.publisher, 'Yahoo Finance');
+  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04'}]);
+  assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), false);
+  assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_UNAVAILABLE_GAP), false);
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('real Yahoo article retrieval failure remains optional after validated research', async () => {
+  let fetches = 0;
+  const {service} = harness({
+    yahooRecapResearch: {
+      async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }
+    },
+    yahooRecapArticleContentAcquisition: createYahooRecapArticleContentAcquisitionService({
+      async fetchImpl(url) {
+        fetches++;
+        assert.equal(url, yahooRecapResearchSuccess().discovery.url);
+        return {ok: false, status: 503};
+      }
+    })
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.equal(fetches, 1);
+  assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.yahoo-finance'
+    && entry.item.evidenceCategory === 'news'), false);
+  assert.deepEqual(context.furtherReadings, []);
+  assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), true);
+  assert.equal(context.unresolvedGaps.includes(CNBC_RECAP_UNAVAILABLE_GAP), true);
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 

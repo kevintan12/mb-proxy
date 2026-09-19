@@ -159,6 +159,7 @@ test('rejects invalid source, publisher, URL, title, text, timestamps and target
     articleContent({articleText: ''}),
     articleContent({publishedAt: '2026-09-09'}),
     articleContent({updatedAt: 'invalid'}),
+    articleContent({updatedAt: '2026-09-09T20:03:53.000Z'}),
     articleContent({targetSessionDate: '2026-02-30'}),
     articleContent({targetSessionDate: '2026-09-08'}),
     Object.freeze({...articleContent(), extra: true})

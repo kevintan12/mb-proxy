@@ -236,6 +236,38 @@ test('skips stale candidates and returns the later exact target-session recap', 
   assert.equal(result.validation.targetSessionDate, target);
 });
 
+test('skips a timestamp-reversed candidate and considers the next bounded result', async () => {
+  const firstUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-reversed.html';
+  const secondUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-valid.html';
+  const calls = [];
+  const diagnostics = [];
+  const result = await runtime(async url => {
+    calls.push(url);
+    if (url === 'https://api.anthropic.com/v1/messages') {
+      return anthropicResponse([
+        searchResult(firstUrl, 'Reversed timestamp recap'),
+        searchResult(secondUrl, 'Valid timestamp recap')
+      ]);
+    }
+    return yahooResponse(yahooHtml({
+      headline: url === firstUrl ? 'Reversed timestamp recap' : 'Valid timestamp recap',
+      dateModified: url === firstUrl ? '2026-09-09T20:29:59Z' : '2026-09-09T21:00:00Z'
+    }, url), {url});
+  }, {onDiagnostics: value => diagnostics.push(value)})
+    .discoverAndValidateRecap({targetSessionDate});
+  assert.deepEqual(calls, ['https://api.anthropic.com/v1/messages', firstUrl, secondUrl]);
+  assert.equal(result.type, 'VALIDATED');
+  assert.equal(result.discovery.url, secondUrl);
+  assert.equal(result.validation.url, secondUrl);
+  assert.equal(result.validation.targetSessionDate, targetSessionDate);
+  assert.deepEqual(diagnostics.filter(value => value.stage === 'yahooRecapSessionCandidateValidation')
+    .map(value => [value.rank, value.outcome]), [
+    [1, 'NOT_VALIDATED'], [2, 'VALIDATED']
+  ]);
+  assert.deepEqual(diagnostics.filter(value => value.stage === 'yahooRecapSessionValidation')
+    .map(value => value.outcomeType), ['NOT_VALIDATED_TIMESTAMP_ORDER', 'VALIDATED']);
+});
+
 test('returns optional absence without stale substitution after the bounded attempt ceiling', async () => {
   const target = '2026-09-10';
   const urls = Array.from({length: 4}, (_, index) =>

@@ -274,7 +274,8 @@ test('requires exact frozen discovery and validation objects before fetch', asyn
     {...input(), validation: frozenValidation({headline: ' Stock market today'})},
     {...input(), validation: frozenValidation({url: canonicalUrl.replace('/markets/', '/news/')})},
     {...input(), validation: frozenValidation({targetSessionDate: '2026-09-08'})},
-    {...input(), validation: frozenValidation({datePublished: '2026-09-10T20:30:00.000Z'})}
+    {...input(), validation: frozenValidation({datePublished: '2026-09-10T20:30:00.000Z'})},
+    {...input(), validation: frozenValidation({dateModified: '2026-09-09T20:29:59.000Z'})}
   ];
   for (const value of cases) {
     assert.deepEqual(await acquire(value), {

@@ -121,6 +121,45 @@ test('dateModified cannot override a mismatched datePublished', async () => {
   assert.equal(result.type, 'NOT_VALIDATED');
 });
 
+test('same-session dateModified before datePublished is skipped with a sanitized diagnostic', async () => {
+  const diagnostics = [];
+  const html = articleHtml({dateModified: '2026-09-09T16:29:59-04:00'});
+  const result = await service(async () => response(html), {
+    onDiagnostics: value => diagnostics.push(value)
+  }).validateYahooRecapSession(input());
+  assert.deepEqual(result, {ok: true, type: 'NOT_VALIDATED', validation: null});
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].outcomeType, 'NOT_VALIDATED_TIMESTAMP_ORDER');
+  assert.equal(diagnostics[0].fetchCount, 1);
+  assert.equal(JSON.stringify(diagnostics).includes(currentUrl), false);
+  assert.equal(JSON.stringify(diagnostics).includes('2026-09-09T16:29:59'), false);
+});
+
+test('dateModified equal to datePublished remains valid', async () => {
+  const result = await service(async () => response(articleHtml({
+    dateModified: '2026-09-09T16:30:00-04:00'
+  }))).validateYahooRecapSession(input());
+  assert.equal(result.type, 'VALIDATED');
+  assert.equal(result.validation.dateModified, result.validation.datePublished);
+});
+
+test('skips a reversed-timestamp JSON-LD node and validates a later matching node', async () => {
+  const bad = articleHtml({dateModified: '2026-09-09T16:29:59-04:00'});
+  const goodNode = {
+    '@type': 'LiveBlogPosting', headline: 'Validated September 9 recap',
+    datePublished: '2026-09-09T16:30:00-04:00',
+    dateModified: '2026-09-09T17:00:00-04:00', url: currentUrl
+  };
+  const html = `${bad}<script type="application/ld+json">${JSON.stringify(goodNode)}</script>`;
+  const result = await service(async () => response(html)).validateYahooRecapSession(input());
+  assert.equal(result.type, 'VALIDATED');
+  assert.equal(result.validation.url, currentUrl);
+  assert.equal(result.validation.headline, 'Validated September 9 recap');
+  assert.equal(result.validation.targetSessionDate, '2026-09-09');
+  assert.equal(result.validation.datePublished, '2026-09-09T20:30:00.000Z');
+  assert.equal(result.validation.dateModified, '2026-09-09T21:00:00.000Z');
+});
+
 test('missing or malformed datePublished is not validated', async () => {
   for (const datePublished of [undefined, 'September 9, 2026', '2026-09-09T12:00:00']) {
     const article = {
