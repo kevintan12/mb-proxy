@@ -380,8 +380,7 @@ function harness(overrides = {}) {
               reference,
               materiality: 'LOW',
               roles: [],
-              subjects: [],
-              reason: 'No supported evidence role.'
+              subjects: []
             }))
           }
         };
@@ -427,10 +426,7 @@ function roleClassificationSuccess(
           reference: entry.reference,
           materiality,
           roles,
-          subjects,
-          reason: roles.includes('PRINCIPAL_CATALYST')
-            ? 'This evidence causally supports the completed-session move.'
-            : 'This evidence supports the assigned role assessment.'
+          subjects
         };
       })
     }
@@ -574,7 +570,7 @@ test('fails package assembly when required evidence-role classification fails or
           return {
             ok: false,
             type: 'CONTRACT_FAILURE',
-            message: 'invalid evidence role classification reason',
+            message: 'Claude evidence role classification result was malformed',
             upstreamStatus: 200
           };
         }
@@ -601,7 +597,7 @@ test('fails package assembly when required evidence-role classification fails or
       assert.deepEqual(diagnostics.find(value => value.stage === 'evidenceRoleClassificationFailure'), {
         stage: 'evidenceRoleClassificationFailure',
         failureType: 'CONTRACT_FAILURE',
-        failureMessage: 'invalid evidence role classification reason',
+        failureMessage: 'Claude evidence role classification result was malformed',
         upstreamStatus: 200
       });
     } else {

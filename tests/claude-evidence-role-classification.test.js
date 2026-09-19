@@ -14,7 +14,6 @@ const {
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_SYSTEM_PROMPT,
   CLAUDE_EVIDENCE_SUBJECT_REPAIR_SYSTEM_PROMPT,
   EVIDENCE_ROLES,
-  MAX_CLASSIFICATION_REASON_BYTES,
   buildClaudeEvidenceRoleClassificationRequest,
   buildClaudeEvidenceSubjectRepairRequest,
   canonicalClassificationInput,
@@ -81,9 +80,9 @@ function input(
 
 function classifications(overrides = {}) {
   const values = [
-    {reference: 'e1', materiality: 'MEDIUM', roles: ['MATERIAL_EVENT'], subjects: [], reason: 'A material event is supported.'},
-    {reference: 'e2', materiality: 'HIGH', roles: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'], subjects: [], reason: 'Supplied evidence and benchmark movement support causality.'},
-    {reference: 'e3', materiality: 'LOW', roles: [], subjects: [], reason: 'No supported semantic role.'}
+    {reference: 'e1', materiality: 'MEDIUM', roles: ['MATERIAL_EVENT'], subjects: []},
+    {reference: 'e2', materiality: 'HIGH', roles: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'], subjects: []},
+    {reference: 'e3', materiality: 'LOW', roles: [], subjects: []}
   ];
   if (overrides.index !== undefined) values[overrides.index] = {...values[overrides.index], ...overrides.value};
   return {classifications: values};
@@ -129,7 +128,7 @@ test('accepts completed material events, completed principal catalysts, and unsu
 
 test('permits a subsequent development to be a material event', () => {
   const raw = classifications({index: 2, value: {
-    materiality: 'HIGH', roles: ['MATERIAL_EVENT'], reason: 'Material forward-looking development.'
+    materiality: 'HIGH', roles: ['MATERIAL_EVENT']
   }});
   assert.equal(validateClaudeEvidenceRoleClassificationOutput(raw, input()).valid, true);
 });
@@ -207,8 +206,7 @@ test('requests grounded subjects for retained broad-market material news without
       {kind: 'COMPANY', name: 'Boeing'},
       {kind: 'COMPANY', name: 'GE Vernova'},
       {kind: 'COMPANY', name: 'Eaton'}
-    ],
-    reason: 'Named companies were material broad-market movers.'
+    ]
   };
   const output = createClaudeEvidenceRoleClassificationOutput(valid, source);
   assert.equal(output.classifications[0].subjects.some(subject => subject.name === 'Microsoft'), true);
@@ -229,7 +227,7 @@ test('allows empty subjects when broad-market subjects are not required or evide
 
 test('rejects a subsequent development classified as a principal catalyst', () => {
   const raw = classifications({index: 2, value: {
-    roles: ['PRINCIPAL_CATALYST'], reason: 'Claimed causal role.'
+    roles: ['PRINCIPAL_CATALYST']
   }});
   assert.deepEqual(validateClaudeEvidenceRoleClassificationOutput(raw, input()).errors,
     ['subsequent development cannot be a principal catalyst']);
@@ -258,13 +256,14 @@ test('rejects unknown, duplicate, missing, extra, and reordered references', () 
   for (const raw of cases) assert.equal(validateClaudeEvidenceRoleClassificationOutput(raw, input()).valid, false);
 });
 
-test('requires a bounded canonical reason including for principal catalysts', () => {
-  for (const reason of ['', ' ', `x${'é'.repeat(MAX_CLASSIFICATION_REASON_BYTES)}`]) {
-    assert.equal(validateClaudeEvidenceRoleClassificationOutput(
-      classifications({index: 1, value: {reason}}), input()).valid, false);
-  }
-  const missing = classifications(); delete missing.classifications[1].reason;
-  assert.equal(validateClaudeEvidenceRoleClassificationOutput(missing, input()).valid, false);
+test('classifier result shape excludes the removed reason field', () => {
+  const output = createClaudeEvidenceRoleClassificationOutput(classifications(), input());
+  assert.deepEqual(Object.keys(output.classifications[0]), [
+    'reference', 'materiality', 'roles', 'subjects'
+  ]);
+  const extra = classifications();
+  extra.classifications[0].reason = 'Unused explanation.';
+  assert.equal(validateClaudeEvidenceRoleClassificationOutput(extra, input()).valid, false);
 });
 
 test('canonical input is bounded, immutable, and independent of caller mutation', () => {
@@ -310,17 +309,6 @@ test('locks benchmark and evidence collection count boundaries', () => {
   assert.throws(() => canonicalClassificationInput(fiftyEvidence), /invalid bounded classification evidence/);
 });
 
-test('locks the 500 UTF-8 byte reason boundary', () => {
-  const exactlyFiveHundred = 'é'.repeat(250);
-  const fiveHundredAndOne = `${exactlyFiveHundred}x`;
-  assert.equal(Buffer.byteLength(exactlyFiveHundred, 'utf8'), 500);
-  assert.equal(Buffer.byteLength(fiveHundredAndOne, 'utf8'), 501);
-  assert.equal(validateClaudeEvidenceRoleClassificationOutput(
-    classifications({index: 0, value: {reason: exactlyFiveHundred}}), input()).valid, true);
-  assert.equal(validateClaudeEvidenceRoleClassificationOutput(
-    classifications({index: 0, value: {reason: fiveHundredAndOne}}), input()).valid, false);
-});
-
 test('builds a fixed server-owned request with no tools and no caller override surface', () => {
   const request = buildClaudeEvidenceRoleClassificationRequest(input());
   assert.equal(request.model, 'claude-haiku-4-5-20251001');
@@ -363,6 +351,14 @@ test('uses a provider-compatible schema without weakening authoritative subject 
   assert.equal(Object.hasOwn(providerSubjects, 'maxItems'), false);
   assert.equal(request.output_config.format.schema,
     CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVIDER_JSON_SCHEMA);
+  const authoritativeClassification = CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_OUTPUT_JSON_SCHEMA
+    .properties.classifications.items;
+  const providerClassification = CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVIDER_JSON_SCHEMA
+    .properties.classifications.items;
+  assert.equal(authoritativeClassification.required.includes('reason'), false);
+  assert.equal(Object.hasOwn(authoritativeClassification.properties, 'reason'), false);
+  assert.equal(providerClassification.required.includes('reason'), false);
+  assert.equal(Object.hasOwn(providerClassification.properties, 'reason'), false);
   assert.equal(Object.hasOwn(
     request.output_config.format.schema.properties.classifications.items.properties.subjects,
     'maxItems'
@@ -478,12 +474,11 @@ test('diagnoses primary subject omission separately from subjects sanitized to e
   );
   const raw = {classifications: [
     {
-      reference: 'e1', materiality: 'HIGH', roles: ['MATERIAL_EVENT'], subjects: [],
-      reason: 'Material company move.'
+      reference: 'e1', materiality: 'HIGH', roles: ['MATERIAL_EVENT'], subjects: []
     },
     {
       reference: 'e2', materiality: 'MEDIUM', roles: ['MATERIAL_EVENT'],
-      subjects: [{kind: 'SECTOR', name: 'US stocks'}], reason: 'Material market move.'
+      subjects: [{kind: 'SECTOR', name: 'US stocks'}]
     }
   ]};
   const diagnostics = [];
