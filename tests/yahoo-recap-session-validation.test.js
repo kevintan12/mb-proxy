@@ -42,6 +42,12 @@ function articleHtml(overrides = {}) {
     + `<script type="application/ld+json">${JSON.stringify(article)}</script></head></html>`;
 }
 
+function padHtmlToBytes(value, byteLength) {
+  const currentBytes = Buffer.byteLength(value, 'utf8');
+  assert.ok(currentBytes <= byteLength);
+  return value + ' '.repeat(byteLength - currentBytes);
+}
+
 function response(html, {url = currentUrl, status = 200, contentType = 'text/html; charset=utf-8'} = {}) {
   return {
     ok: status >= 200 && status < 300,
@@ -253,6 +259,19 @@ test('rejects oversized bodies atomically', async () => {
     .validateYahooRecapSession(input({bounds: smallBounds}));
   assert.equal(result.type, 'RESPONSE_TOO_LARGE');
   assert.equal(result.validation, null);
+});
+
+test('accepts the production ceiling and rejects one byte above it', async () => {
+  const productionBounds = {...bounds, maxResponseBytes: 1572864};
+  const accepted = padHtmlToBytes(articleHtml(), productionBounds.maxResponseBytes);
+  const valid = await service(async () => response(accepted))
+    .validateYahooRecapSession(input({bounds: productionBounds}));
+  assert.equal(valid.type, 'VALIDATED');
+
+  const rejected = padHtmlToBytes(articleHtml(), productionBounds.maxResponseBytes + 1);
+  const tooLarge = await service(async () => response(rejected))
+    .validateYahooRecapSession(input({bounds: productionBounds}));
+  assert.equal(tooLarge.type, 'RESPONSE_TOO_LARGE');
 });
 
 test('malformed JSON-LD and invalid optional metadata remain NOT_VALIDATED', async () => {

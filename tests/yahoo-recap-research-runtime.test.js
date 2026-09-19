@@ -72,7 +72,7 @@ test('owns one deeply immutable production bounds bundle', () => {
   assert.deepEqual(YAHOO_RECAP_RESEARCH_PRODUCTION_BOUNDS, {
     sessionValidationBounds: {
       timeoutMs: 4000,
-      maxResponseBytes: 1258291,
+      maxResponseBytes: 1572864,
       maxHeadlineBytes: 512
     }
   });
@@ -147,7 +147,10 @@ test('uses the exact production response bound at session validation', async () 
   assert.equal(accepted.type, 'VALIDATED');
   assert.equal(calls.length, 2);
 
-  const oversized = yahooHtml().padEnd(1258292, ' ');
+  const oversized = yahooHtml().padEnd(
+    YAHOO_RECAP_RESEARCH_PRODUCTION_BOUNDS.sessionValidationBounds.maxResponseBytes + 1,
+    ' '
+  );
   const rejected = await runtime(async url => url === 'https://api.anthropic.com/v1/messages'
     ? anthropicResponse([searchResult()]) : yahooResponse(oversized))
     .discoverAndValidateRecap({targetSessionDate});

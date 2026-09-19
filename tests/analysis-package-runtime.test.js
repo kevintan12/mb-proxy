@@ -50,7 +50,7 @@ test('runtime owns the exact deeply immutable Yahoo recap package bounds', () =>
   assert.deepEqual(YAHOO_RECAP_PACKAGE_PRODUCTION_BOUNDS, {
     articleContentBounds: {
       timeoutMs: 4000,
-      maxResponseBytes: 1258291,
+      maxResponseBytes: 1572864,
       maxHeadlineBytes: 512,
       maxPublisherNameBytes: 256,
       maxArticleTextBytes: 8192,

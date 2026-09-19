@@ -13,7 +13,7 @@ const canonicalUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-
 const targetSessionDate = '2026-09-09';
 const bounds = Object.freeze({
   timeoutMs: 4000,
-  maxResponseBytes: 1258291,
+  maxResponseBytes: 1572864,
   maxHeadlineBytes: 512,
   maxPublisherNameBytes: 256,
   maxArticleTextBytes: 8192,
@@ -57,6 +57,12 @@ function article(overrides = {}) {
 function html(articleValue = article(), canonical = canonicalUrl) {
   return `<link rel="canonical" href="${canonical}">`
     + `<script type="application/ld+json">${JSON.stringify(articleValue)}</script>`;
+}
+
+function padHtmlToBytes(value, byteLength) {
+  const currentBytes = Buffer.byteLength(value, 'utf8');
+  assert.ok(currentBytes <= byteLength);
+  return value + ' '.repeat(byteLength - currentBytes);
 }
 
 function response(body = html(), overrides = {}) {
@@ -161,7 +167,8 @@ test('diagnoses bounded Yahoo retrieval, size, JSON-LD and timestamp failures wi
     {
       expectedResult: 'RESPONSE_TOO_LARGE', expectedDiagnostic: 'RESPONSE_TOO_LARGE',
       fetchImpl: async () => response('', {
-        headers: {get: name => name === 'content-type' ? 'text/html' : '1258292'}
+        headers: {get: name => name === 'content-type'
+          ? 'text/html' : String(bounds.maxResponseBytes + 1)}
       })
     },
     {
@@ -695,13 +702,35 @@ test('rejects unsuitable content types and oversized raw responses', async () =>
   assert.equal(invalidType.type, 'INVALID_CONTENT_TYPE');
 
   const declared = await service(async () => response('', {
-    headers: {get: name => name === 'content-type' ? 'text/html' : '1258292'}
+    headers: {get: name => name === 'content-type'
+      ? 'text/html' : String(bounds.maxResponseBytes + 1)}
   })).acquireArticleContent(input());
   assert.equal(declared.type, 'RESPONSE_TOO_LARGE');
 
-  const oversized = html().padEnd(1258292, ' ');
+  const oversized = padHtmlToBytes(html(), bounds.maxResponseBytes + 1);
   const actual = await service(async () => response(oversized)).acquireArticleContent(input());
   assert.equal(actual.type, 'RESPONSE_TOO_LARGE');
+});
+
+test('accepts observed and exact-ceiling Yahoo responses but rejects one byte above', async () => {
+  for (const responseBytes of [1261568, bounds.maxResponseBytes]) {
+    const body = padHtmlToBytes(html(), responseBytes);
+    const acquired = await service(async () => response(body)).acquireArticleContent(input());
+    assert.equal(acquired.type, 'SUCCESS');
+  }
+
+  const oversized = padHtmlToBytes(html(), bounds.maxResponseBytes + 1);
+  const rejected = await service(async () => response(oversized)).acquireArticleContent(input());
+  assert.equal(rejected.type, 'RESPONSE_TOO_LARGE');
+
+  let bodyReads = 0;
+  const declared = await service(async () => response('', {
+    headers: {get: name => name === 'content-type'
+      ? 'text/html' : String(bounds.maxResponseBytes + 1)},
+    async text() { bodyReads++; return html(); }
+  })).acquireArticleContent(input());
+  assert.equal(declared.type, 'RESPONSE_TOO_LARGE');
+  assert.equal(bodyReads, 0);
 });
 
 test('rejects malformed HTML, malformed JSON-LD, and unsupported article metadata', async () => {
