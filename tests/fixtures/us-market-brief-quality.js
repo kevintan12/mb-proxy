@@ -10,7 +10,7 @@ const {
 
 const GENERATED_AT = '2026-09-06T10:00:00.000Z';
 
-function fiveSessionSnapshot(symbol, instrumentType = 'INDEX') {
+function fiveSessionSnapshot(symbol, instrumentType = 'INDEX', instrumentName = `${symbol} instrument`) {
   const facts = [
     ['2026-08-31', 100, 99],
     ['2026-09-01', 101, 100],
@@ -19,7 +19,7 @@ function fiveSessionSnapshot(symbol, instrumentType = 'INDEX') {
     ['2026-09-04', 105, 102]
   ];
   return createFiveSessionSnapshot({
-    market: 'US', symbol, instrumentName: `${symbol} instrument`, instrumentType,
+    market: 'US', symbol, instrumentName, instrumentType,
     currency: 'USD', marketState: 'CLOSED', currentOverlay: null,
     completedSessions: facts.map(([sessionDate, close, previousClose], index) =>
       createCompletedRegularSession({
@@ -39,14 +39,19 @@ function item(sourceId, title, canonicalUrl, publishedAt, symbols = [], evidence
   });
 }
 
-function completedUsWeekInput({unresolvedGaps = [], includeBroadMarket = true} = {}) {
+function completedUsWeekInput({
+  unresolvedGaps = [], includeBroadMarket = true, includeFollowedFocus = false,
+  stockInstrumentName = 'MSFT instrument'
+} = {}) {
   const benchmark = fiveSessionSnapshot('^GSPC');
-  const stock = fiveSessionSnapshot('MSFT', 'EQUITY');
+  const stock = fiveSessionSnapshot('MSFT', 'EQUITY', stockInstrumentName);
   const evidence = [
     item('us.yahoo-finance', 'Target-session Yahoo recap',
       'https://finance.yahoo.com/markets/live/stock-market-today-example.html',
       '2026-09-04T21:00:00Z', ['^GSPC', 'MSFT']),
-    item('us.cnbc', 'Stock market news for Sept. 4, 2026',
+    item('us.cnbc', includeFollowedFocus
+      ? 'Microsoft leads broad-market software shares on Sept. 4, 2026'
+      : 'Stock market news for Sept. 4, 2026',
       'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html',
       '2026-09-04T19:30:00Z', ['MSFT']),
     item('us.federal-reserve', 'Federal Reserve policy context',
@@ -83,6 +88,9 @@ function completedUsWeekInput({unresolvedGaps = [], includeBroadMarket = true} =
         conflictingEvidence: [], subsequentDevelopments: ['e1'],
         sessionAssociations: [{evidenceRef: 'e1', sessionDate: '2026-09-04'}],
         broadMarketFocus: includeBroadMarket ? [
+          ...(includeFollowedFocus ? [
+            {evidenceRef: 'e2', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]}
+          ] : []),
           {evidenceRef: 'e4', subjects: [{kind: 'COMPANY', name: 'Broadcom'}]},
           {evidenceRef: 'e5', subjects: [{kind: 'SECTOR', name: 'Health-care'}]}
         ] : [],
@@ -108,8 +116,8 @@ function completedUsWeekInput({unresolvedGaps = [], includeBroadMarket = true} =
   });
 }
 
-function richCompletedUsWeekInput({unresolvedGaps = []} = {}) {
-  return completedUsWeekInput({unresolvedGaps, includeBroadMarket: true});
+function richCompletedUsWeekInput(options = {}) {
+  return completedUsWeekInput({...options, includeBroadMarket: true});
 }
 
 function thinDegradedFiveSessionInput() {

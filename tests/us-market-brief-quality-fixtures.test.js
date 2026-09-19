@@ -180,15 +180,88 @@ test('an optional provider gap does not force DEGRADED when supported analytical
   assert.equal(output.sections.every((section, index) => index === 10 || section.content !== null), true);
 });
 
-test('a market-significant followed company may overlap Sections 4 and 5 without list contamination', () => {
+test('Section 4 rejects a portfolio reference without independent broad-market focus', async () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
   output.sections[3].evidenceRefs = ['e2', 'e4', 'e5'];
   output.evidenceReferences = ['e2', 'e3', 'e4', 'e5', 'e1'];
-  assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
-  assert.equal(output.sections[3].evidenceRefs.includes('e2'), true);
-  assert.deepEqual(output.sections[4].evidenceRefs, ['e2']);
-  assert.deepEqual(output.sections[3].telemetryRefs, ['t1']);
+  assert.equal(validateClaudeAnalysisOutput(output, input).errors.includes(
+    'sections[3]: evidence references must belong to broad-market focus'), true);
+  const originalFocus = input.marketPackages[0].evidenceContext.broadMarketFocus;
+  const diagnostics = [];
+  const result = await invokeFixture(input, output, diagnostics);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.deepEqual(result.output.sections[3], {
+    name: 'STOCKS & SECTORS IN FOCUS', content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['Broad-market company and sector support could not be validated from the generated Section 4 scope.']
+  });
+  assert.deepEqual(result.output.sections[4].evidenceRefs, ['e2']);
+  assert.deepEqual(result.output.sections[4].telemetryRefs, ['t2']);
+  assert.deepEqual(input.marketPackages[0].evidenceContext.broadMarketFocus, originalFocus);
+  assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization'), [{
+    stage: 'claudeAnalysisSectionNormalization', sectionIndex: 3,
+    violationCategory: 'NON_FOCUS_EVIDENCE', suppliedReferenceCount: 3,
+    allowedReferenceCount: 2, offendingReferenceCount: 1
+  }]);
+  assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
+});
+
+test('Section 4 accepts focus evidence and benchmark telemetry but localizes stock telemetry', async () => {
+  const input = richCompletedUsWeekInput();
+  const valid = supportedOutput(input);
+  assert.equal(validateClaudeAnalysisOutput(valid, input).valid, true);
+  assert.deepEqual(valid.sections[3].telemetryRefs, ['t1']);
+  const invalid = supportedOutput(input);
+  invalid.sections[3].telemetryRefs = ['t1', 't2'];
+  assert.equal(validateClaudeAnalysisOutput(invalid, input).errors.includes(
+    'sections[3]: telemetry references must belong to benchmark telemetry'), true);
+  const result = await invokeFixture(input, invalid);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.sections[3].content, null);
+  assert.deepEqual(result.output.sections[3].telemetryRefs, []);
+  assert.deepEqual(result.output.sections[4].telemetryRefs, ['t2']);
+});
+
+test('Section 4 localizes uncited portfolio symbols and instrument names, but allows independently focused companies', async () => {
+  const input = richCompletedUsWeekInput({stockInstrumentName: 'Microsoft'});
+  for (const prose of [
+    'Broadcom led semiconductor shares while MSFT also advanced.',
+    'Broadcom led semiconductor shares while Microsoft also advanced.',
+    'Broadcom led semiconductor shares while watchlist name AAPL also advanced.'
+  ]) {
+    const output = supportedOutput(input);
+    output.sections[3].content = prose;
+    assert.equal(validateClaudeAnalysisOutput(output, input).errors.includes(
+      'sections[3]: portfolio company requires independent broad-market focus'), true);
+    const diagnostics = [];
+    const result = await invokeFixture(input, output, diagnostics);
+    assert.equal(result.type, 'SUCCESS', result.message);
+    assert.equal(result.output.sections[3].content, null);
+    assert.deepEqual(result.output.sections[3].evidenceRefs, []);
+    assert.deepEqual(result.output.sections[4].evidenceRefs, ['e2']);
+    assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization'), [{
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 3,
+      violationCategory: 'UNFOCUSED_PORTFOLIO_MENTION', suppliedReferenceCount: 0,
+      allowedReferenceCount: 0, offendingReferenceCount: 1
+    }]);
+    assert.equal(JSON.stringify(diagnostics).includes(prose), false);
+  }
+
+  const focused = richCompletedUsWeekInput({
+    stockInstrumentName: 'Microsoft', includeFollowedFocus: true
+  });
+  const output = supportedOutput(focused);
+  output.sections[3].content = 'Microsoft and Broadcom led their respective groups; MSFT remained in focus.';
+  assert.equal(validateClaudeAnalysisOutput(output, focused).errors.includes(
+    'sections[3]: portfolio company requires independent broad-market focus'), true);
+  output.sections[3].evidenceRefs = ['e2', 'e4', 'e5'];
+  assert.equal(validateClaudeAnalysisOutput(output, focused).valid, true);
+  const result = await invokeFixture(focused, output);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'NORMAL');
+  assert.deepEqual(result.output.sections[3], output.sections[3]);
+  assert.deepEqual(result.output.sections[4], output.sections[4]);
 });
 
 test('a repaired broad-market focus package preserves valid causal and initiating-list sections', async () => {
@@ -290,6 +363,7 @@ test('does not launder unknown global references through section-local normaliza
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
   output.sections[2].evidenceRefs = ['e999'];
+  output.sections[3].evidenceRefs = ['e999'];
   output.sections[4].evidenceRefs = ['e999'];
   const diagnostics = [];
   const result = await invokeFixture(input, output, diagnostics);
