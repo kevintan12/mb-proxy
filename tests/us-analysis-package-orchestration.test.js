@@ -40,6 +40,7 @@ const {
   YAHOO_RECAP_RETRIEVAL_FAILURE_GAP,
   YAHOO_RECAP_EVIDENCE_CONSTRUCTION_FAILURE_GAP,
   ORCHESTRATION_REQUEST_KEYS,
+  broadMarketNewsReferences,
   createUsAnalysisPackageOrchestrationService,
   validateUsAnalysisOrchestrationRequest
 } = require('../lib/us-analysis-package-orchestration');
@@ -766,6 +767,241 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
     evidenceRef: 'e2', sessionDate: '2026-09-04'
   }]);
   assert.equal(JSON.stringify(output).includes('c1'), false);
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('broad-market news lane uses validated record identity, not provider or portfolio membership', () => {
+  const portfolioOnly = createEvidenceItem({
+    sourceId: 'us.reuters', market: 'US', evidenceCategory: 'news',
+    title: 'Portfolio-only company update', summary: 'One followed company update.',
+    canonicalUrl: 'https://www.reuters.com/world/us/portfolio-only-update/',
+    publishedAt: '2026-09-04T19:00:00Z', symbols: ['AAPL']
+  });
+  const broadMarket = createEvidenceItem({
+    sourceId: 'us.reuters', market: 'US', evidenceCategory: 'news',
+    title: 'Semiconductor sector leadership', summary: 'Semiconductor companies led the market.',
+    canonicalUrl: 'https://www.reuters.com/world/us/sector-leadership/',
+    publishedAt: '2026-09-04T19:00:00Z', symbols: []
+  });
+  const background = yahooEvidence('^RUT').items[0];
+  assert.deepEqual([...broadMarketNewsReferences(
+    [portfolioOnly, background, broadMarket], [broadMarket, background]
+  )], ['e3']);
+  assert.deepEqual([...broadMarketNewsReferences(
+    [portfolioOnly, background, broadMarket], []
+  )], []);
+});
+
+test('Yahoo, CNBC recap, and general CNBC can independently or jointly supply Section 3 focus', async () => {
+  const yahooArticle = Object.freeze({
+    ...yahooRecapArticle(),
+    articleText: 'Microsoft led broad-market technology shares.'
+  });
+  const cnbcRecap = ({horizons}) => {
+    const result = cnbcRecapResearchSuccess({horizon: horizons[1]});
+    const original = result.constructedEvidence.evidenceItem;
+    return {
+      ...result,
+      constructedEvidence: {
+        ...result.constructedEvidence,
+        evidenceItem: createEvidenceItem({
+          sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news',
+          title: original.title, summary: 'Nvidia led semiconductor shares.',
+          canonicalUrl: original.canonicalUrl, publishedAt: original.publishedAt,
+          symbols: []
+        })
+      }
+    };
+  };
+  const cases = [
+    {name: 'Yahoo only', yahoo: true, recap: false, general: false,
+      expected: [['e2', 'Microsoft']]},
+    {name: 'CNBC recap only', yahoo: false, recap: true, general: false,
+      expected: [['e4', 'Nvidia']]},
+    {name: 'general CNBC only', yahoo: false, recap: false, general: true,
+      expected: [['e4', 'Broadcom']]},
+    {name: 'Yahoo and both CNBC paths', yahoo: true, recap: true, general: true,
+      expected: [['e2', 'Microsoft'], ['e5', 'Nvidia'], ['e6', 'Broadcom']]},
+    {name: 'no eligible news', yahoo: false, recap: false, general: false,
+      expected: []}
+  ];
+  for (const scenario of cases) {
+    let classifiedInput;
+    const {service} = harness({
+      yahooRecapResearch: {
+        async discoverAndValidateRecap() {
+          return scenario.yahoo ? yahooRecapResearchSuccess()
+            : {ok: true, type: 'NOT_FOUND', discovery: null, validation: null};
+        }
+      },
+      yahooRecapArticleContentAcquisition: {
+        async acquireArticleContent() {
+          return {ok: true, type: 'SUCCESS', articleContent: yahooArticle};
+        }
+      },
+      yahooRecapEvidenceConstruction: {
+        constructEvidence(value) {
+          return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+        }
+      },
+      cnbcRecapResearch: {
+        async researchCompletedSessionRecap(value) {
+          return scenario.recap ? cnbcRecap(value)
+            : {ok: true, type: 'NOT_FOUND', constructedEvidence: null};
+        }
+      },
+      cnbcNewsResearch: {
+        async researchNews({horizons}) {
+          return scenario.general ? cnbcResearchSuccess(horizons,
+            ['COMPLETED_SESSION'], [{
+              title: 'Broadcom leads semiconductor stocks',
+              summary: 'Broadcom led semiconductor shares.',
+              extract: 'Broadcom led semiconductor shares.'
+            }]) : {ok: true, type: 'NOT_FOUND'};
+        }
+      },
+      evidenceRoleClassification: {
+        async classifyEvidenceRoles(input) {
+          classifiedInput = input;
+          const roles = {};
+          const subjects = {};
+          for (const entry of input.evidence) {
+            if (!entry.requiresBroadMarketSubjects) continue;
+            roles[entry.reference] = ['MATERIAL_EVENT'];
+            const name = ['Microsoft', 'Nvidia', 'Broadcom'].find(candidate =>
+              `${entry.item.title} ${entry.item.summary}`.includes(candidate));
+            subjects[entry.reference] = [{kind: 'COMPANY', name}];
+          }
+          return roleClassificationSuccess(input, roles, subjects);
+        }
+      }
+    });
+    const output = await service.assemble(request());
+    const context = output.marketPackages[0].evidenceContext;
+    assert.deepEqual(context.broadMarketFocus.map(entry => [
+      entry.evidenceRef, entry.subjects[0].name
+    ]), scenario.expected, scenario.name);
+    assert.deepEqual(classifiedInput.evidence.filter(entry =>
+      entry.requiresBroadMarketSubjects).map(entry => entry.reference),
+    scenario.expected.map(([reference]) => reference), scenario.name);
+    assert.equal(validateClaudeAnalysisInput(output), true, scenario.name);
+  }
+});
+
+test('subject repair covers omitted Yahoo and CNBC recap subjects without changing material roles', async () => {
+  const article = Object.freeze({
+    ...yahooRecapArticle(), articleText: 'Microsoft led technology shares.'
+  });
+  let classifiedInput;
+  let repairInput;
+  const {service} = harness({
+    yahooRecapResearch: {
+      async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }
+    },
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() {
+        return {ok: true, type: 'SUCCESS', articleContent: article};
+      }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) {
+        return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+      }
+    },
+    cnbcRecapResearch: {
+      async researchCompletedSessionRecap({horizons}) {
+        const result = cnbcRecapResearchSuccess({horizon: horizons[1]});
+        const item = result.constructedEvidence.evidenceItem;
+        return {
+          ...result,
+          constructedEvidence: {
+            ...result.constructedEvidence,
+            evidenceItem: createEvidenceItem({
+              sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news',
+              title: item.title, summary: 'Nvidia led semiconductor shares.',
+              canonicalUrl: item.canonicalUrl, publishedAt: item.publishedAt,
+              symbols: []
+            })
+          }
+        };
+      }
+    },
+    cnbcNewsResearch: {
+      async researchNews() { return {ok: true, type: 'NOT_FOUND'}; }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        classifiedInput = input;
+        return roleClassificationSuccess(input, {
+          e2: ['MATERIAL_EVENT'], e5: ['MATERIAL_EVENT']
+        }, {e2: [], e5: []});
+      },
+      async repairEvidenceSubjects(input) {
+        repairInput = input;
+        return {ok: true, type: 'SUCCESS', output: {repairs: [
+          {reference: 'e2', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]},
+          {reference: 'e5', subjects: [{kind: 'COMPANY', name: 'Nvidia'}]}
+        ]}};
+      }
+    }
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.deepEqual(classifiedInput.evidence.filter(entry =>
+    entry.requiresBroadMarketSubjects).map(entry => entry.reference), ['e2', 'e5']);
+  assert.deepEqual(repairInput.evidence.map(entry => entry.reference), ['e2', 'e5']);
+  assert.deepEqual(context.broadMarketFocus, [
+    {evidenceRef: 'e2', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]},
+    {evidenceRef: 'e5', subjects: [{kind: 'COMPANY', name: 'Nvidia'}]}
+  ]);
+  assert.deepEqual(context.materialEvents, ['e2', 'e5']);
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('validated Yahoo focus survives general CNBC classifier-capacity rejection', async () => {
+  const article = Object.freeze({
+    ...yahooRecapArticle(), articleText: 'Microsoft led technology shares.'
+  });
+  let classifiedInput;
+  const {service} = harness({
+    federalReserveEvidenceAcquisition: {
+      async acquireEvidence() { return manyFedEvidence(48); }
+    },
+    yahooRecapResearch: {
+      async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }
+    },
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() {
+        return {ok: true, type: 'SUCCESS', articleContent: article};
+      }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) {
+        return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+      }
+    },
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION']);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        classifiedInput = input;
+        return roleClassificationSuccess(input, {e2: ['MATERIAL_EVENT']}, {
+          e2: [{kind: 'COMPANY', name: 'Microsoft'}]
+        });
+      }
+    }
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.equal(classifiedInput.evidence.length, 50);
+  assert.deepEqual(context.broadMarketFocus, [{
+    evidenceRef: 'e2', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]
+  }]);
+  assert.equal(context.unresolvedGaps.includes(BROAD_MARKET_EVIDENCE_UNAVAILABLE_GAP), true);
+  assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
