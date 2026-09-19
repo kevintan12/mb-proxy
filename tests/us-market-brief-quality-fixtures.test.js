@@ -219,17 +219,20 @@ test('Section 6 keeps risk-only output while localizing unsupported or generic o
     assert.equal(result.output.sections[5].content, content);
   }
 
-  for (const [content, expectedCategory] of [
+  for (const [content, expectedCategory, expectedSubtype] of [
     ['Policy uncertainty is a risk, while an unrelated company rally is a constructive opportunity.',
       'UNSUPPORTED_OPPORTUNITY_CLAIM'],
     ['Policy uncertainty is a risk, while an oversold rebound creates a buy-the-dip opportunity.',
-      'GENERIC_OPPORTUNITY_CLAIM'],
+      'GENERIC_OPPORTUNITY_CLAIM', 'MISSING_FOCUS_CITATION'],
     ['Policy uncertainty is a risk, while a supported issuer has a qualified rebound opportunity.',
-      'GENERIC_OPPORTUNITY_CLAIM']
+      'GENERIC_OPPORTUNITY_CLAIM', 'MISSING_GROUNDED_SUBJECT'],
+    ['Policy uncertainty is a risk, while ETN has a qualified rebound opportunity.',
+      'GENERIC_OPPORTUNITY_CLAIM', 'MISSING_GROUNDED_SUBJECT']
   ]) {
     const output = supportedOutput(input);
     output.sections[5].content = content;
-    output.sections[5].evidenceRefs = content.includes('supported issuer') ? ['e5'] : ['e3'];
+    output.sections[5].evidenceRefs = content.includes('supported issuer')
+      || content.includes('ETN') ? ['e5'] : ['e3'];
     assert.equal(validateClaudeAnalysisOutput(output, input).valid, false);
     const diagnostics = [];
     const result = await invokeFixture(input, output, diagnostics);
@@ -246,6 +249,7 @@ test('Section 6 keeps risk-only output while localizing unsupported or generic o
       value.stage === 'claudeAnalysisSectionNormalization'), [{
       stage: 'claudeAnalysisSectionNormalization', sectionIndex: 5,
       violationCategory: expectedCategory, suppliedReferenceCount: 1,
+      ...(expectedSubtype ? {violationSubtype: expectedSubtype} : {}),
       allowedReferenceCount: 2, offendingReferenceCount: 1
     }]);
     assert.equal(JSON.stringify(diagnostics).includes(content), false);
