@@ -22,6 +22,7 @@ const {
   buildClaudeAnalysisRequest,
   invokeClaudeAnalysis
 } = require('../lib/claude-analysis-invocation');
+const {projectClaudeAnalysisInput} = require('../lib/claude-model-input-projection');
 
 function canonicalInput({
   includeSecondEvidence = false,
@@ -116,28 +117,49 @@ function anthropicResponse(output, overrides = {}) {
   };
 }
 
-test('builds one deterministic server-owned request with the full package and no tools', () => {
+test('builds one deterministic server-owned request with a projected package and no tools', () => {
   const input = canonicalInput({
     subsequentDevelopments: ['e1'],
     sessionAssociations: [{evidenceRef: 'e1', sessionDate: '2026-09-04'}]
   });
+  const original = JSON.stringify(input);
   const request = buildClaudeAnalysisRequest(input);
+  const modelInput = JSON.parse(request.messages[0].content);
   assert.equal(CLAUDE_ANALYSIS_MODEL, 'claude-haiku-4-5-20251001');
   assert.equal(CLAUDE_ANALYSIS_MAX_TOKENS, 4000);
   assert.equal(request.model, CLAUDE_ANALYSIS_MODEL);
   assert.equal(request.max_tokens, CLAUDE_ANALYSIS_MAX_TOKENS);
-  assert.deepEqual(request.messages, [{role: 'user', content: JSON.stringify(input)}]);
-  assert.equal(JSON.parse(request.messages[0].content).analysisRequest.initiatingList, 'myStocks');
-  assert.equal(JSON.parse(request.messages[0].content).marketPackages[0].telemetry.benchmarkSnapshots[0].reference, 't1');
-  assert.deepEqual(JSON.parse(request.messages[0].content).marketPackages[0].evidenceContext.sessionAssociations, [
+  assert.deepEqual(request.messages, [{role: 'user', content: JSON.stringify(
+    projectClaudeAnalysisInput(input)
+  )}]);
+  assert.equal(JSON.stringify(input), original);
+  assert.equal(modelInput.analysisRequest.initiatingList, 'myStocks');
+  assert.equal(modelInput.marketPackages[0].telemetry.benchmarkSnapshots[0].reference, 't1');
+  assert.deepEqual(modelInput.marketPackages[0].telemetry, input.marketPackages[0].telemetry);
+  assert.deepEqual(modelInput.marketPackages[0].evidenceContext.sessionAssociations, [
     {evidenceRef: 'e1', sessionDate: '2026-09-04'}
   ]);
+  const projectedItem = modelInput.marketPackages[0].evidenceContext.evidence[0].item;
+  assert.deepEqual(Object.keys(projectedItem.provenance), ['publisher', 'authority']);
+  assert.equal(projectedItem.sourceId, 'sg.reuters');
+  assert.equal(projectedItem.provenance.publisher, 'Reuters');
+  assert.equal(projectedItem.provenance.authority, 'secondary');
+  assert.equal('canonicalUrl' in projectedItem, false);
+  for (const omitted of ['homepage', 'locator', 'applicableMarket', 'sourceJurisdiction']) {
+    assert.equal(omitted in projectedItem.provenance, false);
+  }
   assert.equal(Object.isFrozen(input.marketPackages[0].evidenceContext.sessionAssociations), true);
   assert.equal(request.output_config.format.type, 'json_schema');
   assert.equal(request.output_config.format.schema, CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA);
   assert.equal(Object.hasOwn(request, 'tools'), false);
   assert.equal(JSON.stringify(request).includes('web_search'), false);
   assert.equal(Object.isFrozen(request), true);
+  const projection = projectClaudeAnalysisInput(input);
+  assert.equal(Object.isFrozen(projection), true);
+  assert.equal(Object.isFrozen(
+    projection.marketPackages[0].evidenceContext.evidence[0].item.provenance
+  ), true);
+  assert.deepEqual(projection, projectClaudeAnalysisInput(input));
 });
 
 function canonicalInputAtRequestSize(targetBytes) {
@@ -196,7 +218,7 @@ test('reports deterministic sanitized request sizes and provider usage on succes
   const input = canonicalInput({evidenceTitle: '亚洲 Technology sector update'});
   const request = buildClaudeAnalysisRequest(input);
   const serializedRequest = JSON.stringify(request);
-  const canonicalPackage = JSON.parse(request.messages[0].content);
+  const projectedPackage = JSON.parse(request.messages[0].content);
   const diagnostics = [];
   let sentBody;
   let monotonicTime = 0;
@@ -235,14 +257,15 @@ test('reports deterministic sanitized request sizes and provider usage on succes
     requestId: 'req_test_123',
     requestSize: {
       systemPromptBytes: Buffer.byteLength(request.system, 'utf8'),
-      canonicalPackageBytes: Buffer.byteLength(request.messages[0].content, 'utf8'),
+      canonicalPackageBytes: Buffer.byteLength(JSON.stringify(input), 'utf8'),
+      projectedModelInputBytes: Buffer.byteLength(request.messages[0].content, 'utf8'),
       telemetryBytes: Buffer.byteLength(JSON.stringify(
-        canonicalPackage.marketPackages.map(item => item.telemetry)
+        input.marketPackages.map(item => item.telemetry)
       ), 'utf8'),
       evidenceContextBytes: Buffer.byteLength(JSON.stringify(
-        canonicalPackage.marketPackages.map(item => item.evidenceContext)
+        input.marketPackages.map(item => item.evidenceContext)
       ), 'utf8'),
-      portfolioContextBytes: Buffer.byteLength(JSON.stringify(canonicalPackage.portfolioContext), 'utf8'),
+      portfolioContextBytes: Buffer.byteLength(JSON.stringify(input.portfolioContext), 'utf8'),
       providerSchemaBytes: Buffer.byteLength(JSON.stringify(request.output_config.format.schema), 'utf8'),
       completeRequestBodyBytes: Buffer.byteLength(serializedRequest, 'utf8')
     },
@@ -266,6 +289,9 @@ test('reports deterministic sanitized request sizes and provider usage on succes
   assert.equal(Object.isFrozen(diagnostics[0].requestSize), true);
   assert.equal(Object.isFrozen(diagnostics[0].timing), true);
   assert.equal(Object.isFrozen(diagnostics[0].usage), true);
+  assert.deepEqual(projectedPackage.marketPackages[0].telemetry, input.marketPackages[0].telemetry);
+  assert.equal(diagnostics[0].requestSize.projectedModelInputBytes
+    < diagnostics[0].requestSize.canonicalPackageBytes, true);
   const serializedDiagnostics = JSON.stringify(diagnostics[0]);
   assert.equal(serializedDiagnostics.includes('亚洲 Technology sector update'), false);
   assert.equal(serializedDiagnostics.includes('^STI'), false);

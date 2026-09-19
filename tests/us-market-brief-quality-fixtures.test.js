@@ -8,6 +8,7 @@ const {
   buildClaudeAnalysisRequest,
   invokeClaudeAnalysis
 } = require('../lib/claude-analysis-invocation');
+const {projectClaudeAnalysisInput} = require('../lib/claude-model-input-projection');
 const {
   createRuntimeFiveSessionSnapshotRepository
 } = require('../lib/runtime-five-session-snapshot-repository');
@@ -265,7 +266,16 @@ test('rich and thin fixtures survive the complete final invocation boundary with
   ]) {
     const request = buildClaudeAnalysisRequest(input);
     const serializedInput = JSON.parse(request.messages[0].content);
-    assert.deepEqual(serializedInput, input);
+    assert.deepEqual(serializedInput, projectClaudeAnalysisInput(input));
+    assert.deepEqual(
+      serializedInput.marketPackages[0].evidenceContext.furtherReadings,
+      input.marketPackages[0].evidenceContext.furtherReadings
+    );
+    const projectedYahoo = serializedInput.marketPackages[0].evidenceContext.evidence.find(
+      entry => entry.item.sourceId === 'us.yahoo-finance'
+    );
+    assert.equal(projectedYahoo.item.provenance.publisher, 'Yahoo Finance');
+    assert.equal(projectedYahoo.item.provenance.authority, 'secondary');
     const result = await invokeClaudeAnalysis({
       input,
       apiKey: 'test-key',
@@ -280,6 +290,7 @@ test('rich and thin fixtures survive the complete final invocation boundary with
     });
     assert.equal(result.type, 'SUCCESS', result.message);
     assert.equal(result.output.status, expectedStatus);
+    assert.deepEqual(result.output.furtherReadings, output.furtherReadings);
   }
 });
 

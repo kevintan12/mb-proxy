@@ -23,6 +23,9 @@ const {
   invokeClaudeEvidenceRoleClassification,
   invokeClaudeEvidenceSubjectRepair
 } = require('../lib/claude-evidence-role-classification');
+const {
+  projectClaudeEvidenceRoleClassificationInput
+} = require('../lib/claude-model-input-projection');
 
 test('rejects generic market and broad-index labels without rejecting specific names', () => {
   for (const name of [
@@ -310,12 +313,31 @@ test('locks benchmark and evidence collection count boundaries', () => {
 });
 
 test('builds a fixed server-owned request with no tools and no caller override surface', () => {
-  const request = buildClaudeEvidenceRoleClassificationRequest(input());
+  const source = input();
+  const original = JSON.stringify(source);
+  const canonical = canonicalClassificationInput(source);
+  const request = buildClaudeEvidenceRoleClassificationRequest(source);
+  const modelInput = JSON.parse(request.messages[0].content);
   assert.equal(request.model, 'claude-haiku-4-5-20251001');
   assert.equal(request.model, CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_MODEL);
   assert.equal('tools' in request, false);
   assert.equal(request.messages.length, 1);
-  assert.deepEqual(JSON.parse(request.messages[0].content), canonicalClassificationInput(input()));
+  assert.deepEqual(modelInput, projectClaudeEvidenceRoleClassificationInput(canonical));
+  assert.equal(JSON.stringify(source), original);
+  assert.equal(Object.isFrozen(projectClaudeEvidenceRoleClassificationInput(canonical)), true);
+  const projectedItem = modelInput.evidence[0].item;
+  assert.deepEqual(Object.keys(projectedItem), [
+    'sourceId', 'market', 'evidenceCategory', 'title', 'summary', 'publishedAt',
+    'symbols', 'provenance'
+  ]);
+  assert.deepEqual(Object.keys(projectedItem.provenance), ['publisher', 'authority']);
+  assert.equal(projectedItem.sourceId, canonical.evidence[0].item.sourceId);
+  assert.equal(projectedItem.provenance.publisher, canonical.evidence[0].item.provenance.publisher);
+  assert.equal(projectedItem.provenance.authority, canonical.evidence[0].item.provenance.authority);
+  assert.equal('canonicalUrl' in projectedItem, false);
+  for (const omitted of ['homepage', 'locator', 'applicableMarket', 'sourceJurisdiction']) {
+    assert.equal(omitted in projectedItem.provenance, false);
+  }
   assert.equal(request.system, CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_SYSTEM_PROMPT);
   for (const required of [
     'Materiality and causality are distinct judgments',
@@ -338,6 +360,30 @@ test('builds a fixed server-owned request with no tools and no caller override s
   ]) assert.equal(request.system.includes(required), true, required);
   assert.equal(request.system.includes('Hard constraint: when an evidence item has horizon SUBSEQUENT_DEVELOPMENT, its roles may be only [] or [MATERIAL_EVENT]; never output PRINCIPAL_CATALYST for it, either alone or together with MATERIAL_EVENT.'), true);
   assert.throws(() => buildClaudeEvidenceRoleClassificationRequest({...input(), prompt: 'override'}));
+});
+
+test('retains provider-owned Yahoo publisher while rejecting invalid canonical data before projection', () => {
+  const yahoo = evidence(1, {
+    sourceId: 'us.yahoo-finance',
+    publisher: 'Reuters',
+    canonicalUrl: 'https://finance.yahoo.com/markets/live/example.html'
+  });
+  const source = input(['COMPLETED_SESSION'], [yahoo]);
+  const projected = JSON.parse(
+    buildClaudeEvidenceRoleClassificationRequest(source).messages[0].content
+  );
+  assert.equal(projected.evidence[0].item.sourceId, 'us.yahoo-finance');
+  assert.equal(projected.evidence[0].item.provenance.publisher, 'Reuters');
+  assert.equal(projected.evidence[0].item.provenance.authority, 'secondary');
+
+  const invalid = JSON.parse(JSON.stringify(source));
+  invalid.evidence[0].item.canonicalUrl = 'http://example.com/invalid';
+  assert.throws(() => buildClaudeEvidenceRoleClassificationRequest(invalid),
+    /invalid canonical classification evidence/);
+  const spoofed = JSON.parse(JSON.stringify(source));
+  spoofed.evidence[0].item.provenance.authority = 'primary';
+  assert.throws(() => buildClaudeEvidenceRoleClassificationRequest(spoofed),
+    /invalid canonical classification evidence/);
 });
 
 test('uses a provider-compatible schema without weakening authoritative subject bounds', () => {
@@ -546,6 +592,12 @@ test('captures only sanitized size, counts, request-id, timing, usage, and fetch
     primaryOmittedSubjectCount: 0,
     primarySanitizedEmptySubjectCount: 0
   });
+  assert.equal(diagnostics[0].requestSize.classificationInputBytes,
+    Buffer.byteLength(JSON.stringify(canonicalClassificationInput(input())), 'utf8'));
+  assert.equal(diagnostics[0].requestSize.projectedClassificationInputBytes,
+    Buffer.byteLength(buildClaudeEvidenceRoleClassificationRequest(input()).messages[0].content, 'utf8'));
+  assert.equal(diagnostics[0].requestSize.projectedClassificationInputBytes
+    < diagnostics[0].requestSize.classificationInputBytes, true);
   const serialized = JSON.stringify(diagnostics[0]);
   for (const forbidden of ['Canonical evidence', 'Bounded evidence', 'cnbc.com', 'TOP_SECRET', 'Classify every']) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
