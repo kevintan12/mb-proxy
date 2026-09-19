@@ -374,6 +374,17 @@ test('gives Claude explicit validator-sensitive Section 4 and Further Readings i
   }
 });
 
+test('adds the exact package benchmark refs to the request-specific Section 3 allowlist', () => {
+  const input = canonicalInput();
+  const request = buildClaudeAnalysisRequest(input);
+  assert.match(request.system,
+    /Request-specific Section 3 telemetry allowlist: Section 3 telemetryRefs may contain only these exact benchmark refs: \["t1"\]\./);
+  assert.match(request.system, /Do not cite any other telemetry ref in Section 3\./);
+  assert.match(request.system,
+    /even when a company is both in evidenceContext\.broadMarketFocus and My Stocks or Watchlist/);
+  assert.equal(request.system.includes('"t2"'), false);
+});
+
 test('gives Claude the exact top-level evidenceGaps status relationship', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [

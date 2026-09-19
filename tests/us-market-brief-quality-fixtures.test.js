@@ -33,6 +33,62 @@ async function invokeFixture(input, output, diagnostics = []) {
   });
 }
 
+function overlappingFocusInput() {
+  const input = structuredClone(richCompletedUsWeekInput({
+    stockInstrumentName: 'Microsoft', includeFollowedFocus: true
+  }));
+  const market = input.marketPackages[0];
+  const benchmarkDefinitions = [
+    ['^GSPC', 'S&P 500'],
+    ['^DJI', 'Dow Jones Industrial Average'],
+    ['^IXIC', 'Nasdaq Composite'],
+    ['^RUT', 'Russell 2000']
+  ];
+  market.telemetry.benchmarkSnapshots = benchmarkDefinitions.map(([symbol, instrumentName], index) => ({
+    reference: `t${index + 1}`,
+    snapshot: fiveSessionSnapshot(symbol, 'INDEX', instrumentName)
+  }));
+  market.telemetry.stockSnapshots = [
+    ['MSFT', 'Microsoft'],
+    ['NVDA', 'Nvidia'],
+    ['AAPL', 'Apple']
+  ].map(([symbol, instrumentName], index) => ({
+    reference: `t${index + 5}`,
+    snapshot: fiveSessionSnapshot(symbol, 'EQUITY', instrumentName)
+  }));
+  const followedEvidence = market.evidenceContext.evidence.find(entry => entry.reference === 'e2').item;
+  followedEvidence.title = 'Microsoft, Nvidia and Apple are broad-market companies in focus';
+  followedEvidence.summary =
+    'Microsoft, Nvidia and Apple supply bounded broad-market company context.';
+  market.evidenceContext.broadMarketFocus.find(entry => entry.evidenceRef === 'e2').subjects = [
+    {kind: 'COMPANY', name: 'Microsoft'},
+    {kind: 'COMPANY', name: 'Nvidia'},
+    {kind: 'COMPANY', name: 'Apple'}
+  ];
+  input.portfolioContext.myStocks = [
+    {market: 'US', symbol: 'MSFT', telemetryRefs: ['t5'], evidenceRefs: ['e2'], upcomingEvents: []},
+    {market: 'US', symbol: 'NVDA', telemetryRefs: ['t6'], evidenceRefs: [], upcomingEvents: []}
+  ];
+  input.portfolioContext.watchlist = [
+    {market: 'US', symbol: 'AAPL', telemetryRefs: ['t7'], evidenceRefs: [], upcomingEvents: []}
+  ];
+  assert.equal(validateClaudeAnalysisInput(input), true);
+  return input;
+}
+
+function overlappingFocusOutput(input, {content, telemetryRefs}) {
+  const output = supportedOutput(input);
+  output.sections[2] = {
+    name: 'STOCKS & SECTORS IN FOCUS',
+    content,
+    evidenceRefs: ['e2'],
+    telemetryRefs,
+    uncertainties: []
+  };
+  output.sections[3].telemetryRefs = ['t5'];
+  return output;
+}
+
 test('rich fixture carries one canonical five-session week into the final input', () => {
   const input = richCompletedUsWeekInput();
   const market = input.marketPackages[0];
@@ -293,6 +349,66 @@ test('Section 3 accepts focus evidence and benchmark telemetry but localizes sto
   assert.equal(result.output.sections[2].content, null);
   assert.deepEqual(result.output.sections[2].telemetryRefs, []);
   assert.deepEqual(result.output.sections[3].telemetryRefs, ['t2']);
+});
+
+test('Section 3 overlap fixtures pass with benchmark-only telemetry and no stock telemetry', () => {
+  const focusOnlyInput = richCompletedUsWeekInput();
+  assert.equal(validateClaudeAnalysisOutput(supportedOutput(focusOnlyInput), focusOnlyInput).valid,
+    true);
+
+  const input = overlappingFocusInput();
+  for (const [content, telemetryRefs] of [
+    ['Microsoft remained a broad-market company in focus.', ['t1']],
+    ['Apple remained a broad-market company in focus.', ['t2']],
+    ['Microsoft, Nvidia and Apple were broad-market companies in focus.',
+      ['t1', 't2', 't3', 't4']],
+    ['Microsoft remained a broad-market company in focus.', []]
+  ]) {
+    const output = overlappingFocusOutput(input, {content, telemetryRefs});
+    assert.equal(validateClaudeAnalysisOutput(output, input).valid, true, content);
+  }
+});
+
+test('Production-shaped Section 3 overlap localizes mixed stock telemetry and preserves Section 4', async () => {
+  const input = overlappingFocusInput();
+  const output = overlappingFocusOutput(input, {
+    content: 'Microsoft, Nvidia and Apple were broad-market companies in focus.',
+    telemetryRefs: ['t1', 't2', 't5', 't6', 't7']
+  });
+  assert.equal(validateClaudeAnalysisOutput(output, input).errors.includes(
+    'sections[2]: telemetry references must belong to benchmark telemetry'), true);
+  const originalFocus = structuredClone(input.marketPackages[0].evidenceContext.broadMarketFocus);
+  const diagnostics = [];
+  const result = await invokeFixture(input, output, diagnostics);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.deepEqual(result.output.sections[2], {
+    name: 'STOCKS & SECTORS IN FOCUS', content: null,
+    evidenceRefs: [], telemetryRefs: [],
+    uncertainties: [
+      'Broad-market company and sector support could not be validated from the generated Section 3 scope.'
+    ]
+  });
+  assert.deepEqual(result.output.sections[3], output.sections[3]);
+  assert.deepEqual(result.output.sections[3].telemetryRefs, ['t5']);
+  assert.deepEqual(input.marketPackages[0].evidenceContext.broadMarketFocus, originalFocus);
+  assert.deepEqual(diagnostics.filter(value =>
+    value.stage === 'claudeAnalysisSectionNormalization'), [{
+    stage: 'claudeAnalysisSectionNormalization', sectionIndex: 2,
+    violationCategory: 'NON_BENCHMARK_TELEMETRY', suppliedReferenceCount: 5,
+    allowedReferenceCount: 4, offendingReferenceCount: 3
+  }]);
+  assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
+});
+
+test('request-specific Section 3 allowlist contains all benchmarks and excludes overlapping stocks', () => {
+  const input = overlappingFocusInput();
+  const system = buildClaudeAnalysisRequest(input).system;
+  assert.match(system,
+    /Section 3 telemetryRefs may contain only these exact benchmark refs: \["t1","t2","t3","t4"\]\./);
+  for (const stockReference of ['t5', 't6', 't7']) {
+    assert.equal(system.includes(`"${stockReference}"`), false, stockReference);
+  }
 });
 
 test('Section 3 localizes uncited portfolio symbols and instrument names, but allows independently focused companies', async () => {

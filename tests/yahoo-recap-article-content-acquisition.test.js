@@ -242,7 +242,7 @@ test('subtypes generic metadata failures without changing acquisition results or
     },
     {
       expectedDiagnostic: 'DATE_MODIFIED_MISMATCH',
-      articleValue: article({dateModified: '2026-09-09T17:01:00-04:00'})
+      articleValue: article({dateModified: '2026-09-09T16:59:00-04:00'})
     }
   ];
   for (const item of cases) {
@@ -737,11 +737,11 @@ test('uses JSON-LD articleBody only and rejects missing or blank bodies', async 
   }
 });
 
-test('requires publication and optional modification timestamps to match validation', async () => {
+test('requires publication identity and valid non-regressing optional modification timestamps', async () => {
   const cases = [
     article({datePublished: '2026-09-09T16:31:00-04:00'}),
     article({datePublished: 'not-a-date'}),
-    article({dateModified: '2026-09-09T17:01:00-04:00'}),
+    article({dateModified: '2026-09-09T16:59:00-04:00'}),
     article({dateModified: 'not-a-date'}),
     article({dateModified: undefined})
   ];
@@ -755,6 +755,69 @@ test('requires publication and optional modification timestamps to match validat
     .acquireArticleContent({...input(), validation: frozenValidation({dateModified: null})});
   assert.equal(accepted.type, 'SUCCESS');
   assert.equal(accepted.articleContent.updatedAt, null);
+});
+
+test('treats validated dateModified as a nullable non-regressing lower bound', async () => {
+  const cases = [
+    {
+      name: 'equal',
+      validationDateModified: '2026-09-09T21:00:00.000Z',
+      acquisitionDateModified: '2026-09-09T17:00:00-04:00',
+      expectedType: 'SUCCESS',
+      expectedUpdatedAt: '2026-09-09T21:00:00.000Z'
+    },
+    {
+      name: 'later',
+      validationDateModified: '2026-09-09T21:00:00.000Z',
+      acquisitionDateModified: '2026-09-09T17:01:00-04:00',
+      expectedType: 'SUCCESS',
+      expectedUpdatedAt: '2026-09-09T21:01:00.000Z'
+    },
+    {
+      name: 'earlier',
+      validationDateModified: '2026-09-09T21:00:00.000Z',
+      acquisitionDateModified: '2026-09-09T16:59:00-04:00',
+      expectedType: 'INVALID_METADATA'
+    },
+    {
+      name: 'null to value',
+      validationDateModified: null,
+      acquisitionDateModified: '2026-09-09T17:01:00-04:00',
+      expectedType: 'SUCCESS',
+      expectedUpdatedAt: '2026-09-09T21:01:00.000Z'
+    }
+  ];
+  for (const item of cases) {
+    const result = await service(async () => response(html(article({
+      dateModified: item.acquisitionDateModified
+    })))).acquireArticleContent({
+      ...input(),
+      validation: frozenValidation({dateModified: item.validationDateModified})
+    });
+    assert.equal(result.type, item.expectedType, item.name);
+    if (item.expectedType === 'SUCCESS') {
+      assert.equal(result.articleContent.updatedAt, item.expectedUpdatedAt, item.name);
+    }
+  }
+
+  const missingModified = article();
+  delete missingModified.dateModified;
+  const removed = await service(async () => response(html(missingModified)))
+    .acquireArticleContent(input());
+  assert.equal(removed.type, 'INVALID_METADATA');
+});
+
+test('rejects an acquisition dateModified before datePublished', async () => {
+  const diagnostics = [];
+  const result = await service(async () => response(html(article({
+    dateModified: '2026-09-09T16:29:59-04:00'
+  }))), {onDiagnostics(value) { diagnostics.push(value); }})
+    .acquireArticleContent({
+      ...input(),
+      validation: frozenValidation({dateModified: null})
+    });
+  assert.equal(result.type, 'INVALID_METADATA');
+  assert.equal(diagnostics[0].failureType, 'INVALID_DATE_MODIFIED');
 });
 
 test('enforces article-text and normalized-result bounds atomically without truncation', async () => {
