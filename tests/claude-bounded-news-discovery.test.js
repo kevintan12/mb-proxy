@@ -201,6 +201,44 @@ test('makes one request with no retry for network and provider failures', async 
   }
 });
 
+test('exposes only bounded sanitized Anthropic HTTP error diagnostics', async () => {
+  const diagnostics = [];
+  const result = await service(async () => ({
+    ok: false, status: 400,
+    headers: {get: () => null},
+    async json() {
+      return {error: {
+        type: 'invalid_request_error', code: 'invalid_request',
+        message: 'bad request https://api.anthropic.com/v1/messages ' + 'x'.repeat(500)
+      }};
+    }
+  }), {onDiagnostics: value => diagnostics.push(value)}).discoverYahooCompletedSessionRecap(context);
+  assert.equal(result.type, 'UPSTREAM_FAILURE');
+  const event = diagnostics[0];
+  assert.equal(event.upstreamStatus, 400);
+  assert.equal(event.upstreamErrorType, 'invalid_request_error');
+  assert.equal(event.upstreamErrorCode, 'invalid_request');
+  assert.ok(event.upstreamErrorMessage.length <= 160);
+  assert.equal(event.upstreamErrorMessage.includes('https://'), false);
+  assert.equal(event.upstreamErrorMessage.includes('api.anthropic'), false);
+  assert.equal(event.upstreamErrorMessage.includes('x'.repeat(161)), false);
+});
+
+test('malformed or unexpected Anthropic HTTP error envelopes stay generic and sanitized', async () => {
+  for (const body of [null, {error: {type: 'private_type', message: {raw: 'secret'}}}]) {
+    const diagnostics = [];
+    await service(async () => ({
+      ok: false, status: 400, headers: {get: () => null},
+      async json() { if (body === null) throw new Error('not json'); return body; }
+    }), {onDiagnostics: value => diagnostics.push(value)}).discoverYahooCompletedSessionRecap(context);
+    const event = diagnostics[0];
+    assert.equal(event.upstreamStatus, 400);
+    assert.equal('upstreamErrorType' in event, false);
+    assert.equal('upstreamErrorCode' in event, false);
+    assert.equal('upstreamErrorMessage' in event, false);
+  }
+});
+
 test('enforces a fixed provisional UTF-8 request-size ceiling', () => {
   assert.equal(CLAUDE_BOUNDED_NEWS_DISCOVERY_PROVISIONAL_MAX_REQUEST_BYTES, 16 * 1024);
   assert.equal(assertRequestWithinLimit('x'.repeat(16 * 1024)), 16 * 1024);
