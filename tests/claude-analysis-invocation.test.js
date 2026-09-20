@@ -146,6 +146,9 @@ test('builds one deterministic server-owned request with a projected package and
   )}]);
   assert.equal(JSON.stringify(input), original);
   assert.equal(modelInput.analysisRequest.initiatingList, 'myStocks');
+  assert.deepEqual(modelInput.sectionFourReferenceAllowlist, {
+    initiatingList: 'myStocks', evidenceRefs: [], telemetryRefs: []
+  });
   assert.equal(modelInput.marketPackages[0].telemetry.benchmarkSnapshots[0].reference, 't1');
   const canonicalTelemetry = input.marketPackages[0].telemetry;
   const projectedTelemetry = modelInput.marketPackages[0].telemetry;
@@ -436,6 +439,9 @@ test('gives Claude explicit validator-sensitive Section 4 and Further Readings i
     "initiating security's upcomingEvents[].evidenceRefs",
     'only telemetryRefs belonging to securities in that initiating list',
     'Never use securities, evidenceRefs, or telemetryRefs from the non-initiating list',
+    'top-level sectionFourReferenceAllowlist in the supplied model input',
+    'Section 4 evidenceRefs must be drawn only from its evidenceRefs',
+    'Section 4 telemetryRefs only from its telemetryRefs',
     'No securities are configured in My Stocks.',
     'No securities are configured in Watchlist.',
     'Section 4 evidenceRefs, telemetryRefs, and uncertainties must all be empty arrays',
@@ -449,6 +455,19 @@ test('gives Claude explicit validator-sensitive Section 4 and Further Readings i
   ]) {
     assert.equal(system.includes(requirement), true, requirement);
   }
+});
+
+test('keeps an empty initiating Section 4 allowlist even when the other list has refs', () => {
+  const input = structuredClone(canonicalInput());
+  input.portfolioContext.watchlist = [{
+    market: 'SG', symbol: '^STI', telemetryRefs: ['t1'], evidenceRefs: ['e1'], upcomingEvents: []
+  }];
+  const request = buildClaudeAnalysisRequest(input);
+  assert.deepEqual(JSON.parse(request.messages[0].content).sectionFourReferenceAllowlist, {
+    initiatingList: 'myStocks', evidenceRefs: [], telemetryRefs: []
+  });
+  assert.match(request.system,
+    /Request-specific Section 4 reference allowlist for myStocks: evidenceRefs may contain only these exact refs: \[\]; telemetryRefs may contain only these exact refs: \[\]\./);
 });
 
 test('adds the exact package benchmark refs to the request-specific Section 3 allowlist', () => {
