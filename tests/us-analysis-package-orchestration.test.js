@@ -706,11 +706,16 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
   const article = yahooRecapArticle();
   const articleCalls = [];
   const evidenceCalls = [];
+  const rememberedDiscoveries = [];
   const {service, calls} = harness({
     yahooRecapResearch: {
       async discoverAndValidateRecap(value) {
         calls.yahooRecapResearch.push(value);
         return yahooRecapResearchSuccess();
+      },
+      rememberValidatedDiscovery(value) {
+        rememberedDiscoveries.push(value);
+        return true;
       }
     },
     yahooRecapArticleContentAcquisition: {
@@ -737,6 +742,10 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
     bounds: YAHOO_RECAP_ARTICLE_BOUNDS
   });
   assert.equal(evidenceCalls.length, 1);
+  assert.deepEqual(rememberedDiscoveries, [{
+    targetSessionDate: '2026-09-04',
+    discovery: yahooRecapResearchSuccess().discovery
+  }]);
   assert.deepEqual(evidenceCalls[0].horizon, {
     classification: 'SUBSEQUENT_DEVELOPMENT',
     startsAtExclusive: '2026-09-04T20:00:00.000Z',
@@ -764,6 +773,62 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
   }]);
   assert.equal(JSON.stringify(output).includes('c1'), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('evicts a Yahoo cache hit after article failure and completes through cold fallback discovery', async () => {
+  const cachedResearch = yahooRecapResearchSuccess({
+    title: 'Stale cached identity',
+    url: 'https://finance.yahoo.com/markets/live/stale-cached-identity.html'
+  });
+  const fallbackResearch = yahooRecapResearchSuccess();
+  const researchCalls = [];
+  const evictions = [];
+  const remembered = [];
+  let acquisitionCalls = 0;
+  const {service} = harness({
+    yahooRecapResearch: {
+      async discoverAndValidateRecap(value) {
+        researchCalls.push(value);
+        return researchCalls.length === 1 ? cachedResearch : fallbackResearch;
+      },
+      isValidatedCacheHit(value) { return value === cachedResearch; },
+      evictValidatedCacheHit(value) {
+        evictions.push(value);
+        return value === cachedResearch;
+      },
+      rememberValidatedDiscovery(value) {
+        remembered.push(value);
+        return true;
+      }
+    },
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() {
+        acquisitionCalls += 1;
+        return acquisitionCalls === 1
+          ? {ok: false, type: 'INVALID_METADATA'}
+          : {ok: true, type: 'SUCCESS', articleContent: yahooRecapArticle()};
+      }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) {
+        return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+      }
+    }
+  });
+
+  const output = await service.assemble(request());
+  assert.equal(researchCalls.length, 2);
+  assert.equal(acquisitionCalls, 2);
+  assert.deepEqual(evictions, [cachedResearch]);
+  assert.deepEqual(remembered, [{
+    targetSessionDate: '2026-09-04', discovery: fallbackResearch.discovery
+  }]);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(record =>
+    record.item.sourceId === 'us.yahoo-finance'
+      && record.item.evidenceCategory === 'news'), true);
+  assert.equal(output.marketPackages[0].evidenceContext.unresolvedGaps.includes(
+    YAHOO_RECAP_RETRIEVAL_FAILURE_GAP
+  ), false);
 });
 
 test('broad-market news lane uses validated record identity, not provider or portfolio membership', () => {
@@ -1384,8 +1449,19 @@ test('maps Yahoo recap stage failures to sanitized deterministic gaps', async ()
   ];
   for (const item of cases) {
     const diagnostics = [];
+    const rememberedDiscoveries = [];
+    const originalResearch = item.overrides.yahooRecapResearch;
     const {service} = harness({
       ...item.overrides,
+      ...(originalResearch ? {
+        yahooRecapResearch: {
+          ...originalResearch,
+          rememberValidatedDiscovery(value) {
+            rememberedDiscoveries.push(value);
+            return true;
+          }
+        }
+      } : {}),
       onDiagnostics(value) { diagnostics.push(value); }
     });
     const output = await service.assemble(request());
@@ -1401,6 +1477,7 @@ test('maps Yahoo recap stage failures to sanitized deterministic gaps', async ()
     const serialized = JSON.stringify(diagnostics);
     assert.equal(serialized.includes('articleText'), false);
     assert.equal(serialized.includes('canonicalUrl'), false);
+    assert.deepEqual(rememberedDiscoveries, []);
   }
 });
 

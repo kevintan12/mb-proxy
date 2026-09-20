@@ -10,6 +10,9 @@ const {
   CNBC_RECAP_RESEARCH_PRODUCTION_BOUNDS,
   createCnbcRecapResearchRuntime
 } = require('../lib/cnbc-recap-research-runtime');
+const {
+  createCompletedSessionRecapDiscoveryCache
+} = require('../lib/completed-session-recap-discovery-cache');
 
 const targetSessionDate = '2026-09-11';
 const recapUrl = 'https://www.cnbc.com/2026/09/10/stock-market-today-live-updates.html';
@@ -113,6 +116,114 @@ test('discovers once, acquires once, and constructs a subsequent recap without r
   assert.equal(JSON.stringify(result).includes('evidenceRef'), false);
   assert.equal(JSON.stringify(result).includes('candidateReference'), false);
   assert.equal(Object.isFrozen(result), true);
+});
+
+test('caches only a fully constructed recap and revalidates it without another discovery call', async () => {
+  const diagnostics = [];
+  const cache = createCompletedSessionRecapDiscoveryCache();
+  const {service, calls} = runtime({
+    completedSessionRecapDiscoveryCache: cache,
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+
+  const cold = await service.researchCompletedSessionRecap({targetSessionDate, horizons});
+  const warm = await service.researchCompletedSessionRecap({targetSessionDate, horizons});
+
+  assert.deepEqual(warm, cold);
+  assert.equal(calls.discovery.length, 1);
+  assert.equal(calls.acquisition.length, 2);
+  assert.equal(calls.construction.length, 2);
+  assert.equal(cache.get({provider: 'CNBC', targetSessionDate}).url, recapUrl);
+  assert.deepEqual(diagnostics.filter(value =>
+    value.stage === 'completedSessionRecapDiscoveryCache'), [
+    {stage: 'completedSessionRecapDiscoveryCache', provider: 'CNBC', outcome: 'MISS'},
+    {stage: 'completedSessionRecapDiscoveryCache', provider: 'CNBC', outcome: 'FALLBACK_DISCOVERY'},
+    {stage: 'completedSessionRecapDiscoveryCache', provider: 'CNBC', outcome: 'VALIDATED_HIT'}
+  ]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /cnbc\.com|Stock market news|Stocks closed/);
+});
+
+test('evicts a failed cached identity and replaces it only after successful fallback construction', async () => {
+  const cache = createCompletedSessionRecapDiscoveryCache();
+  cache.set({
+    provider: 'CNBC', targetSessionDate,
+    discovery: {
+      ...discovery(),
+      url: 'https://www.cnbc.com/2026/09/09/stock-market-today-live-updates.html'
+    }
+  });
+  const diagnostics = [];
+  let acquisitions = 0;
+  const {service, calls} = runtime({
+    completedSessionRecapDiscoveryCache: cache,
+    onDiagnostics(value) { diagnostics.push(value); },
+    articleContentAcquisition: {
+      async acquireRecapArticleContent(input) {
+        calls.acquisition.push(input);
+        acquisitions += 1;
+        if (acquisitions === 1) {
+          throw new CnbcArticleContentAcquisitionError(
+            'SESSION_MISMATCH', 'cached identity no longer validates'
+          );
+        }
+        return article();
+      }
+    }
+  });
+
+  const result = await service.researchCompletedSessionRecap({targetSessionDate, horizons});
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(calls.discovery.length, 1);
+  assert.equal(calls.acquisition.length, 2);
+  assert.equal(calls.construction.length, 1);
+  assert.equal(cache.get({provider: 'CNBC', targetSessionDate}).url, recapUrl);
+  assert.deepEqual(diagnostics.filter(value =>
+    value.stage === 'completedSessionRecapDiscoveryCache'), [
+    {stage: 'completedSessionRecapDiscoveryCache', provider: 'CNBC',
+      outcome: 'EVICTED_AFTER_VALIDATION_FAILURE'},
+    {stage: 'completedSessionRecapDiscoveryCache', provider: 'CNBC', outcome: 'FALLBACK_DISCOVERY'}
+  ]);
+});
+
+test('does not cache absence, acquisition failure, session mismatch, or construction failure', async () => {
+  const scenarios = [
+    {
+      discoveryService: {async discoverCnbcCompletedSessionRecap() {
+        return Object.freeze({ok: false, type: 'SEARCH_TOOL_FAILURE'});
+      }}
+    },
+    {
+      discoveryService: {async discoverCnbcCompletedSessionRecap() {
+        return Object.freeze({ok: true, type: 'SUCCESS', candidates: Object.freeze([])});
+      }}
+    },
+    {
+      discoveryService: {async discoverCnbcCompletedSessionRecap() {
+        return Object.freeze({ok: true, type: 'NOT_FOUND', candidates: Object.freeze([])});
+      }}
+    },
+    {
+      articleContentAcquisition: {async acquireRecapArticleContent() {
+        throw new CnbcArticleContentAcquisitionError('HTTP_FAILURE', 'private');
+      }}
+    },
+    {
+      articleContentAcquisition: {async acquireRecapArticleContent() {
+        throw new CnbcArticleContentAcquisitionError('SESSION_MISMATCH', 'private');
+      }}
+    },
+    {
+      evidenceConstruction: {constructEvidence() {
+        return {ok: false, type: 'EVIDENCE_CONTRACT_FAILURE'};
+      }}
+    }
+  ];
+  for (const overrides of scenarios) {
+    const cache = createCompletedSessionRecapDiscoveryCache();
+    const {service} = runtime({...overrides, completedSessionRecapDiscoveryCache: cache});
+    await service.researchCompletedSessionRecap({targetSessionDate, horizons});
+    assert.equal(cache.get({provider: 'CNBC', targetSessionDate}), null);
+  }
 });
 
 test('composes one bounded discovery request and one CNBC page fetch end to end', async () => {
