@@ -69,6 +69,26 @@ test('canonicalizes valid ISO-8601 offsets to UTC Z and rejects invalid timestam
   }
 });
 
+test('permits unknown publication time only for the CNBC daily recap URL family', () => {
+  const recap = createEvidenceItem({
+    sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news',
+    title: 'CNBC daily recap', summary: 'Usable market recap content.',
+    canonicalUrl: 'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html',
+    publishedAt: null, symbols: []
+  });
+  assert.equal(recap.publishedAt, null);
+  assert.equal(validateEvidenceItem(recap).valid, true);
+  for (const input of [
+    validInput({publishedAt: null}),
+    {...recap, canonicalUrl: 'https://www.cnbc.com/2026/09/03/other.html'},
+    {...recap, canonicalUrl: 'https://example.com/2026/09/03/stock-market-today-live-updates.html'},
+    {...recap, publishedAt: 'not-a-date'}
+  ]) {
+    const {provenance, ...fields} = input;
+    assert.equal(validateEvidenceItemInput(fields).valid, false);
+  }
+});
+
 test('requires an HTTPS canonical URL', () => {
   assert.equal(createEvidenceItem(validInput({canonicalUrl: 'https://example.com/a b'})).canonicalUrl, 'https://example.com/a%20b');
   for (const canonicalUrl of ['http://example.com/item', 'ftp://example.com/item', '/relative', 'not a url']) {

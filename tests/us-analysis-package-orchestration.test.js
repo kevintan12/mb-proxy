@@ -1687,7 +1687,7 @@ test('integrates one CNBC recap before general CNBC with package-owned associati
 
 test('validated CNBC daily recap uses one package evidence ref for analysis and Further Readings', async () => {
   const recapUrl = 'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html';
-  const recapTitle = 'Stock market news for Sep. 4, 2026';
+  const recapTitle = 'Stock market news for Sep. 5, 2026';
   const html = `<script type="application/ld+json">${JSON.stringify({
     '@type': 'LiveBlogPosting', headline: recapTitle,
     liveBlogUpdate: [{
@@ -1739,6 +1739,72 @@ test('validated CNBC daily recap uses one package evidence ref for analysis and 
   ]);
   assert.deepEqual(fetched, [recapUrl]);
   assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('predicted CNBC recap remains analysis evidence and Further Reading with unusable timestamp metadata', async () => {
+  const recapUrl = 'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html';
+  for (const metadata of [
+    {datePublished: 'not-a-date', dateModified: 'also-invalid', expectedPublishedAt: null},
+    {datePublished: undefined, dateModified: undefined, expectedPublishedAt: null},
+    {datePublished: '2026-09-04T20:15:00Z', dateModified: '2026-09-04T19:00:00Z',
+      expectedPublishedAt: '2026-09-04T20:15:00.000Z'},
+    {datePublished: '2026-09-03T12:00:00Z', dateModified: null,
+      expectedPublishedAt: '2026-09-03T12:00:00.000Z'},
+    {datePublished: '2026-09-07T12:00:00Z', dateModified: null,
+      expectedPublishedAt: null}
+  ]) {
+    const html = `<script type="application/ld+json">${JSON.stringify({
+      '@type': 'LiveBlogPosting', headline: 'Unrelated editorial date',
+      liveBlogUpdate: [{
+        '@type': 'BlogPosting', articleBody: 'US stocks finished Friday after sector rotation.',
+        datePublished: metadata.datePublished, dateModified: metadata.dateModified
+      }]
+    })}</script>`;
+    const fetched = [];
+    const cnbcRecapResearch = createCnbcRecapResearchRuntime({
+      fetchImpl: async url => {
+        fetched.push(url);
+        return {
+          ok: true, status: 200, url: recapUrl,
+          headers: {get: name => name === 'content-type' ? 'text/html' : null},
+          async text() { return html; }
+        };
+      }
+    });
+    const {service} = harness({
+      cnbcRecapResearch,
+      evidenceRoleClassification: {
+        async classifyEvidenceRoles(input) {
+          const recap = input.evidence.find(entry => entry.item.canonicalUrl === recapUrl);
+          assert.ok(recap);
+          assert.equal(recap.horizon, 'SUBSEQUENT_DEVELOPMENT');
+          assert.equal(recap.item.publishedAt, metadata.expectedPublishedAt);
+          return roleClassificationSuccess(input, {[recap.reference]: ['MATERIAL_EVENT']}, {
+            [recap.reference]: []
+          });
+        },
+        async repairEvidenceSubjects(input) {
+          return {ok: true, type: 'SUCCESS', output: {repairs: input.evidence.map(entry => ({
+            reference: entry.reference, subjects: []
+          }))}};
+        }
+      }
+    });
+    const output = await service.assemble(request());
+    const context = output.marketPackages[0].evidenceContext;
+    const recapEntries = context.evidence.filter(entry => entry.item.canonicalUrl === recapUrl);
+    assert.equal(recapEntries.length, 1);
+    const reference = recapEntries[0].reference;
+    assert.equal(recapEntries[0].item.publishedAt, metadata.expectedPublishedAt);
+    assert.ok(context.materialEvents.includes(reference));
+    assert.ok(context.subsequentDevelopments.includes(reference));
+    assert.equal(context.principalCatalysts.includes(reference), false);
+    assert.deepEqual(context.furtherReadings.filter(entry => entry.evidenceRef === reference), [
+      {evidenceRef: reference, sessionDate: '2026-09-04'}
+    ]);
+    assert.deepEqual(fetched, [recapUrl]);
+    assert.equal(validateClaudeAnalysisInput(output), true);
+  }
 });
 
 test('CNBC recap optional outcomes and failures never block general CNBC research', async () => {

@@ -50,7 +50,7 @@ function constructed(articleContent, horizon) {
   return Object.freeze({
     targetSessionDate: articleContent.targetSessionDate,
     updatedAt: articleContent.updatedAt,
-    horizon: Object.freeze({...horizon}),
+    horizon: horizon ? Object.freeze({...horizon}) : null,
     evidenceItem: Object.freeze({sourceId: 'us.cnbc'})
   });
 }
@@ -101,7 +101,7 @@ test('owns exact deeply immutable recap production bounds', () => {
   assert.equal(Object.isFrozen(CNBC_RECAP_RESEARCH_PRODUCTION_BOUNDS.articleRetrievalBounds), true);
 });
 
-test('discovers once, acquires once, and constructs a subsequent recap without references', async () => {
+test('discovers once, acquires once, and constructs a recap without a timestamp horizon', async () => {
   const {service, calls} = runtime();
   const result = await service.researchCompletedSessionRecap({targetSessionDate, horizons});
   assert.deepEqual(calls.discovery, [{targetSessionDate}]);
@@ -109,10 +109,12 @@ test('discovers once, acquires once, and constructs a subsequent recap without r
   assert.equal(calls.acquisition[0].discovery.url, recapUrl);
   assert.deepEqual(calls.acquisition[0].bounds, CNBC_RECAP_RESEARCH_PRODUCTION_BOUNDS.articleRetrievalBounds);
   assert.equal(calls.construction.length, 1);
-  assert.equal(calls.construction[0].horizon.classification, 'SUBSEQUENT_DEVELOPMENT');
+  assert.deepEqual(calls.construction[0], {
+    articleContent: article(), observedAt: '2026-09-11T22:00:00.000Z'
+  });
   assert.equal(result.type, 'SUCCESS');
   assert.equal(result.constructedEvidence.targetSessionDate, targetSessionDate);
-  assert.equal(result.constructedEvidence.horizon.classification, 'SUBSEQUENT_DEVELOPMENT');
+  assert.equal(result.constructedEvidence.horizon, null);
   assert.equal(JSON.stringify(result).includes('evidenceRef'), false);
   assert.equal(JSON.stringify(result).includes('candidateReference'), false);
   assert.equal(Object.isFrozen(result), true);
@@ -143,10 +145,10 @@ test('caches only a fully constructed recap and revalidates it without another d
   assert.doesNotMatch(JSON.stringify(diagnostics), /cnbc\.com|Stock market news|Stocks closed/);
 });
 
-test('daily market recap editorial identity reaches subsequent evidence with one deterministic fetch', async () => {
+test('predicted daily recap reaches subsequent evidence despite editorial session mismatch', async () => {
   const html = `<script type="application/ld+json">${JSON.stringify({
     '@type': 'LiveBlogPosting',
-    headline: 'Stock market news for Sept. 11, 2026',
+    headline: 'Stock market news for Sept. 12, 2026',
     datePublished: '2026-09-11T20:05:00Z',
     liveBlogUpdate: [{
       '@type': 'BlogPosting',
@@ -169,10 +171,10 @@ test('daily market recap editorial identity reaches subsequent evidence with one
   });
   const result = await service.researchCompletedSessionRecap({targetSessionDate, horizons});
   assert.equal(result.type, 'SUCCESS');
-  assert.equal(result.constructedEvidence.horizon.classification, 'SUBSEQUENT_DEVELOPMENT');
+  assert.equal(result.constructedEvidence.horizon, null);
   assert.equal(result.constructedEvidence.targetSessionDate, targetSessionDate);
   assert.equal(result.constructedEvidence.evidenceItem.title,
-    'Stock market news for Sept. 11, 2026');
+    'Stock market news for Sept. 12, 2026');
   assert.equal(result.constructedEvidence.evidenceItem.canonicalUrl, recapUrl);
   assert.deepEqual(calls, [recapUrl]);
 });
@@ -290,7 +292,7 @@ test('known September 15 URL validates September 16 session with September 17 re
   ];
   const result = await service.researchCompletedSessionRecap({targetSessionDate: target, horizons: targetHorizons});
   assert.equal(result.type, 'SUCCESS');
-  assert.equal(result.constructedEvidence.horizon.classification, 'SUBSEQUENT_DEVELOPMENT');
+  assert.equal(result.constructedEvidence.horizon, null);
   assert.equal(result.constructedEvidence.targetSessionDate, target);
   assert.deepEqual(calls.map(call => call.url), [url]);
   assert.equal(calls[0].options.method, 'GET');
@@ -354,7 +356,7 @@ test('session mismatch diagnostics expose only the allowlisted subtype', async (
       async acquireRecapArticleContent() {
         throw Object.assign(new CnbcArticleContentAcquisitionError(
           'SESSION_MISMATCH', 'private'
-        ), {sessionMismatchType: 'PUBLICATION_BEFORE_TARGET_SESSION'});
+        ), {sessionMismatchType: 'PUBLICATION_OR_EDITORIAL_SESSION_MISMATCH'});
       }
     },
     onDiagnostics: value => diagnostics.push(value)
@@ -363,11 +365,11 @@ test('session mismatch diagnostics expose only the allowlisted subtype', async (
   assert.equal(result.type, 'NOT_VALIDATED');
   assert.deepEqual(diagnostics, [{
     stage: 'cnbcRecapResearch', outcome: 'NOT_VALIDATED',
-    failureType: 'SESSION_MISMATCH', sessionMismatchType: 'PUBLICATION_BEFORE_TARGET_SESSION'
+    failureType: 'SESSION_MISMATCH', sessionMismatchType: 'PUBLICATION_OR_EDITORIAL_SESSION_MISMATCH'
   }]);
 });
 
-test('horizon mismatch is optional and never relabels a post-close recap', async () => {
+test('out-of-horizon recap metadata cannot prevent evidence construction', async () => {
   const outside = article({publishedAt: '2026-09-11T22:00:00.001Z', updatedAt: null});
   const {service, calls} = runtime({
     articleContentAcquisition: {
@@ -375,8 +377,8 @@ test('horizon mismatch is optional and never relabels a post-close recap', async
     }
   });
   const result = await service.researchCompletedSessionRecap({targetSessionDate, horizons});
-  assert.deepEqual(result, {ok: true, type: 'NOT_VALIDATED', constructedEvidence: null});
-  assert.equal(calls.construction.length, 0);
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(calls.construction.length, 1);
 });
 
 test('stage failures are sanitized and non-blocking with no retry', async () => {
@@ -420,18 +422,19 @@ test('preserves an allowlisted extraction reason in dedicated recap diagnostics'
   assert.doesNotMatch(JSON.stringify(diagnostics), /private page content/);
 });
 
-test('rejects caller overrides and malformed horizons before discovery', async () => {
+test('rejects invalid target dates and caller overrides but ignores recap horizon metadata', async () => {
   const {service, calls} = runtime();
   for (const input of [
-    {targetSessionDate},
     {targetSessionDate, horizons, url: recapUrl},
-    {targetSessionDate: '2026-02-30', horizons},
-    {targetSessionDate, horizons: [horizons[1], horizons[0]]},
-    {targetSessionDate: '2026-09-10', horizons}
+    {targetSessionDate: '2026-02-30', horizons}
   ]) {
     assert.equal((await service.researchCompletedSessionRecap(input)).type, 'INPUT_FAILURE');
   }
   assert.equal(calls.discovery.length, 0);
+  assert.equal((await service.researchCompletedSessionRecap({targetSessionDate})).type, 'SUCCESS');
+  assert.equal((await service.researchCompletedSessionRecap({
+    targetSessionDate, horizons: [horizons[1], horizons[0]]
+  })).type, 'SUCCESS');
 });
 
 test('contains no RSS, materiality, package, eN, or session-association integration', () => {

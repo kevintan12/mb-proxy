@@ -50,13 +50,13 @@ test('constructs one immutable canonical CNBC recap record without cN or eN refe
   assert.equal(result.type, 'SUCCESS');
   assert.deepEqual(result.constructedEvidence.targetSessionDate, '2026-09-11');
   assert.deepEqual(result.constructedEvidence.updatedAt, '2026-09-11T20:20:00.000Z');
-  assert.deepEqual(result.constructedEvidence.horizon, horizon());
+  assert.equal(result.constructedEvidence.horizon, null);
   assert.deepEqual(result.constructedEvidence.evidenceItem, {
     sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news',
     title: 'Stock market news for Sept. 11, 2026',
     summary: 'Stocks closed higher after the session.',
     canonicalUrl: 'https://www.cnbc.com/2026/09/10/stock-market-today-live-updates.html',
-    publishedAt: '2026-09-11T20:15:23.000Z', symbols: [],
+    publishedAt: null, symbols: [],
     provenance: {
       publisher: 'CNBC', authority: 'secondary', homepage: 'https://www.cnbc.com/',
       applicableMarket: 'US', sourceJurisdiction: 'GLOBAL', locator: 'source-homepage'
@@ -70,13 +70,13 @@ test('constructs one immutable canonical CNBC recap record without cN or eN refe
   assert.equal(Object.isFrozen(result.constructedEvidence.evidenceItem.provenance), true);
 });
 
-test('preserves the causal horizon independently from targetSessionDate', () => {
+test('does not assign a causal horizon from recap publication metadata', () => {
   const result = service().constructEvidence({articleContent: article(), horizon: horizon()});
-  assert.equal(result.constructedEvidence.horizon.classification, 'SUBSEQUENT_DEVELOPMENT');
+  assert.equal(result.constructedEvidence.horizon, null);
   assert.equal(result.constructedEvidence.targetSessionDate, '2026-09-11');
 });
 
-test('constructs target-session daily recap evidence from prior-day provider publication without changing its horizon', () => {
+test('constructs predicted recap evidence despite prior-day publication and mismatched editorial date', () => {
   const completed = Object.freeze({
     classification: 'COMPLETED_SESSION',
     startsAtExclusive: '2026-09-10T20:00:00.000Z',
@@ -91,23 +91,40 @@ test('constructs target-session daily recap evidence from prior-day provider pub
   });
   assert.equal(result.type, 'SUCCESS');
   assert.equal(result.constructedEvidence.targetSessionDate, '2026-09-11');
-  assert.equal(result.constructedEvidence.horizon.classification, 'COMPLETED_SESSION');
+  assert.equal(result.constructedEvidence.horizon, null);
   assert.equal(result.constructedEvidence.evidenceItem.publishedAt,
-    '2026-09-10T22:15:00.000Z');
-  assert.equal(service().constructEvidence({
+    null);
+  const mismatchedEditorialDate = service().constructEvidence({
     articleContent: article({...priorDayArticle, title: 'Stock market news for Sept. 12, 2026'}),
     horizon: completed
-  }).type, 'INPUT_FAILURE');
+  });
+  assert.equal(mismatchedEditorialDate.type, 'SUCCESS');
+  assert.equal(mismatchedEditorialDate.constructedEvidence.evidenceItem.title,
+    'Stock market news for Sept. 12, 2026');
 });
 
-test('fails closed for altered recap identity, timestamps, provenance, and horizon', () => {
+test('fails closed for altered recap identity and provenance', () => {
   for (const [articleContent, valueHorizon] of [
     [article({canonicalUrl: 'https://www.cnbc.com/2026/09/11/other.html'}), horizon()],
     [article({targetSessionDate: '2026-09-10'}), horizon()],
-    [article({provenance: Object.freeze({...article().provenance, publisher: 'Other'})}), horizon()],
-    [article(), horizon({endsAtInclusive: '2026-09-11T20:10:00.000Z'})]
+    [article({provenance: Object.freeze({...article().provenance, publisher: 'Other'})}), horizon()]
   ]) {
     assert.equal(service().constructEvidence({articleContent, horizon: valueHorizon}).type, 'INPUT_FAILURE');
+  }
+});
+
+test('accepts missing, malformed, reversed, and out-of-horizon recap timestamps without inventing publication time', () => {
+  for (const metadata of [
+    {publishedAt: null, updatedAt: null},
+    {publishedAt: 'not-a-date', updatedAt: 'also-invalid'},
+    {publishedAt: '2026-09-11T20:15:23.000Z', updatedAt: '2026-09-11T19:00:00.000Z'},
+    {publishedAt: '2026-09-18T20:15:23.000Z', updatedAt: null}
+  ]) {
+    const result = service().constructEvidence({articleContent: article(metadata), horizon: horizon()});
+    assert.equal(result.type, 'SUCCESS');
+    assert.equal(result.constructedEvidence.evidenceItem.publishedAt, null);
+    assert.equal(result.constructedEvidence.horizon, null);
+    assert.equal(result.constructedEvidence.updatedAt, null);
   }
 });
 
