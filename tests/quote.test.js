@@ -423,9 +423,14 @@ test('structured Claude route returns validated analysis with one server-owned r
     assert.deepEqual(res.body, {result: output});
     assert.equal(JSON.stringify(requestBody).includes('generationId'), false);
     assert.equal(JSON.stringify(res.body).includes('generationId'), false);
-    assert.equal(logs.length, 1);
-    assert.equal(logs[0][0], '[claude-analysis.invocation]');
-    assert.equal(JSON.parse(logs[0][1]).generationId, generationId.toLowerCase());
+    assert.equal(logs.length, 3);
+    assert.deepEqual(logs.map(([, value]) => JSON.parse(value).stage || 'invocation'), [
+      'claudeAnalysisPreNormalization', 'claudeAnalysisPreNormalization', 'invocation'
+    ]);
+    for (const [prefix, value] of logs) {
+      assert.equal(prefix, '[claude-analysis.invocation]');
+      assert.equal(JSON.parse(value).generationId, generationId.toLowerCase());
+    }
   } finally {
     console.info = originalInfo;
     if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
@@ -454,7 +459,7 @@ test('structured Claude diagnostics omit absent or invalid generation IDs', asyn
       assert.equal(res.statusCode, 200);
       assert.equal(JSON.stringify(res.body).includes('generationId'), false);
     }
-    assert.equal(logs.length, 5);
+    assert.equal(logs.length, 15);
     for (const [prefix, value] of logs) {
       assert.equal(prefix, '[claude-analysis.invocation]');
       assert.equal(Object.hasOwn(JSON.parse(value), 'generationId'), false);

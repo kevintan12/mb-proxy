@@ -301,8 +301,10 @@ test('reports deterministic sanitized request sizes and provider usage on succes
 
   assert.equal(result.type, 'SUCCESS');
   assert.equal(sentBody, serializedRequest);
-  assert.equal(diagnostics.length, 1);
-  assert.deepEqual(diagnostics[0], {
+  const invocationDiagnostics = diagnostics.filter(value => value.model === CLAUDE_ANALYSIS_MODEL);
+  assert.equal(invocationDiagnostics.length, 1);
+  const invocationDiagnostic = invocationDiagnostics[0];
+  assert.deepEqual(invocationDiagnostic, {
     model: CLAUDE_ANALYSIS_MODEL,
     requestId: 'req_test_123',
     requestSize: {
@@ -338,15 +340,15 @@ test('reports deterministic sanitized request sizes and provider usage on succes
   });
   const encodedCanonicalPackage = JSON.stringify(request.messages[0].content);
   assert.equal(sentBody.split(encodedCanonicalPackage).length - 1, 1);
-  assert.equal(Object.isFrozen(diagnostics[0]), true);
-  assert.equal(Object.isFrozen(diagnostics[0].requestSize), true);
-  assert.equal(Object.isFrozen(diagnostics[0].timing), true);
-  assert.equal(Object.isFrozen(diagnostics[0].usage), true);
-  assert.equal(diagnostics[0].requestSize.projectedTelemetryBytes
-    < diagnostics[0].requestSize.telemetryBytes, true);
-  assert.equal(diagnostics[0].requestSize.projectedModelInputBytes
-    < diagnostics[0].requestSize.canonicalPackageBytes, true);
-  const serializedDiagnostics = JSON.stringify(diagnostics[0]);
+  assert.equal(Object.isFrozen(invocationDiagnostic), true);
+  assert.equal(Object.isFrozen(invocationDiagnostic.requestSize), true);
+  assert.equal(Object.isFrozen(invocationDiagnostic.timing), true);
+  assert.equal(Object.isFrozen(invocationDiagnostic.usage), true);
+  assert.equal(invocationDiagnostic.requestSize.projectedTelemetryBytes
+    < invocationDiagnostic.requestSize.telemetryBytes, true);
+  assert.equal(invocationDiagnostic.requestSize.projectedModelInputBytes
+    < invocationDiagnostic.requestSize.canonicalPackageBytes, true);
+  const serializedDiagnostics = JSON.stringify(invocationDiagnostic);
   assert.equal(serializedDiagnostics.includes('亚洲 Technology sector update'), false);
   assert.equal(serializedDiagnostics.includes('^STI'), false);
   assert.equal(serializedDiagnostics.includes('Analyze only'), false);
@@ -373,11 +375,13 @@ test('reports request sizes and optional usage on later contract failure', async
   });
 
   assert.equal(result.type, 'CONTRACT_FAILURE');
-  assert.equal(diagnostics.length, 1);
-  assert.equal(diagnostics[0].requestId, null);
-  assert.deepEqual(diagnostics[0].usage, {input_tokens: 321});
-  assert.equal(Number.isInteger(diagnostics[0].requestSize.completeRequestBodyBytes), true);
-  for (const elapsed of Object.values(diagnostics[0].timing)) {
+  const invocationDiagnostics = diagnostics.filter(value => value.model === CLAUDE_ANALYSIS_MODEL);
+  assert.equal(invocationDiagnostics.length, 1);
+  const invocationDiagnostic = invocationDiagnostics[0];
+  assert.equal(invocationDiagnostic.requestId, null);
+  assert.deepEqual(invocationDiagnostic.usage, {input_tokens: 321});
+  assert.equal(Number.isInteger(invocationDiagnostic.requestSize.completeRequestBodyBytes), true);
+  for (const elapsed of Object.values(invocationDiagnostic.timing)) {
     assert.equal(typeof elapsed, 'number');
     assert.equal(elapsed >= 0, true);
   }
@@ -411,22 +415,149 @@ test('reports only sanitized Section 4 structure when populated content lacks ev
     message: 'Invalid Claude analysis output: sections[2]: stocks and sectors require broad-market focus evidence; sections[2]: factual content requires supplied evidence',
     upstreamStatus: 200
   });
-  assert.equal(diagnostics.length, 1);
-  assert.deepEqual(diagnostics[0].contractFailure, {
+  const invocationDiagnostics = diagnostics.filter(value => value.model === CLAUDE_ANALYSIS_MODEL);
+  assert.equal(invocationDiagnostics.length, 1);
+  const invocationDiagnostic = invocationDiagnostics[0];
+  assert.deepEqual(invocationDiagnostic.contractFailure, {
     sectionIndex: 2,
     sectionName: 'STOCKS & SECTORS IN FOCUS',
     contentIsNull: false,
     evidenceRefCount: 0,
     telemetryRefCount: 1
   });
-  assert.equal(diagnostics[0].requestId, 'req_contract_4');
-  assert.deepEqual(diagnostics[0].usage, {input_tokens: 321, output_tokens: 45});
-  const serialized = JSON.stringify(diagnostics[0]);
+  assert.equal(invocationDiagnostic.requestId, 'req_contract_4');
+  assert.deepEqual(invocationDiagnostic.usage, {input_tokens: 321, output_tokens: 45});
+  const serialized = JSON.stringify(diagnostics);
   for (const forbidden of [
     'PRIVATE SECTION PROSE', '亚洲 Technology sector update', '^STI', 'https://',
     'Analyze only', 'test-key'
   ]) assert.equal(serialized.includes(forbidden), false, forbidden);
-  assert.equal(Object.isFrozen(diagnostics[0].contractFailure), true);
+  assert.equal(Object.isFrozen(invocationDiagnostic.contractFailure), true);
+});
+
+test('pre-normalization diagnostics report grounded Sections 6 and 7 without changing output', async () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  output.sections[5].content = 'Technology has a qualified constructive opportunity.';
+  output.sections[6].content = 'Watch the supported Technology development.';
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.sections[5], output.sections[5]);
+  assert.deepEqual(result.output.sections[6], output.sections[6]);
+  assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisPreNormalization'), [
+    {
+      stage: 'claudeAnalysisPreNormalization', sectionIndex: 5,
+      rawContentIsNull: false, evidenceRefs: ['e1'], telemetryRefs: ['t1'],
+      suppliedReferenceCount: 1, hasCitedFocus: true, hasExactCitedSubject: true
+    },
+    {
+      stage: 'claudeAnalysisPreNormalization', sectionIndex: 6,
+      rawContentIsNull: false, evidenceRefs: ['e1'], telemetryRefs: ['t1'],
+      suppliedReferenceCount: 1
+    }
+  ]);
+});
+
+test('pre-normalization diagnostics identify Section 6 violation and raw Section 7 null safely', async () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  output.sections[5].content = 'PRIVATE rebound opportunity for an unnamed company.';
+  output.sections[6] = {
+    name: REPORT_SECTION_NAMES[6], content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['No supported future development.']
+  };
+  const diagnostics = [];
+  const withDiagnostics = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const withoutDiagnostics = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+  });
+  assert.equal(withDiagnostics.type, 'SUCCESS', withDiagnostics.message);
+  assert.equal(JSON.stringify(withDiagnostics.output), JSON.stringify(withoutDiagnostics.output));
+  assert.equal(withDiagnostics.output.sections[5].content, null);
+  assert.equal(withDiagnostics.output.sections[6].content, null);
+  assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisPreNormalization'), [
+    {
+      stage: 'claudeAnalysisPreNormalization', sectionIndex: 5,
+      rawContentIsNull: false, evidenceRefs: ['e1'], telemetryRefs: ['t1'],
+      suppliedReferenceCount: 1, hasCitedFocus: true, hasExactCitedSubject: false,
+      violationCategory: 'GENERIC_OPPORTUNITY_CLAIM',
+      violationSubtype: 'MISSING_GROUNDED_SUBJECT'
+    },
+    {
+      stage: 'claudeAnalysisPreNormalization', sectionIndex: 6,
+      rawContentIsNull: true, evidenceRefs: [], telemetryRefs: [], suppliedReferenceCount: 0
+    }
+  ]);
+  assert.equal(JSON.stringify(diagnostics).includes('PRIVATE'), false);
+  assert.equal(JSON.stringify(diagnostics).includes('Technology'), false);
+});
+
+test('pre-normalization diagnostics mark a raw null Section 6 without changing degradation', async () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  output.status = 'DEGRADED';
+  output.sections[5] = {
+    name: REPORT_SECTION_NAMES[5], content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['No supported risk or opportunity.']
+  };
+  output.evidenceGaps = ['No supported risk or opportunity.'];
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.sections[5], output.sections[5]);
+  assert.deepEqual(diagnostics.find(value => value.stage === 'claudeAnalysisPreNormalization'
+    && value.sectionIndex === 5), {
+    stage: 'claudeAnalysisPreNormalization', sectionIndex: 5,
+    rawContentIsNull: true, evidenceRefs: [], telemetryRefs: [], suppliedReferenceCount: 0,
+    hasCitedFocus: false, hasExactCitedSubject: false
+  });
+});
+
+test('pre-normalization refs are capped and exclude unknown or noncanonical values', async () => {
+  const input = canonicalInput({includeSecondEvidence: true});
+  const output = normalOutput(input);
+  output.sections[6].content = 'PRIVATE PROVIDER RESPONSE';
+  output.sections[6].evidenceRefs = [
+    ...Array.from({length: 20}, (_, index) => index % 2 ? 'e2' : 'e1'),
+    'e999', 'e1-secret', 'https://private.example'
+  ];
+  output.sections[6].telemetryRefs = ['t1', 't999', 't1-secret'];
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.type, 'CONTRACT_FAILURE');
+  assert.deepEqual(diagnostics.find(value => value.stage === 'claudeAnalysisPreNormalization'
+    && value.sectionIndex === 6), {
+    stage: 'claudeAnalysisPreNormalization', sectionIndex: 6, rawContentIsNull: false,
+    evidenceRefs: ['e1', 'e2', 'e1', 'e2', 'e1', 'e2', 'e1', 'e2'],
+    telemetryRefs: ['t1'], suppliedReferenceCount: 23
+  });
+  const serialized = JSON.stringify(diagnostics);
+  for (const forbidden of ['PRIVATE PROVIDER RESPONSE', 'e999', 'e1-secret', 't999',
+    't1-secret', 'https://private.example']) assert.equal(serialized.includes(forbidden), false);
+});
+
+test('pre-normalization logging failures cannot change analysis output', async () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+    onDiagnostics() { throw new Error('private diagnostic failure'); }
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.sections, output.sections);
 });
 
 test('gives Claude explicit validator-sensitive Section 4 and Further Readings instructions', () => {
