@@ -91,10 +91,74 @@ function canonicalInput({
   });
 }
 
+function activeUsInput() {
+  const completed = createCompletedRegularSession({
+    market: 'US', sessionDate: '2026-09-04', open: 100, high: 105, low: 98,
+    close: 104, previousClose: 100, volume: 1000000,
+    asOf: '2026-09-04T16:00:00-04:00', sourceId: 'us.yahoo-finance',
+    validationState: 'VALIDATED'
+  });
+  const overlay = createCurrentSessionOverlay({
+    market: 'US', marketState: 'REGULAR', sessionDate: '2026-09-08',
+    asOf: '2026-09-08T14:55:00.000Z', lastPrice: 106, referenceClose: 104,
+    volume: 1200000, sourceId: 'us.yahoo-finance', validationState: 'VALIDATED'
+  });
+  const snapshot = createFiveSessionSnapshot({
+    market: 'US', symbol: '^GSPC', instrumentName: 'S&P 500', instrumentType: 'INDEX',
+    currency: 'USD', marketState: 'REGULAR', completedSessions: [completed],
+    currentOverlay: overlay
+  });
+  const current = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Microsoft outlook lifts stocks',
+    summary: 'Microsoft raised its outlook during the active US session.',
+    canonicalUrl: 'https://finance.yahoo.com/news/microsoft-outlook-lifts-stocks.html',
+    publishedAt: '2026-09-08T14:30:00.000Z', symbols: ['MSFT'],
+    publisher: 'Yahoo Finance'
+  });
+  const completedEvidence = createEvidenceItem({
+    sourceId: 'us.reuters', market: 'US', evidenceCategory: 'news',
+    title: 'Prior completed-session market driver',
+    summary: 'A supported driver of the prior completed session.',
+    canonicalUrl: 'https://www.reuters.com/markets/us/prior-driver',
+    publishedAt: '2026-09-04T19:00:00.000Z', symbols: []
+  });
+  return createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'US', initiatingList: 'myStocks',
+      generatedAt: '2026-09-08T15:00:00.000Z', userTimezone: 'Asia/Singapore',
+      reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [{
+      market: 'US',
+      marketContext: {
+        exchangeTimezone: 'America/New_York', marketState: 'REGULAR',
+        primaryCompletedSessionDate: '2026-09-04', includesCurrentOverlay: true,
+        calendarContext: null
+      },
+      telemetry: {benchmarkSnapshots: [snapshot], stockSnapshots: []},
+      evidenceCollection: createEvidenceCollection({market: 'US', items: [current, completedEvidence]}),
+      evidenceContext: {
+        materialEvents: ['e1', 'e2'], authoritativeFacts: [],
+        principalCatalysts: ['e1', 'e2'], supportingEvidence: ['e2'],
+        conflictingEvidence: [], subsequentDevelopments: [], sessionAssociations: [],
+        broadMarketFocus: [{
+          evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]
+        }],
+        unresolvedGaps: [], furtherReadings: []
+      }
+    }],
+    portfolioContext: {myStocks: [], watchlist: []}
+  });
+}
+
 function reportContext(input) {
   return {
-    header: REPORT_HEADER, selectedScope: 'SG', generatedAt: input.analysisRequest.generatedAt,
-    userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF', markets: ['SG']
+    header: REPORT_HEADER, selectedScope: input.analysisRequest.selectedScope,
+    generatedAt: input.analysisRequest.generatedAt,
+    userTimezone: input.analysisRequest.userTimezone,
+    reportType: input.analysisRequest.reportType,
+    markets: input.marketPackages.map(item => item.market)
   };
 }
 
@@ -149,6 +213,8 @@ test('builds one deterministic server-owned request with a projected package and
   assert.deepEqual(modelInput.sectionFourReferenceAllowlist, {
     initiatingList: 'myStocks', evidenceRefs: [], telemetryRefs: []
   });
+  assert.equal(Object.hasOwn(modelInput, 'currentSessionContext'), false);
+  assert.equal(request.system.includes('ACTIVE_SESSION request-specific semantics'), false);
   assert.equal(modelInput.marketPackages[0].telemetry.benchmarkSnapshots[0].reference, 't1');
   const canonicalTelemetry = input.marketPackages[0].telemetry;
   const projectedTelemetry = modelInput.marketPackages[0].telemetry;
@@ -210,6 +276,83 @@ test('builds one deterministic server-owned request with a projected package and
     .snapshot.completedSessions[0].provenance.authority = 'primary';
   assert.throws(() => buildClaudeAnalysisRequest(spoofedTelemetry),
     /invalid canonical Claude analysis input/);
+});
+
+test('active synthesis receives exact CURRENT_SESSION refs and state-aware section semantics', () => {
+  const input = activeUsInput();
+  const original = JSON.stringify(input);
+  const request = buildClaudeAnalysisRequest(input);
+  const modelInput = JSON.parse(request.messages[0].content);
+  assert.deepEqual(modelInput.currentSessionContext, [{
+    market: 'US', sessionDate: '2026-09-08', evidenceRefs: ['e1']
+  }]);
+  for (const instruction of [
+    'current in-progress session as the primary analytical focus',
+    'previous completed session only as historical comparison or baseline',
+    'Section 1 must lead with the current session',
+    'Section 2 must explain current-session drivers',
+    'must never be presented as causing the earlier completed-session move',
+    'must not list every Most Active security',
+    'Section 4 may use supported CURRENT_SESSION news only when its reference is present',
+    'Section 5 should interpret current breadth, risk appetite, momentum',
+    'Section 6 keeps all existing risk and grounded-opportunity rules',
+    'Section 7 should prioritize unresolved current-session developments',
+    'do not add CURRENT_SESSION articles to Further Readings'
+  ]) assert.equal(request.system.includes(instruction), true, instruction);
+  assert.equal(modelInput.marketPackages[0].telemetry.benchmarkSnapshots[0]
+    .snapshot.completedSessions[0].sessionDate, '2026-09-04');
+  assert.equal(modelInput.marketPackages[0].telemetry.benchmarkSnapshots[0]
+    .snapshot.currentOverlay.sessionDate, '2026-09-08');
+  assert.equal(JSON.stringify(input), original);
+  assert.equal(Object.hasOwn(input, 'currentSessionContext'), false);
+});
+
+test('current-session catalysts support current moves but not prior-session causality', () => {
+  const input = activeUsInput();
+  const current = normalOutput(input);
+  current.sections[1].content = 'Microsoft outlook sent stocks higher in the current session.';
+  assert.equal(validateClaudeAnalysisOutput(current, input).valid, true);
+
+  for (const content of [
+    'Microsoft outlook sent stocks lower in yesterday\'s session.',
+    'Microsoft outlook sent stocks lower at Friday\'s close.',
+    'Microsoft outlook sent stocks lower on September 4.',
+    'Microsoft outlook sent stocks lower on 2026-09-04.',
+    'Microsoft outlook sent stocks lower at the completed-session close.'
+  ]) {
+    const prior = normalOutput(input);
+    prior.sections[1].content = content;
+    const validation = validateClaudeAnalysisOutput(prior, input);
+    assert.equal(validation.valid, false, content);
+    assert.equal(validation.errors.includes(
+      'sections[1]: prior completed-session causality requires a completed-session principal catalyst'
+    ), true, content);
+  }
+
+  const completed = normalOutput(input);
+  completed.sections[1].content = 'The prior driver sent stocks lower at Friday\'s close.';
+  completed.sections[1].evidenceRefs = ['e2'];
+  completed.evidenceReferences = ['e1', 'e2'];
+  assert.equal(validateClaudeAnalysisOutput(completed, input).valid, true);
+});
+
+test('prior-session causality supported only by CURRENT_SESSION evidence localizes safely', async () => {
+  const input = activeUsInput();
+  const raw = normalOutput(input);
+  raw.sections[1].content = 'Microsoft outlook sent stocks lower at Friday\'s close.';
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input,
+    apiKey: 'test-key',
+    fetchImpl: async () => anthropicResponse(raw),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.equal(result.output.sections[1].content, null);
+  assert.deepEqual(result.output.sections[1].evidenceRefs, []);
+  assert.ok(diagnostics.some(value => value.violationCategory
+    === 'MISSING_COMPLETED_SESSION_PRINCIPAL_CATALYST'));
 });
 
 function canonicalInputAtRequestSize(targetBytes) {

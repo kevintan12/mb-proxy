@@ -236,6 +236,32 @@ test('rejects a subsequent development classified as a principal catalyst', () =
     ['subsequent development cannot be a principal catalyst']);
 });
 
+test('CURRENT_SESSION evidence may support the current move but keeps subsequent restrictions', () => {
+  const source = input([
+    'COMPLETED_SESSION', 'CURRENT_SESSION', 'SUBSEQUENT_DEVELOPMENT'
+  ]);
+  const currentCatalyst = classifications();
+  assert.equal(validateClaudeEvidenceRoleClassificationOutput(currentCatalyst, source).valid, true);
+  assert.deepEqual(
+    createClaudeEvidenceRoleClassificationOutput(currentCatalyst, source)
+      .classifications[1].roles,
+    ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST']
+  );
+  const projected = JSON.parse(
+    buildClaudeEvidenceRoleClassificationRequest(source).messages[0].content
+  );
+  assert.equal(projected.evidence[1].horizon, 'CURRENT_SESSION');
+  const subsequentCatalyst = classifications({index: 2, value: {
+    roles: ['PRINCIPAL_CATALYST']
+  }});
+  assert.deepEqual(validateClaudeEvidenceRoleClassificationOutput(subsequentCatalyst, source).errors,
+    ['subsequent development cannot be a principal catalyst']);
+  assert.equal(CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_SYSTEM_PROMPT.includes(
+    'horizon CURRENT_SESSION may be MATERIAL_EVENT or PRINCIPAL_CATALYST'), true);
+  assert.equal(CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_SYSTEM_PROMPT.includes(
+    'must never be treated as causing an earlier completed-session move'), true);
+});
+
 test('restricts materiality and roles to their allowlists', () => {
   assert.deepEqual(EVIDENCE_ROLES, ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST']);
   for (const value of ['CRITICAL', '', null]) {

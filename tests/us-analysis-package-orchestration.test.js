@@ -109,12 +109,15 @@ function snapshotWithoutCompletedSessions(symbol) {
   });
 }
 
-function snapshotWithState(symbol, marketState) {
+function snapshotWithState(symbol, marketState, {
+  sessionDate = '2026-09-08',
+  overlayAsOf = '2026-09-08T11:30:00.000Z'
+} = {}) {
   const base = snapshot(symbol);
   const currentOverlay = ['PRE', 'REGULAR', 'POST'].includes(marketState)
     ? createCurrentSessionOverlay({
-        market: 'US', marketState, sessionDate: '2026-09-05',
-        asOf: '2026-09-05T10:00:00-04:00', lastPrice: 106,
+        market: 'US', marketState, sessionDate,
+        asOf: overlayAsOf, lastPrice: 106,
         referenceClose: 105, volume: 1200, sourceId: 'us.yahoo-finance',
         validationState: 'VALIDATED'
       })
@@ -491,7 +494,11 @@ test('maps supported US market states to explicit package-owned analysis modes',
 });
 
 test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip completed-session research', async () => {
-  for (const marketState of ['PRE', 'REGULAR', 'POST']) {
+  for (const [marketState, generatedAt, overlayAsOf] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z']
+  ]) {
     const diagnostics = [];
     const candidates = Array.from({length: 8}, (_, index) => ({
       headline: index === 7 ? 'NVDA leads active stocks' : `Current market story ${index + 1}`,
@@ -501,7 +508,9 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
     }));
     const {service, calls} = harness({
       createTelemetryAcquisition: () => ({
-        async acquireSnapshot({symbol}) { return snapshotWithState(symbol, marketState); }
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, marketState, {overlayAsOf});
+        }
       }),
       yahooMostActiveAcquisition: {
         async acquireMostActive() {
@@ -524,12 +533,13 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
             ok: true, type: 'SUCCESS', articleContent: {
               sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
               headline: candidate.headline, publisher: 'Yahoo Finance',
-              publishedAt: '2026-09-05T13:00:00.000Z', updatedAt: null,
+              publishedAt: '2026-09-08T11:00:00.000Z', updatedAt: null,
               articleText: `Bounded current article for ${candidate.headline}.`
             }
           };
         }
       },
+      now: () => new Date(generatedAt),
       onDiagnostics: value => diagnostics.push(value)
     });
     const output = await service.assemble(request());
@@ -546,8 +556,11 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
     assert.equal(calls.yahooRecapResearch.length, 0);
     assert.equal(calls.cnbcRecapResearch.length, 0);
     assert.equal(calls.cnbc.length, 0);
-    assert.equal(output.marketPackages[0].evidenceContext.subsequentDevelopments.length,
-      ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    const currentEntries = calls.evidenceRoleClassification[0].evidence.filter(entry =>
+      entry.item.evidenceCategory === 'news');
+    assert.equal(currentEntries.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    assert.equal(currentEntries.every(entry => entry.horizon === 'CURRENT_SESSION'), true);
+    assert.deepEqual(output.marketPackages[0].evidenceContext.subsequentDevelopments, []);
     assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
     assert.ok(diagnostics.some(item => item.stage === 'analysisModeSelection'
       && item.analysisMode === 'ACTIVE_SESSION' && item.marketState === marketState));
@@ -558,6 +571,130 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
     assert.ok(diagnostics.some(item => item.stage === 'completedSessionResearch'
       && item.outcome === 'SKIPPED_ACTIVE_SESSION'));
   }
+});
+
+test('active Yahoo news becomes CURRENT_SESSION evidence and can support current catalysts and Section 4', async () => {
+  const generatedAt = '2026-09-08T15:00:00.000Z';
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {
+          overlayAsOf: '2026-09-08T14:55:00.000Z'
+        });
+      }
+    }),
+    yahooMostActiveAcquisition: {
+      async acquireMostActive() {
+        calls.yahooMostActive++;
+        return {ok: true, type: 'SUCCESS', candidates: [{
+          symbol: 'MSFT', shortName: 'Microsoft', longName: 'Microsoft Corporation'
+        }]};
+      }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() {
+        calls.yahooLatestNews++;
+        return {ok: true, type: 'SUCCESS', candidates: [{
+          headline: 'Microsoft outlook lifts stocks',
+          url: 'https://finance.yahoo.com/news/microsoft-outlook-lifts-stocks.html',
+          uuid: null,
+          publisher: 'Yahoo Finance'
+        }]};
+      }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        calls.yahooCurrentNewsArticle.push(candidate);
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+          articleText: 'Microsoft raised its outlook during the active US session.'
+        }};
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        calls.evidenceRoleClassification.push(input);
+        return {ok: true, type: 'SUCCESS', output: {classifications: input.evidence.map(entry => ({
+          reference: entry.reference,
+          materiality: entry.horizon === 'CURRENT_SESSION' ? 'HIGH' : 'LOW',
+          roles: entry.horizon === 'CURRENT_SESSION'
+            ? ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'] : [],
+          subjects: entry.horizon === 'CURRENT_SESSION'
+            ? [{kind: 'COMPANY', name: 'Microsoft'}] : []
+        }))}};
+      },
+      async repairEvidenceSubjects() { throw new Error('not expected'); }
+    },
+    now: () => new Date(generatedAt)
+  });
+  const output = await service.assemble(request('US', {
+    myStocks: [{market: 'US', symbol: 'MSFT'}]
+  }));
+  const classificationInput = calls.evidenceRoleClassification[0];
+  const current = classificationInput.evidence.find(entry => entry.horizon === 'CURRENT_SESSION');
+  assert.ok(current);
+  assert.equal(output.marketPackages[0].evidenceContext.materialEvents.includes(current.reference), true);
+  assert.equal(output.marketPackages[0].evidenceContext.principalCatalysts.includes(current.reference), true);
+  assert.equal(output.marketPackages[0].evidenceContext.subsequentDevelopments.includes(current.reference), false);
+  assert.equal(output.portfolioContext.myStocks[0].evidenceRefs.includes(current.reference), true);
+  assert.equal(Object.hasOwn(output, 'currentSessionContext'), false);
+  assert.equal(Object.hasOwn(output.marketPackages[0].evidenceContext, 'currentSessionEvidence'), false);
+  const providerInput = JSON.parse(buildClaudeAnalysisRequest(output).messages[0].content);
+  assert.deepEqual(providerInput.currentSessionContext, [{
+    market: 'US', sessionDate: '2026-09-08', evidenceRefs: [current.reference]
+  }]);
+  assert.equal(providerInput.sectionFourReferenceAllowlist.evidenceRefs.includes(current.reference), true);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
+});
+
+test('stale and future Yahoo news never become CURRENT_SESSION evidence', async () => {
+  const generatedAt = '2026-09-08T15:00:00.000Z';
+  const candidates = [
+    ['Stale market story', 'stale', '2026-09-05T14:00:00.000Z'],
+    ['Future market story', 'future', '2026-09-08T15:00:00.001Z'],
+    ['Current market story', 'current', '2026-09-08T14:30:00.000Z']
+  ];
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {
+          overlayAsOf: '2026-09-08T14:55:00.000Z'
+        });
+      }
+    }),
+    yahooMostActiveAcquisition: {
+      async acquireMostActive() { return {ok: true, type: 'NOT_FOUND', candidates: []}; }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() {
+        return {ok: true, type: 'SUCCESS', candidates: candidates.map(([headline, slug]) => ({
+          headline, url: `https://finance.yahoo.com/news/${slug}.html`,
+          uuid: null, publisher: 'Yahoo Finance'
+        }))};
+      }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        const found = candidates.find(([, slug]) => candidate.url.endsWith(`/${slug}.html`));
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: found[2], updatedAt: null,
+          articleText: `${candidate.headline} has bounded usable content.`
+        }};
+      }
+    },
+    now: () => new Date(generatedAt)
+  });
+  const output = await service.assemble(request());
+  const currentEntries = calls.evidenceRoleClassification[0].evidence.filter(entry =>
+    entry.horizon === 'CURRENT_SESSION');
+  assert.equal(currentEntries.length, 1);
+  assert.equal(currentEntries[0].item.title, 'Current market story');
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.title === 'Stale market story' || entry.item.title === 'Future market story'), false);
 });
 
 test('CLOSED, WEEKEND and HOLIDAY preserve completed research and skip active Yahoo acquisition', async () => {
