@@ -1,6 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const {createCompletedRegularSession, createFiveSessionSnapshot} = require('../lib/five-session-snapshot');
+const {
+  createCompletedRegularSession,
+  createCurrentSessionOverlay,
+  createFiveSessionSnapshot
+} = require('../lib/five-session-snapshot');
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
 const {
@@ -41,6 +45,9 @@ const {
   YAHOO_RECAP_RETRIEVAL_FAILURE_GAP,
   YAHOO_RECAP_EVIDENCE_CONSTRUCTION_FAILURE_GAP,
   ORCHESTRATION_REQUEST_KEYS,
+  ANALYSIS_MODES,
+  ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS,
+  analysisModeForMarketState,
   broadMarketNewsReferences,
   createUsAnalysisPackageOrchestrationService,
   validateUsAnalysisOrchestrationRequest
@@ -99,6 +106,23 @@ function snapshotWithoutCompletedSessions(symbol) {
     marketState: 'CLOSED',
     completedSessions: [],
     currentOverlay: null
+  });
+}
+
+function snapshotWithState(symbol, marketState) {
+  const base = snapshot(symbol);
+  const currentOverlay = ['PRE', 'REGULAR', 'POST'].includes(marketState)
+    ? createCurrentSessionOverlay({
+        market: 'US', marketState, sessionDate: '2026-09-05',
+        asOf: '2026-09-05T10:00:00-04:00', lastPrice: 106,
+        referenceClose: 105, volume: 1200, sourceId: 'us.yahoo-finance',
+        validationState: 'VALIDATED'
+      })
+    : null;
+  return createFiveSessionSnapshot({
+    market: 'US', symbol, instrumentName: base.instrumentName,
+    instrumentType: base.instrumentType, currency: base.currency, marketState,
+    completedSessions: base.completedSessions, currentOverlay
   });
 }
 
@@ -307,6 +331,7 @@ function cnbcRecapResearchSuccess({
 function harness(overrides = {}) {
   const calls = {
     factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
+    yahooMostActive: 0, yahooLatestNews: 0, yahooCurrentNewsArticle: [],
     yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [],
     cnbcRecapResearch: [], cnbc: [],
     evidenceRoleClassification: [], evidenceSubjectRepair: []
@@ -331,6 +356,24 @@ function harness(overrides = {}) {
       async acquireEvidence({symbol}) {
         calls.yahoo.push(symbol);
         return yahooEvidence(symbol);
+      }
+    },
+    yahooMostActiveAcquisition: {
+      async acquireMostActive() {
+        calls.yahooMostActive++;
+        return {ok: true, type: 'NOT_FOUND', candidates: []};
+      }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() {
+        calls.yahooLatestNews++;
+        return {ok: true, type: 'NOT_FOUND', candidates: []};
+      }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(value) {
+        calls.yahooCurrentNewsArticle.push(value);
+        return {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
       }
     },
     federalReserveEvidenceAcquisition: {
@@ -433,6 +476,127 @@ function roleClassificationSuccess(
     }
   };
 }
+
+test('maps supported US market states to explicit package-owned analysis modes', () => {
+  for (const state of ['PRE', 'REGULAR', 'POST']) {
+    assert.equal(analysisModeForMarketState(state), ANALYSIS_MODES.ACTIVE_SESSION);
+  }
+  for (const state of ['CLOSED', 'WEEKEND', 'HOLIDAY']) {
+    assert.equal(analysisModeForMarketState(state), ANALYSIS_MODES.COMPLETED_SESSION);
+  }
+  assert.throws(
+    () => analysisModeForMarketState('UNSUPPORTED_SPECIAL_SESSION'),
+    /Unsupported US market state/
+  );
+});
+
+test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip completed-session research', async () => {
+  for (const marketState of ['PRE', 'REGULAR', 'POST']) {
+    const diagnostics = [];
+    const candidates = Array.from({length: 8}, (_, index) => ({
+      headline: index === 7 ? 'NVDA leads active stocks' : `Current market story ${index + 1}`,
+      url: `https://finance.yahoo.com/news/current-market-story-${index + 1}.html`,
+      uuid: null,
+      publisher: 'Yahoo Finance'
+    }));
+    const {service, calls} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) { return snapshotWithState(symbol, marketState); }
+      }),
+      yahooMostActiveAcquisition: {
+        async acquireMostActive() {
+          calls.yahooMostActive++;
+          return {ok: true, type: 'SUCCESS', candidates: [{
+            symbol: 'NVDA', shortName: 'Nvidia', longName: 'Nvidia Corporation'
+          }]};
+        }
+      },
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() {
+          calls.yahooLatestNews++;
+          return {ok: true, type: 'SUCCESS', candidates};
+        }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) {
+          calls.yahooCurrentNewsArticle.push(candidate);
+          return {
+            ok: true, type: 'SUCCESS', articleContent: {
+              sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+              headline: candidate.headline, publisher: 'Yahoo Finance',
+              publishedAt: '2026-09-05T13:00:00.000Z', updatedAt: null,
+              articleText: `Bounded current article for ${candidate.headline}.`
+            }
+          };
+        }
+      },
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const output = await service.assemble(request());
+    assert.equal(output.marketPackages[0].marketContext.marketState, marketState);
+    assert.equal(output.marketPackages[0].marketContext.includesCurrentOverlay, true);
+    assert.equal(output.marketPackages[0].telemetry.benchmarkSnapshots[0]
+      .snapshot.completedSessions.length, 5);
+    assert.equal(output.marketPackages[0].telemetry.benchmarkSnapshots[0]
+      .snapshot.currentOverlay.marketState, marketState);
+    assert.equal(calls.yahooMostActive, 1);
+    assert.equal(calls.yahooLatestNews, 1);
+    assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    assert.equal(calls.yahooCurrentNewsArticle[0].headline, 'NVDA leads active stocks');
+    assert.equal(calls.yahooRecapResearch.length, 0);
+    assert.equal(calls.cnbcRecapResearch.length, 0);
+    assert.equal(calls.cnbc.length, 0);
+    assert.equal(output.marketPackages[0].evidenceContext.subsequentDevelopments.length,
+      ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
+    assert.ok(diagnostics.some(item => item.stage === 'analysisModeSelection'
+      && item.analysisMode === 'ACTIVE_SESSION' && item.marketState === marketState));
+    assert.ok(diagnostics.some(item => item.stage === 'activeYahooAcquisition'
+      && item.mostActiveCount === 1 && item.latestNewsCandidateCount === 8
+      && item.articleFetchAttemptCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS
+      && item.articleFetchSuccessCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS));
+    assert.ok(diagnostics.some(item => item.stage === 'completedSessionResearch'
+      && item.outcome === 'SKIPPED_ACTIVE_SESSION'));
+  }
+});
+
+test('CLOSED, WEEKEND and HOLIDAY preserve completed research and skip active Yahoo acquisition', async () => {
+  for (const marketState of ['CLOSED', 'WEEKEND', 'HOLIDAY']) {
+    const diagnostics = [];
+    const {service, calls} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) { return snapshotWithState(symbol, marketState); }
+      }),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const output = await service.assemble(request());
+    assert.equal(output.marketPackages[0].marketContext.marketState, marketState);
+    assert.equal(calls.yahooMostActive, 0);
+    assert.equal(calls.yahooLatestNews, 0);
+    assert.equal(calls.yahooCurrentNewsArticle.length, 0);
+    assert.equal(calls.yahooRecapResearch.length, 1);
+    assert.equal(calls.cnbcRecapResearch.length, 1);
+    assert.equal(calls.cnbc.length, 1);
+    assert.ok(diagnostics.some(item => item.stage === 'activeYahooAcquisition'
+      && item.outcome === 'SKIPPED_COMPLETED_SESSION'));
+  }
+});
+
+test('unsupported special session fails closed before any news research path', async () => {
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'UNSUPPORTED_SPECIAL_SESSION');
+      }
+    })
+  });
+  await assert.rejects(service.assemble(request()), /Unsupported US market state/);
+  assert.equal(calls.yahooMostActive, 0);
+  assert.equal(calls.yahooLatestNews, 0);
+  assert.equal(calls.yahooRecapResearch.length, 0);
+  assert.equal(calls.cnbcRecapResearch.length, 0);
+  assert.equal(calls.cnbc.length, 0);
+});
 
 test('assembles a canonical US package with supplied benchmarks and deterministic refs', async () => {
   const {service, calls} = harness();
@@ -647,6 +811,9 @@ test('reports sanitized non-negative timings for existing package stages', async
     'yahooTelemetryAcquisitionMs',
     'postgresPersistenceReadbackMs',
     'yahooMarketDataEvidenceAcquisitionMs',
+    'yahooMostActiveAcquisitionMs',
+    'yahooLatestNewsDiscoveryMs',
+    'yahooCurrentNewsArticleAcquisitionMs',
     'federalReserveEvidenceAcquisitionMs',
     'yahooRecapResearchMs',
     'yahooRecapArticleContentAcquisitionMs',
@@ -1602,6 +1769,7 @@ test('rejects overlap between supplied anchors and either portfolio list before 
     await assert.rejects(service.assemble(request('US', membership)), /cannot be portfolio membership/);
     assert.deepEqual(calls, {
       factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
+      yahooMostActive: 0, yahooLatestNews: 0, yahooCurrentNewsArticle: [],
       yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [],
       cnbcRecapResearch: [], cnbc: [],
       evidenceRoleClassification: [], evidenceSubjectRepair: []
