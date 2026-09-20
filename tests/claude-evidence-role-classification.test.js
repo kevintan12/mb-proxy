@@ -325,6 +325,17 @@ test('builds a fixed server-owned request with no tools and no caller override s
   assert.deepEqual(modelInput, projectClaudeEvidenceRoleClassificationInput(canonical));
   assert.equal(JSON.stringify(source), original);
   assert.equal(Object.isFrozen(projectClaudeEvidenceRoleClassificationInput(canonical)), true);
+  const canonicalSession = canonical.benchmarkTelemetry[0].snapshot.completedSessions[0];
+  const projectedSession = modelInput.benchmarkTelemetry[0].snapshot.completedSessions[0];
+  assert.deepEqual(projectedSession, {
+    ...canonicalSession,
+    provenance: {
+      publisher: canonicalSession.provenance.publisher,
+      authority: canonicalSession.provenance.authority
+    }
+  });
+  assert.equal(projectedSession.sourceId, canonicalSession.sourceId);
+  assert.deepEqual(Object.keys(projectedSession.provenance), ['publisher', 'authority']);
   const projectedItem = modelInput.evidence[0].item;
   assert.deepEqual(Object.keys(projectedItem), [
     'sourceId', 'market', 'evidenceCategory', 'title', 'summary', 'publishedAt',
@@ -384,6 +395,11 @@ test('retains provider-owned Yahoo publisher while rejecting invalid canonical d
   spoofed.evidence[0].item.provenance.authority = 'primary';
   assert.throws(() => buildClaudeEvidenceRoleClassificationRequest(spoofed),
     /invalid canonical classification evidence/);
+  const spoofedTelemetry = JSON.parse(JSON.stringify(source));
+  spoofedTelemetry.benchmarkTelemetry[0].snapshot.completedSessions[0]
+    .provenance.authority = 'primary';
+  assert.throws(() => buildClaudeEvidenceRoleClassificationRequest(spoofedTelemetry),
+    /invalid canonical benchmark telemetry/);
 });
 
 test('uses a provider-compatible schema without weakening authoritative subject bounds', () => {

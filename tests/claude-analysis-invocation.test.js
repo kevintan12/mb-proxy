@@ -3,7 +3,11 @@ const assert = require('node:assert/strict');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
-const {createCompletedRegularSession, createFiveSessionSnapshot} = require('../lib/five-session-snapshot');
+const {
+  createCompletedRegularSession,
+  createCurrentSessionOverlay,
+  createFiveSessionSnapshot
+} = require('../lib/five-session-snapshot');
 const {
   CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA,
   REPORT_HEADER,
@@ -33,7 +37,8 @@ function canonicalInput({
   supportingEvidence = ['e1'],
   subsequentDevelopments = [],
   sessionAssociations = [],
-  broadMarketFocus = [{evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Technology'}]}]
+  broadMarketFocus = [{evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Technology'}]}],
+  includeCurrentOverlay = false
 } = {}) {
   const item = createEvidenceItem({
     sourceId: 'sg.reuters', market: 'SG', evidenceCategory: 'news', title: evidenceTitle,
@@ -50,9 +55,15 @@ function canonicalInput({
     close: 5747, previousClose: 5710, volume: null, asOf: '2026-09-04T17:00:00+08:00',
     sourceId: 'sg.yahoo-finance', validationState: 'VALIDATED'
   });
+  const currentOverlay = includeCurrentOverlay ? createCurrentSessionOverlay({
+    market: 'SG', marketState: 'OPEN', sessionDate: '2026-09-05',
+    asOf: '2026-09-05T10:00:00+08:00', lastPrice: 5760, referenceClose: 5747,
+    volume: 123456, sourceId: 'sg.yahoo-finance', validationState: 'VALIDATED'
+  }) : null;
   const snapshot = createFiveSessionSnapshot({
     market: 'SG', symbol: '^STI', instrumentName: 'Straits Times Index', instrumentType: 'INDEX',
-    currency: 'SGD', marketState: 'CLOSED', completedSessions: [session], currentOverlay: null
+    currency: 'SGD', marketState: includeCurrentOverlay ? 'OPEN' : 'CLOSED',
+    completedSessions: [session], currentOverlay
   });
   return createClaudeAnalysisInput({
     analysisRequest: {
@@ -62,8 +73,8 @@ function canonicalInput({
     marketPackages: [{
       market: 'SG',
       marketContext: {
-        exchangeTimezone: 'Asia/Singapore', marketState: 'CLOSED',
-        primaryCompletedSessionDate: '2026-09-04', includesCurrentOverlay: false,
+        exchangeTimezone: 'Asia/Singapore', marketState: includeCurrentOverlay ? 'OPEN' : 'CLOSED',
+        primaryCompletedSessionDate: '2026-09-04', includesCurrentOverlay: includeCurrentOverlay,
         calendarContext: 'Weekend; latest completed session remains applicable.'
       },
       telemetry: {benchmarkSnapshots: [snapshot], stockSnapshots: []},
@@ -120,7 +131,8 @@ function anthropicResponse(output, overrides = {}) {
 test('builds one deterministic server-owned request with a projected package and no tools', () => {
   const input = canonicalInput({
     subsequentDevelopments: ['e1'],
-    sessionAssociations: [{evidenceRef: 'e1', sessionDate: '2026-09-04'}]
+    sessionAssociations: [{evidenceRef: 'e1', sessionDate: '2026-09-04'}],
+    includeCurrentOverlay: true
   });
   const original = JSON.stringify(input);
   const request = buildClaudeAnalysisRequest(input);
@@ -135,7 +147,36 @@ test('builds one deterministic server-owned request with a projected package and
   assert.equal(JSON.stringify(input), original);
   assert.equal(modelInput.analysisRequest.initiatingList, 'myStocks');
   assert.equal(modelInput.marketPackages[0].telemetry.benchmarkSnapshots[0].reference, 't1');
-  assert.deepEqual(modelInput.marketPackages[0].telemetry, input.marketPackages[0].telemetry);
+  const canonicalTelemetry = input.marketPackages[0].telemetry;
+  const projectedTelemetry = modelInput.marketPackages[0].telemetry;
+  assert.equal(projectedTelemetry.benchmarkSnapshots.length,
+    canonicalTelemetry.benchmarkSnapshots.length);
+  assert.equal(projectedTelemetry.stockSnapshots.length, canonicalTelemetry.stockSnapshots.length);
+  const canonicalSession = canonicalTelemetry.benchmarkSnapshots[0].snapshot.completedSessions[0];
+  const projectedSession = projectedTelemetry.benchmarkSnapshots[0].snapshot.completedSessions[0];
+  assert.deepEqual(projectedSession, {
+    ...canonicalSession,
+    provenance: {
+      publisher: canonicalSession.provenance.publisher,
+      authority: canonicalSession.provenance.authority
+    }
+  });
+  assert.equal(projectedSession.sourceId, canonicalSession.sourceId);
+  assert.deepEqual(Object.keys(projectedSession.provenance), ['publisher', 'authority']);
+  const canonicalOverlay = canonicalTelemetry.benchmarkSnapshots[0].snapshot.currentOverlay;
+  const projectedOverlay = projectedTelemetry.benchmarkSnapshots[0].snapshot.currentOverlay;
+  assert.deepEqual(projectedOverlay, {
+    ...canonicalOverlay,
+    provenance: {
+      publisher: canonicalOverlay.provenance.publisher,
+      authority: canonicalOverlay.provenance.authority
+    }
+  });
+  assert.equal(projectedOverlay.sourceId, canonicalOverlay.sourceId);
+  for (const omitted of ['homepage', 'locator', 'applicableMarket', 'sourceJurisdiction']) {
+    assert.equal(omitted in projectedSession.provenance, false);
+    assert.equal(omitted in projectedOverlay.provenance, false);
+  }
   assert.deepEqual(modelInput.marketPackages[0].evidenceContext.sessionAssociations, [
     {evidenceRef: 'e1', sessionDate: '2026-09-04'}
   ]);
@@ -160,6 +201,12 @@ test('builds one deterministic server-owned request with a projected package and
     projection.marketPackages[0].evidenceContext.evidence[0].item.provenance
   ), true);
   assert.deepEqual(projection, projectClaudeAnalysisInput(input));
+
+  const spoofedTelemetry = JSON.parse(JSON.stringify(input));
+  spoofedTelemetry.marketPackages[0].telemetry.benchmarkSnapshots[0]
+    .snapshot.completedSessions[0].provenance.authority = 'primary';
+  assert.throws(() => buildClaudeAnalysisRequest(spoofedTelemetry),
+    /invalid canonical Claude analysis input/);
 });
 
 function canonicalInputAtRequestSize(targetBytes) {
@@ -262,6 +309,9 @@ test('reports deterministic sanitized request sizes and provider usage on succes
       telemetryBytes: Buffer.byteLength(JSON.stringify(
         input.marketPackages.map(item => item.telemetry)
       ), 'utf8'),
+      projectedTelemetryBytes: Buffer.byteLength(JSON.stringify(
+        projectedPackage.marketPackages.map(item => item.telemetry)
+      ), 'utf8'),
       evidenceContextBytes: Buffer.byteLength(JSON.stringify(
         input.marketPackages.map(item => item.evidenceContext)
       ), 'utf8'),
@@ -289,7 +339,8 @@ test('reports deterministic sanitized request sizes and provider usage on succes
   assert.equal(Object.isFrozen(diagnostics[0].requestSize), true);
   assert.equal(Object.isFrozen(diagnostics[0].timing), true);
   assert.equal(Object.isFrozen(diagnostics[0].usage), true);
-  assert.deepEqual(projectedPackage.marketPackages[0].telemetry, input.marketPackages[0].telemetry);
+  assert.equal(diagnostics[0].requestSize.projectedTelemetryBytes
+    < diagnostics[0].requestSize.telemetryBytes, true);
   assert.equal(diagnostics[0].requestSize.projectedModelInputBytes
     < diagnostics[0].requestSize.canonicalPackageBytes, true);
   const serializedDiagnostics = JSON.stringify(diagnostics[0]);

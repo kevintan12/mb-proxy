@@ -267,6 +267,34 @@ test('rich and thin fixtures survive the complete final invocation boundary with
     const request = buildClaudeAnalysisRequest(input);
     const serializedInput = JSON.parse(request.messages[0].content);
     assert.deepEqual(serializedInput, projectClaudeAnalysisInput(input));
+    assert.equal(serializedInput.marketPackages[0].telemetry.benchmarkSnapshots.length,
+      input.marketPackages[0].telemetry.benchmarkSnapshots.length);
+    assert.equal(serializedInput.marketPackages[0].telemetry.stockSnapshots.length,
+      input.marketPackages[0].telemetry.stockSnapshots.length);
+    for (const collectionName of ['benchmarkSnapshots', 'stockSnapshots']) {
+      for (let snapshotIndex = 0;
+        snapshotIndex < input.marketPackages[0].telemetry[collectionName].length;
+        snapshotIndex++) {
+        const canonicalSnapshot = input.marketPackages[0].telemetry[collectionName][snapshotIndex];
+        const projectedSnapshot = serializedInput.marketPackages[0].telemetry[collectionName][snapshotIndex];
+        assert.equal(projectedSnapshot.reference, canonicalSnapshot.reference);
+        assert.equal(projectedSnapshot.snapshot.completedSessions.length,
+          canonicalSnapshot.snapshot.completedSessions.length);
+        for (let sessionIndex = 0;
+          sessionIndex < canonicalSnapshot.snapshot.completedSessions.length;
+          sessionIndex++) {
+          const canonicalSession = canonicalSnapshot.snapshot.completedSessions[sessionIndex];
+          const projectedSession = projectedSnapshot.snapshot.completedSessions[sessionIndex];
+          assert.deepEqual(projectedSession, {
+            ...canonicalSession,
+            provenance: {
+              publisher: canonicalSession.provenance.publisher,
+              authority: canonicalSession.provenance.authority
+            }
+          });
+        }
+      }
+    }
     assert.deepEqual(
       serializedInput.marketPackages[0].evidenceContext.furtherReadings,
       input.marketPackages[0].evidenceContext.furtherReadings
