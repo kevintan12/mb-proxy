@@ -10,6 +10,8 @@ const {
   buildClaudeBoundedCnbcMarketNewsDiscoveryRequests,
   createClaudeBoundedCnbcMarketNewsDiscoveryService
 } = require('../lib/claude-bounded-cnbc-market-news-discovery');
+const {createCnbcMarketNewsDiscoveryCache}
+  = require('../lib/cnbc-market-news-discovery-cache');
 
 function result(url, title = 'CNBC market article') {
   return {type: 'web_search_result', url, title, page_age: 'ignored', encrypted_content: 'ignored'};
@@ -145,6 +147,34 @@ test('a full first-intent result set cannot starve company and sector discoverie
     [3, 1, '/2026/09/11/session-3.html', 'RETAINED'],
     [11, 2, '/2026/09/11/non-portfolio-company.html', 'RETAINED'],
     [12, 2, '/2026/09/11/constructive-sector.html', 'RETAINED']
+  ]);
+});
+
+test('cached intents retain the same deterministic 3+2 allocation without provider work', async () => {
+  const targetSessionDate = '2026-09-11';
+  const cache = createCnbcMarketNewsDiscoveryCache();
+  for (const searchIndex of [1, 2]) {
+    cache.set({
+      provider: 'CNBC', targetSessionDate, searchIndex,
+      identities: Array.from({length: 5}, (_, index) => ({
+        title: `Provider title ${searchIndex}-${index + 1}`,
+        url: `https://www.cnbc.com/2026/09/11/intent-${searchIndex}-${index + 1}.html`,
+        discoveredVia: 'ANTHROPIC_WEB_SEARCH', targetSessionDate
+      }))
+    });
+  }
+  let fetchCount = 0;
+  const service = createClaudeBoundedCnbcMarketNewsDiscoveryService({
+    apiKey: 'key', cnbcMarketNewsDiscoveryCache: cache,
+    fetchImpl: async () => { fetchCount++; throw new Error('must not fetch'); }
+  });
+
+  const output = await service.discoverCnbcMarketNews({targetSessionDate});
+
+  assert.equal(fetchCount, 0);
+  assert.deepEqual(output.discoveries.map(item => [item.rank, item.title]), [
+    [1, 'Provider title 1-1'], [2, 'Provider title 1-2'], [3, 'Provider title 1-3'],
+    [11, 'Provider title 2-1'], [12, 'Provider title 2-2']
   ]);
 });
 
@@ -326,4 +356,26 @@ test('omits absent or invalid provider metadata and unexpected numeric usage fie
   assert.deepEqual(invocations[1].usage, {input_tokens: 101});
   assert.equal(invocations[1].searchRequestCount, null);
   assert.equal('unexpected_numeric_field' in invocations[1].usage, false);
+});
+
+test('reports only allowlisted web-search tool failure subtypes without changing failure behavior', async () => {
+  const diagnostics = [];
+  let call = 0;
+  const service = createClaudeBoundedCnbcMarketNewsDiscoveryService({
+    apiKey: 'key', onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async () => response({
+      type: 'web_search_tool_result_error',
+      error_code: call++ === 0 ? 'unavailable' : 'private provider detail'
+    }, {usage: {input_tokens: 28000, server_tool_use: {web_search_requests: 1}}})
+  });
+
+  const output = await service.discoverCnbcMarketNews({targetSessionDate: '2026-09-11'});
+
+  assert.equal(output.type, 'SEARCH_TOOL_FAILURE');
+  const invocations = diagnostics.filter(item => item.stage === 'cnbcMarketNewsSearchInvocation');
+  assert.deepEqual(invocations.map(item => [item.outcome, item.toolFailureType]), [
+    ['SEARCH_TOOL_FAILURE', 'unavailable'],
+    ['SEARCH_TOOL_FAILURE', 'UNKNOWN_TOOL_FAILURE']
+  ]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /private provider detail/);
 });

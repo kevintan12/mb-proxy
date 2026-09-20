@@ -161,6 +161,118 @@ test('article identity mismatch fails before construction and construction failu
   assert.equal((await service.researchNews({horizons})).type, 'EVIDENCE_CONSTRUCTION_FAILURE');
 });
 
+test('construction failure evicts and fallback-discovers only the affected cached intent', async () => {
+  const candidates = createNewsEvidenceCandidateCollection({
+    market: 'US', candidates: Array.from({length: 5}, (_, index) => candidate(`c${index + 1}`))
+  }, {bounds: candidateBounds});
+  let acquisitionCalls = 0;
+  let constructionCalls = 0;
+  let completionCalls = 0;
+  const cachedSearchIndexes = new Set([1, 2]);
+  const searchCalls = [0, 0];
+  const intentForReference = reference => Number(reference.slice(1)) <= 3 ? 1 : 2;
+  const candidateAcquisition = {
+    async acquireCandidates() {
+      acquisitionCalls++;
+      for (const searchIndex of [1, 2]) {
+        if (!cachedSearchIndexes.has(searchIndex)) searchCalls[searchIndex - 1]++;
+      }
+      return {
+        candidateCollection: candidates,
+        retrievedArticles: candidates.candidates.map(articleFor)
+      };
+    },
+    evictValidatedCacheHits(acquired, failedCandidateReferences) {
+      const affected = [...new Set(failedCandidateReferences.map(intentForReference))];
+      for (const searchIndex of affected) cachedSearchIndexes.delete(searchIndex);
+      return true;
+    },
+    completeValidatedDiscoveries() {
+      completionCalls++;
+      cachedSearchIndexes.add(1);
+      cachedSearchIndexes.add(2);
+    }
+  };
+  const service = createCnbcUsNewsResearchOrchestrationService({
+    candidateAcquisition,
+    evidenceConstruction: {
+      constructProvisionalEvidence() {
+        constructionCalls++;
+        return constructionCalls === 1 ? {
+          ok: false,
+          type: 'EVIDENCE_CONTRACT_FAILURE',
+          message: 'sanitized',
+          failedCandidateReferences: ['c2']
+        }
+          : createCnbcRetrievedArticleEvidenceConstructionService({
+            candidateBounds, evidenceConstructionBounds
+          }).constructProvisionalEvidence({
+            candidateCollection: candidates,
+            retrievedArticles: candidates.candidates.map(articleFor),
+            evidenceConstructionBounds
+          });
+      }
+    },
+    candidateBounds, articleRetrievalBounds, evidenceConstructionBounds
+  });
+
+  const result = await service.researchNews({targetSessionDate: '2026-09-08', horizons});
+  assert.equal(result.type, 'SUCCESS');
+  assert.deepEqual(result.constructedEvidence.map(item => item.candidateReference), [
+    'c1', 'c2', 'c3', 'c4', 'c5'
+  ]);
+  assert.equal(acquisitionCalls, 2);
+  assert.equal(constructionCalls, 2);
+  assert.deepEqual(searchCalls, [1, 0]);
+  assert.deepEqual([...cachedSearchIndexes], [2, 1]);
+  assert.equal(completionCalls, 1);
+});
+
+test('mapped cached failure does not rediscover when actual eviction reports false', async () => {
+  const candidates = collection();
+  let acquisitionCalls = 0;
+  let constructionCalls = 0;
+  let evictionCalls = 0;
+  let fallbackSearchCalls = 0;
+  const service = createCnbcUsNewsResearchOrchestrationService({
+    candidateAcquisition: {
+      async acquireCandidates() {
+        acquisitionCalls++;
+        if (acquisitionCalls > 1) fallbackSearchCalls++;
+        return {
+          candidateCollection: candidates,
+          retrievedArticles: candidates.candidates.map(articleFor)
+        };
+      },
+      evictValidatedCacheHits(acquired, failedCandidateReferences) {
+        evictionCalls++;
+        assert.deepEqual(failedCandidateReferences, ['c1']);
+        return false;
+      }
+    },
+    evidenceConstruction: {
+      constructProvisionalEvidence() {
+        constructionCalls++;
+        return {
+          ok: false,
+          type: 'EVIDENCE_CONTRACT_FAILURE',
+          message: 'sanitized',
+          failedCandidateReferences: ['c1']
+        };
+      }
+    },
+    candidateBounds, articleRetrievalBounds, evidenceConstructionBounds
+  });
+
+  const result = await service.researchNews({targetSessionDate: '2026-09-08', horizons});
+
+  assert.equal(result.type, 'EVIDENCE_CONSTRUCTION_FAILURE');
+  assert.equal(acquisitionCalls, 1);
+  assert.equal(constructionCalls, 1);
+  assert.equal(evictionCalls, 1);
+  assert.equal(fallbackSearchCalls, 0);
+});
+
 test('diagnostics prove zero materiality calls and contain only safe counts and timing', async () => {
   const diagnostics = [];
   const result = await composedService({onDiagnostics: value => diagnostics.push(value)})

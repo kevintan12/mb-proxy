@@ -56,6 +56,7 @@ test('runtime composition includes bounded CNBC and Yahoo recap research but not
     'createYahooTelemetryAcquisitionService',
     'createYahooMarketDataEvidenceAcquisitionService',
     'createFederalReserveMonetaryPolicyEvidenceAcquisitionService',
+    'createCnbcMarketNewsDiscoveryCache',
     'createCnbcNewsResearchRuntime',
     'createCompletedSessionRecapDiscoveryCache',
     'createCnbcRecapResearchRuntime',
