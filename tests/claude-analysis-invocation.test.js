@@ -14,7 +14,9 @@ const {
   REPORT_SECTION_NAMES,
   EMPTY_INITIATING_LIST_CONTENT,
   createClaudeAnalysisInput,
-  validateClaudeAnalysisOutput
+  validateClaudeAnalysisOutput,
+  MAX_ACTIVE_FURTHER_READINGS,
+  resolveActiveFurtherReadings
 } = require('../lib/claude-analysis-contract');
 const {
   CLAUDE_ANALYSIS_MODEL,
@@ -91,7 +93,13 @@ function canonicalInput({
   });
 }
 
-function activeUsInput() {
+function activeUsInput({
+  marketState = 'REGULAR',
+  generatedAt = '2026-09-08T15:00:00.000Z',
+  overlayAsOf = '2026-09-08T14:55:00.000Z',
+  currentPublishedAt = '2026-09-08T14:30:00.000Z',
+  additionalItems = []
+} = {}) {
   const completed = createCompletedRegularSession({
     market: 'US', sessionDate: '2026-09-04', open: 100, high: 105, low: 98,
     close: 104, previousClose: 100, volume: 1000000,
@@ -99,13 +107,13 @@ function activeUsInput() {
     validationState: 'VALIDATED'
   });
   const overlay = createCurrentSessionOverlay({
-    market: 'US', marketState: 'REGULAR', sessionDate: '2026-09-08',
-    asOf: '2026-09-08T14:55:00.000Z', lastPrice: 106, referenceClose: 104,
+    market: 'US', marketState, sessionDate: '2026-09-08',
+    asOf: overlayAsOf, lastPrice: 106, referenceClose: 104,
     volume: 1200000, sourceId: 'us.yahoo-finance', validationState: 'VALIDATED'
   });
   const snapshot = createFiveSessionSnapshot({
     market: 'US', symbol: '^GSPC', instrumentName: 'S&P 500', instrumentType: 'INDEX',
-    currency: 'USD', marketState: 'REGULAR', completedSessions: [completed],
+    currency: 'USD', marketState, completedSessions: [completed],
     currentOverlay: overlay
   });
   const current = createEvidenceItem({
@@ -113,7 +121,7 @@ function activeUsInput() {
     title: 'Microsoft outlook lifts stocks',
     summary: 'Microsoft raised its outlook during the active US session.',
     canonicalUrl: 'https://finance.yahoo.com/news/microsoft-outlook-lifts-stocks.html',
-    publishedAt: '2026-09-08T14:30:00.000Z', symbols: ['MSFT'],
+    publishedAt: currentPublishedAt, symbols: ['MSFT'],
     publisher: 'Yahoo Finance'
   });
   const completedEvidence = createEvidenceItem({
@@ -126,18 +134,20 @@ function activeUsInput() {
   return createClaudeAnalysisInput({
     analysisRequest: {
       selectedScope: 'US', initiatingList: 'myStocks',
-      generatedAt: '2026-09-08T15:00:00.000Z', userTimezone: 'Asia/Singapore',
+      generatedAt, userTimezone: 'Asia/Singapore',
       reportType: 'MARKET_BRIEF'
     },
     marketPackages: [{
       market: 'US',
       marketContext: {
-        exchangeTimezone: 'America/New_York', marketState: 'REGULAR',
+        exchangeTimezone: 'America/New_York', marketState,
         primaryCompletedSessionDate: '2026-09-04', includesCurrentOverlay: true,
         calendarContext: null
       },
       telemetry: {benchmarkSnapshots: [snapshot], stockSnapshots: []},
-      evidenceCollection: createEvidenceCollection({market: 'US', items: [current, completedEvidence]}),
+      evidenceCollection: createEvidenceCollection({
+        market: 'US', items: [current, completedEvidence, ...additionalItems]
+      }),
       evidenceContext: {
         materialEvents: ['e1', 'e2'], authoritativeFacts: [],
         principalCatalysts: ['e1', 'e2'], supportingEvidence: ['e2'],
@@ -297,7 +307,8 @@ test('active synthesis receives exact CURRENT_SESSION refs and state-aware secti
     'Section 5 should interpret current breadth, risk appetite, momentum',
     'Section 6 keeps all existing risk and grounded-opportunity rules',
     'Section 7 should prioritize unresolved current-session developments',
-    'do not add CURRENT_SESSION articles to Further Readings'
+    'output top-level furtherReadings as []',
+    'deterministically resolves it from eligible CURRENT_SESSION Yahoo evidence actually cited'
   ]) assert.equal(request.system.includes(instruction), true, instruction);
   assert.equal(modelInput.marketPackages[0].telemetry.benchmarkSnapshots[0]
     .snapshot.completedSessions[0].sessionDate, '2026-09-04');
@@ -310,6 +321,7 @@ test('active synthesis receives exact CURRENT_SESSION refs and state-aware secti
 test('current-session catalysts support current moves but not prior-session causality', () => {
   const input = activeUsInput();
   const current = normalOutput(input);
+  current.furtherReadings = ['e1'];
   current.sections[1].content = 'Microsoft outlook sent stocks higher in the current session.';
   assert.equal(validateClaudeAnalysisOutput(current, input).valid, true);
 
@@ -321,6 +333,7 @@ test('current-session catalysts support current moves but not prior-session caus
     'Microsoft outlook sent stocks lower at the completed-session close.'
   ]) {
     const prior = normalOutput(input);
+    prior.furtherReadings = ['e1'];
     prior.sections[1].content = content;
     const validation = validateClaudeAnalysisOutput(prior, input);
     assert.equal(validation.valid, false, content);
@@ -330,10 +343,109 @@ test('current-session catalysts support current moves but not prior-session caus
   }
 
   const completed = normalOutput(input);
+  completed.furtherReadings = ['e1'];
   completed.sections[1].content = 'The prior driver sent stocks lower at Friday\'s close.';
   completed.sections[1].evidenceRefs = ['e2'];
   completed.evidenceReferences = ['e1', 'e2'];
   assert.equal(validateClaudeAnalysisOutput(completed, input).valid, true);
+});
+
+test('active Further Readings resolve only cited current Yahoo evidence in citation order', async () => {
+  const secondYahoo = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Apple gains during the active session', summary: 'Apple shares gained in current trading.',
+    canonicalUrl: 'https://finance.yahoo.com/news/apple-gains-active-session.html',
+    publishedAt: '2026-09-08T14:40:00.000Z', symbols: ['AAPL'], publisher: 'Yahoo Finance'
+  });
+  const duplicateYahooUrl = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Duplicate Apple citation', summary: 'The same article has another evidence reference.',
+    canonicalUrl: 'https://finance.yahoo.com/news/apple-gains-active-session.html',
+    publishedAt: '2026-09-08T14:41:00.000Z', symbols: ['AAPL'], publisher: 'Yahoo Finance'
+  });
+  const cnbcCurrent = createEvidenceItem({
+    sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news', title: 'CNBC current item',
+    canonicalUrl: 'https://www.cnbc.com/2026/09/08/current-item.html',
+    publishedAt: '2026-09-08T14:42:00.000Z'
+  });
+  const staleYahoo = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Stale Yahoo recap', summary: 'Prior-session recap.',
+    canonicalUrl: 'https://finance.yahoo.com/news/stale-yahoo-recap.html',
+    publishedAt: '2026-09-04T20:30:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
+  const uncitedYahoo = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Uncited current Yahoo article', summary: 'Current session but not used by the report.',
+    canonicalUrl: 'https://finance.yahoo.com/news/uncited-current-yahoo.html',
+    publishedAt: '2026-09-08T14:45:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
+  const additionalCurrentYahoo = Array.from({length: 4}, (_, index) => createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: `Current Yahoo article ${index + 1}`, summary: 'Validated current-session Yahoo coverage.',
+    canonicalUrl: `https://finance.yahoo.com/news/current-yahoo-${index + 1}.html`,
+    publishedAt: `2026-09-08T14:4${index + 6}:00.000Z`, symbols: [], publisher: 'Yahoo Finance'
+  }));
+  const input = activeUsInput({
+    additionalItems: [secondYahoo, duplicateYahooUrl, cnbcCurrent, staleYahoo, uncitedYahoo, ...additionalCurrentYahoo]
+  });
+  const raw = normalOutput(input, {furtherReadings: ['e2', 'e4', 'e5']});
+  raw.sections[0].evidenceRefs = ['e3', 'e4', 'e1', 'e8', 'e9', 'e10', 'e11'];
+  raw.sections[1].evidenceRefs = ['e3', 'e1'];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.furtherReadings, ['e3', 'e1', 'e8', 'e9', 'e10']);
+  assert.equal(result.output.furtherReadings.includes('e2'), false);
+  assert.equal(result.output.furtherReadings.includes('e4'), false);
+  assert.equal(result.output.furtherReadings.includes('e5'), false);
+  assert.equal(result.output.furtherReadings.includes('e6'), false);
+  assert.equal(result.output.furtherReadings.includes('e7'), false);
+  assert.equal(result.output.furtherReadings.includes('e11'), false);
+  for (const invalidReference of ['e2', 'e4', 'e5', 'e6', 'e7', 'e11']) {
+    const invalid = structuredClone(result.output);
+    invalid.furtherReadings = ['e3', 'e1', 'e8', 'e9', 'e10', invalidReference];
+    assert.equal(validateClaudeAnalysisOutput(invalid, input).valid, false, invalidReference);
+  }
+  assert.equal(MAX_ACTIVE_FURTHER_READINGS, 5);
+});
+
+test('active Further Readings allow an empty final result when no current Yahoo evidence is cited', async () => {
+  const input = activeUsInput();
+  const raw = normalOutput(input, {
+    status: 'DEGRADED', furtherReadings: ['e1'],
+    evidenceGaps: ['Validated current Yahoo evidence was not cited by populated analytical sections.']
+  });
+  for (const [index, section] of raw.sections.slice(0, 7).entries()) {
+    if (index !== 3 && section.content !== null) section.evidenceRefs = ['e2'];
+  }
+  raw.sections[2] = {
+    ...raw.sections[2], content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['No current broad-market focus evidence was cited.']
+  };
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.furtherReadings, []);
+});
+
+test('active Further Readings permit an empty cited-result set and apply PRE, REGULAR, and POST semantics', () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z', '2026-09-08T11:30:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
+  ]) {
+    const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
+    const cited = normalOutput(input, {furtherReadings: []});
+    assert.deepEqual(resolveActiveFurtherReadings(cited, input).furtherReadings, ['e1']);
+    const uncited = normalOutput(input, {furtherReadings: ['e1']});
+    for (const section of uncited.sections.slice(0, 7)) {
+      if (section.content !== null) section.evidenceRefs = ['e2'];
+    }
+    assert.deepEqual(resolveActiveFurtherReadings(uncited, input).furtherReadings, []);
+  }
 });
 
 test('prior-session causality supported only by CURRENT_SESSION evidence localizes safely', async () => {
