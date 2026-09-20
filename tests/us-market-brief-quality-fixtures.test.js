@@ -351,6 +351,36 @@ test('an optional provider gap does not force DEGRADED when supported analytical
   assert.equal(output.sections.every((section, index) => index === 7 || section.content !== null), true);
 });
 
+test('Section 6 remains populated with supported risks when no grounded opportunity exists', () => {
+  const input = richCompletedUsWeekInput();
+  const output = supportedOutput(input, {opportunity: false});
+  assert.equal(output.sections[5].content !== null, true);
+  assert.equal(output.sections[5].evidenceRefs.length > 0, true);
+  assert.doesNotMatch(output.sections[5].content, /opportunit|bullish|buy the dip/i);
+  assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
+});
+
+test('Section 7 may be null and degraded when no upcoming catalysts are supplied', () => {
+  const input = richCompletedUsWeekInput({
+    unresolvedGaps: ['CNBC market-news research was unavailable at package assembly time.']
+  });
+  const output = supportedOutput(input, {opportunity: false});
+  output.status = 'DEGRADED';
+  output.sections[6] = {
+    name: 'WHAT TO WATCH FOR NEXT',
+    content: null,
+    evidenceRefs: [],
+    telemetryRefs: [],
+    uncertainties: ['No supported upcoming catalysts were supplied.']
+  };
+  output.evidenceGaps = [
+    'CNBC market-news research was unavailable at package assembly time.',
+    'No supported upcoming catalysts were supplied.'
+  ];
+  output.evidenceReferences = ['e2', 'e3', 'e4', 'e5'];
+  assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
+});
+
 test('Section 3 rejects a portfolio reference without independent broad-market focus', async () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
