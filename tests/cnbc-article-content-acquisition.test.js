@@ -57,15 +57,17 @@ test('deterministic recap requires predicted URL, target-session headline and la
   assert.equal(valid.title, 'Stock market news for Sep. 16, 2026');
   assert.equal(valid.publishedAt, '2026-09-17T12:05:00.000Z');
   assert.equal(valid.canonicalUrl, pointer.url);
-  for (const html of [
-    page('Stock market news for Sep. 17, 2026'),
-    page('A general CNBC company article'),
-    page('Stock market news for Sep. 16, 2026', '2026-09-15T19:00:00Z',
-      '2026-09-15T19:05:00Z')
+  for (const [html, subtype] of [
+    [page('Stock market news for Sep. 17, 2026'), 'HEADLINE_SESSION_MISMATCH'],
+    [page('A general CNBC company article'), 'HEADLINE_SESSION_MISMATCH'],
+    [page('Stock market news for Sep. 16, 2026', '2026-09-15T19:00:00Z',
+      '2026-09-15T19:05:00Z'), 'PUBLICATION_BEFORE_TARGET_SESSION']
   ]) {
     await assert.rejects(service(html).acquireRecapArticleContent({
       discovery: pointer, bounds: retrievalBounds
-    }), assertCode('SESSION_MISMATCH'));
+    }), error => error.code === 'SESSION_MISMATCH'
+      && error.sessionMismatchType === subtype
+      && !('extractionDiagnostics' in error));
   }
   await assert.rejects(service(page('Stock market news for Sep. 16, 2026',
     '2026-09-17T12:05:00Z', '2026-09-17T11:00:00Z'))

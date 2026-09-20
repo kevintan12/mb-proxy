@@ -345,6 +345,28 @@ test('wrong provider publication date is optional NOT_VALIDATED with no stale fa
   assert.equal(calls.construction.length, 0);
 });
 
+test('session mismatch diagnostics expose only the allowlisted subtype', async () => {
+  const diagnostics = [];
+  const {discoveryService, articleContentAcquisition} = runtime();
+  const service = createCnbcRecapResearchRuntime({
+    discoveryService,
+    articleContentAcquisition: {
+      async acquireRecapArticleContent() {
+        throw Object.assign(new CnbcArticleContentAcquisitionError(
+          'SESSION_MISMATCH', 'private'
+        ), {sessionMismatchType: 'PUBLICATION_BEFORE_TARGET_SESSION'});
+      }
+    },
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const result = await service.researchCompletedSessionRecap({targetSessionDate, horizons});
+  assert.equal(result.type, 'NOT_VALIDATED');
+  assert.deepEqual(diagnostics, [{
+    stage: 'cnbcRecapResearch', outcome: 'NOT_VALIDATED',
+    failureType: 'SESSION_MISMATCH', sessionMismatchType: 'PUBLICATION_BEFORE_TARGET_SESSION'
+  }]);
+});
+
 test('horizon mismatch is optional and never relabels a post-close recap', async () => {
   const outside = article({publishedAt: '2026-09-11T22:00:00.001Z', updatedAt: null});
   const {service, calls} = runtime({
