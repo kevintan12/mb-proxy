@@ -143,6 +143,40 @@ test('caches only a fully constructed recap and revalidates it without another d
   assert.doesNotMatch(JSON.stringify(diagnostics), /cnbc\.com|Stock market news|Stocks closed/);
 });
 
+test('daily market recap editorial identity reaches subsequent evidence with one deterministic fetch', async () => {
+  const html = `<script type="application/ld+json">${JSON.stringify({
+    '@type': 'LiveBlogPosting',
+    headline: 'Stock market news for Sept. 11, 2026',
+    datePublished: '2026-09-11T20:05:00Z',
+    liveBlogUpdate: [{
+      '@type': 'BlogPosting',
+      headline: 'Overnight market developments',
+      datePublished: '2026-09-11T20:15:00Z',
+      dateModified: '2026-09-11T20:20:00Z',
+      articleBody: 'Stocks finished Friday after a volatile session.'
+    }]
+  })}</script>`;
+  const calls = [];
+  const service = createCnbcRecapResearchRuntime({
+    fetchImpl: async requestUrl => {
+      calls.push(requestUrl);
+      return {
+            ok: true, status: 200, url: recapUrl,
+            headers: {get: name => name === 'content-type' ? 'text/html' : null},
+            async text() { return html; }
+          };
+    }
+  });
+  const result = await service.researchCompletedSessionRecap({targetSessionDate, horizons});
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(result.constructedEvidence.horizon.classification, 'SUBSEQUENT_DEVELOPMENT');
+  assert.equal(result.constructedEvidence.targetSessionDate, targetSessionDate);
+  assert.equal(result.constructedEvidence.evidenceItem.title,
+    'Stock market news for Sept. 11, 2026');
+  assert.equal(result.constructedEvidence.evidenceItem.canonicalUrl, recapUrl);
+  assert.deepEqual(calls, [recapUrl]);
+});
+
 test('evicts a failed cached identity and replaces it only after successful fallback construction', async () => {
   const cache = createCompletedSessionRecapDiscoveryCache();
   cache.set({
@@ -226,48 +260,55 @@ test('does not cache absence, acquisition failure, session mismatch, or construc
   }
 });
 
-test('composes one bounded discovery request and one CNBC page fetch end to end', async () => {
+test('known September 15 URL validates September 16 session with September 17 release', async () => {
   const calls = [];
+  const target = '2026-09-16';
+  const url = 'https://www.cnbc.com/2026/09/15/stock-market-today-live-updates.html';
   const html = `<script type="application/ld+json">${JSON.stringify({
     '@type': 'LiveBlogPosting',
-    datePublished: '2026-09-10T22:00:00Z',
+    headline: 'Stock market news for Sep. 16, 2026',
+    datePublished: '2026-09-17T12:00:00Z',
     liveBlogUpdate: [{
-      '@type': 'BlogPosting', datePublished: '2026-09-11T20:15:23Z',
-      dateModified: '2026-09-11T20:20:00Z', articleBody: 'Stocks closed higher.'
+      '@type': 'BlogPosting', datePublished: '2026-09-17T12:05:00Z',
+      dateModified: '2026-09-17T12:10:00Z', articleBody: 'US stocks closed higher Wednesday.'
     }]
   })}</script>`;
   const fetchImpl = async (url, options) => {
     calls.push({url, options});
-    if (url === 'https://api.anthropic.com/v1/messages') {
-      return {
-        ok: true, status: 200, headers: {get: () => null},
-        async json() {
-          return {
-            content: [{type: 'web_search_tool_result', content: [{
-              type: 'web_search_result', title: 'Stock market news for Sept. 11, 2026', url: recapUrl
-            }]}],
-            usage: {server_tool_use: {web_search_requests: 1}}
-          };
-        }
-      };
-    }
     return {
-      ok: true, status: 200, url: recapUrl,
+      ok: true, status: 200, url,
       headers: {get: name => name === 'content-type' ? 'text/html' : null},
       async text() { return html; }
     };
   };
-  const service = createCnbcRecapResearchRuntime({apiKey: 'server-key', fetchImpl});
-  const result = await service.researchCompletedSessionRecap({targetSessionDate, horizons});
+  const service = createCnbcRecapResearchRuntime({fetchImpl});
+  const targetHorizons = [
+    {classification: 'COMPLETED_SESSION', startsAtExclusive: '2026-09-15T20:00:00.000Z',
+      endsAtInclusive: '2026-09-16T20:00:00.000Z'},
+    {classification: 'SUBSEQUENT_DEVELOPMENT', startsAtExclusive: '2026-09-16T20:00:00.000Z',
+      endsAtInclusive: '2026-09-17T20:00:00.000Z'}
+  ];
+  const result = await service.researchCompletedSessionRecap({targetSessionDate: target, horizons: targetHorizons});
   assert.equal(result.type, 'SUCCESS');
   assert.equal(result.constructedEvidence.horizon.classification, 'SUBSEQUENT_DEVELOPMENT');
-  assert.equal(result.constructedEvidence.targetSessionDate, targetSessionDate);
-  assert.deepEqual(calls.map(call => call.url), [
-    'https://api.anthropic.com/v1/messages', recapUrl
-  ]);
-  assert.equal(JSON.parse(calls[0].options.body).messages[0].content,
-    'CNBC stock market today September 11 2026');
-  assert.equal(calls[1].options.method, 'GET');
+  assert.equal(result.constructedEvidence.targetSessionDate, target);
+  assert.deepEqual(calls.map(call => call.url), [url]);
+  assert.equal(calls[0].options.method, 'GET');
+});
+
+test('missing deterministic CNBC page is optional and never invokes Claude fallback', async () => {
+  const requests = [];
+  const service = createCnbcRecapResearchRuntime({
+    fetchImpl: async requestUrl => {
+      requests.push(requestUrl);
+      return {ok: false, status: 404, url: requestUrl,
+        headers: {get: () => null}};
+    }
+  });
+  const result = await service.researchCompletedSessionRecap({targetSessionDate, horizons});
+  assert.equal(result.type, 'ARTICLE_ACQUISITION_FAILURE');
+  assert.equal(result.failureType, 'HTTP_FAILURE');
+  assert.deepEqual(requests, [recapUrl]);
 });
 
 test('NOT_FOUND is optional and skips acquisition and construction', async () => {
@@ -374,4 +415,5 @@ test('rejects caller overrides and malformed horizons before discovery', async (
 test('contains no RSS, materiality, package, eN, or session-association integration', () => {
   const source = fs.readFileSync(path.join(__dirname, '../lib/cnbc-recap-research-runtime.js'), 'utf8');
   assert.doesNotMatch(source, /\bRSS\b|materiality|analysis-package|sessionAssociations|createPostClose|\be[1-9]/i);
+  assert.doesNotMatch(source, /claude-bounded-cnbc-recap-discovery|api\.anthropic\.com|web_search/);
 });

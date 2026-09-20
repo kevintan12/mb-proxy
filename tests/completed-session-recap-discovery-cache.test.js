@@ -76,3 +76,16 @@ test('invalid identities never populate and concurrent provider/date writes cann
   assert.equal(cache.get({provider: 'CNBC', targetSessionDate: '2026-09-18'}), null);
   assert.equal(cache.get({provider: 'YAHOO', targetSessionDate: '2026-09-17'}), null);
 });
+
+test('deterministic recap identity is cacheable only in the CNBC partition', () => {
+  const cache = createCompletedSessionRecapDiscoveryCache();
+  const identity = {...discovery('CNBC', '2026-09-16'),
+    discoveredVia: 'DETERMINISTIC_SESSION_URL'};
+  assert.equal(cache.set({provider: 'CNBC', targetSessionDate: '2026-09-16',
+    discovery: identity}), true);
+  assert.equal(cache.set({provider: 'YAHOO', targetSessionDate: '2026-09-16',
+    discovery: identity}), false);
+  assert.equal(cache.get({provider: 'CNBC', targetSessionDate: '2026-09-16'}).discoveredVia,
+    'DETERMINISTIC_SESSION_URL');
+  assert.equal(cache.get({provider: 'YAHOO', targetSessionDate: '2026-09-16'}), null);
+});

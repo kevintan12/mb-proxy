@@ -76,6 +76,30 @@ test('preserves the causal horizon independently from targetSessionDate', () => 
   assert.equal(result.constructedEvidence.targetSessionDate, '2026-09-11');
 });
 
+test('constructs target-session daily recap evidence from prior-day provider publication without changing its horizon', () => {
+  const completed = Object.freeze({
+    classification: 'COMPLETED_SESSION',
+    startsAtExclusive: '2026-09-10T20:00:00.000Z',
+    endsAtInclusive: '2026-09-11T20:00:00.000Z'
+  });
+  const priorDayArticle = article({
+    publishedAt: '2026-09-10T22:15:00.000Z',
+    updatedAt: '2026-09-10T22:20:00.000Z'
+  });
+  const result = service().constructEvidence({
+    articleContent: priorDayArticle, horizon: completed
+  });
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(result.constructedEvidence.targetSessionDate, '2026-09-11');
+  assert.equal(result.constructedEvidence.horizon.classification, 'COMPLETED_SESSION');
+  assert.equal(result.constructedEvidence.evidenceItem.publishedAt,
+    '2026-09-10T22:15:00.000Z');
+  assert.equal(service().constructEvidence({
+    articleContent: article({...priorDayArticle, title: 'Stock market news for Sept. 12, 2026'}),
+    horizon: completed
+  }).type, 'INPUT_FAILURE');
+});
+
 test('fails closed for altered recap identity, timestamps, provenance, and horizon', () => {
   for (const [articleContent, valueHorizon] of [
     [article({canonicalUrl: 'https://www.cnbc.com/2026/09/11/other.html'}), horizon()],

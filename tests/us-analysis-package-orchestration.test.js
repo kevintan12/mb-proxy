@@ -11,6 +11,7 @@ const {
   CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS,
   createCnbcNewsResearchRuntime
 } = require('../lib/cnbc-news-research-runtime');
+const {createCnbcRecapResearchRuntime} = require('../lib/cnbc-recap-research-runtime');
 const {createYahooRecapResearchRuntime} = require('../lib/yahoo-recap-research-runtime');
 const {
   createYahooRecapArticleContentAcquisitionService
@@ -1681,6 +1682,62 @@ test('integrates one CNBC recap before general CNBC with package-owned associati
   assert.equal(context.evidence[4].item.provenance.publisher, 'CNBC');
   assert.equal(context.evidence[4].item.canonicalUrl,
     'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html');
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('validated CNBC daily recap uses one package evidence ref for analysis and Further Readings', async () => {
+  const recapUrl = 'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html';
+  const recapTitle = 'Stock market news for Sep. 4, 2026';
+  const html = `<script type="application/ld+json">${JSON.stringify({
+    '@type': 'LiveBlogPosting', headline: recapTitle,
+    liveBlogUpdate: [{
+      '@type': 'BlogPosting', headline: 'Overnight markets',
+      datePublished: '2026-09-05T12:15:00Z',
+      dateModified: '2026-09-05T12:20:00Z',
+      articleBody: 'US stocks finished the Friday session after a volatile close.'
+    }]
+  })}</script>`;
+  const fetched = [];
+  const cnbcRecapResearch = createCnbcRecapResearchRuntime({
+    fetchImpl: async url => {
+      fetched.push(url);
+      return {
+            ok: true, status: 200, url: recapUrl,
+            headers: {get: name => name === 'content-type' ? 'text/html' : null},
+            async text() { return html; }
+          };
+    }
+  });
+  const {service} = harness({
+    cnbcRecapResearch,
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        const recap = input.evidence.find(entry => entry.item.canonicalUrl === recapUrl);
+        assert.ok(recap);
+        return roleClassificationSuccess(input, {[recap.reference]: ['MATERIAL_EVENT']}, {
+          [recap.reference]: []
+        });
+      },
+      async repairEvidenceSubjects(input) {
+        return {ok: true, type: 'SUCCESS', output: {repairs: input.evidence.map(entry => ({
+          reference: entry.reference, subjects: []
+        }))}};
+      }
+    }
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  const recapEntries = context.evidence.filter(entry => entry.item.canonicalUrl === recapUrl);
+  assert.equal(recapEntries.length, 1);
+  const recapReference = recapEntries[0].reference;
+  assert.equal(recapEntries[0].item.title, recapTitle);
+  assert.ok(context.materialEvents.includes(recapReference));
+  assert.ok(context.subsequentDevelopments.includes(recapReference));
+  assert.equal(context.principalCatalysts.includes(recapReference), false);
+  assert.deepEqual(context.furtherReadings.filter(entry => entry.evidenceRef === recapReference), [
+    {evidenceRef: recapReference, sessionDate: '2026-09-04'}
+  ]);
+  assert.deepEqual(fetched, [recapUrl]);
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
