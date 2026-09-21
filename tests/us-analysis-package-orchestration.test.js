@@ -573,6 +573,11 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
       && item.articleFetchSuccessCount === 1
       && item.articleFetchRequestFailureCount === 0
       && item.articleExtractionFailureCount === 0
+      && item.articleMetadataFailureCount === 0
+      && item.articleIdentityHeadlineMismatchCount === 0
+      && item.articleBodyUnavailableCount === 0
+      && item.articleCanonicalRedirectMismatchCount === 0
+      && item.otherArticleExtractionRejectionCount === 0
       && item.backfillUsed === false
       && item.missingOrMalformedPublicationTimeCount === 0
       && item.beforeSessionWindowCount === 0
@@ -724,6 +729,8 @@ test('active Yahoo all-failure backfill stops at the fixed attempt ceiling', asy
   assert.equal(acquisition.articleFetchAttemptCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
   assert.equal(acquisition.articleFetchSuccessCount, 0);
   assert.equal(acquisition.articleExtractionFailureCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(acquisition.otherArticleExtractionRejectionCount,
+    ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
   assert.equal(acquisition.acquiredCurrentSessionCount, 0);
   assert.equal(acquisition.backfillUsed, true);
   assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
@@ -753,7 +760,10 @@ test('active Yahoo diagnostics distinguish retrieval and extraction failures bef
           return {ok: false, type: 'HTTP_FAILURE', articleContent: null};
         }
         if (candidate.url.endsWith('/current-two.html')) {
-          return {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
+          return {
+            ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null,
+            extractionFailureType: 'NO_ARTICLE_BODY_CONTAINER_OR_TEXT'
+          };
         }
         return {ok: true, type: 'SUCCESS', articleContent: {
           sourceId: 'us.yahoo-finance',
@@ -775,12 +785,69 @@ test('active Yahoo diagnostics distinguish retrieval and extraction failures bef
   assert.equal(acquisition.articleFetchSuccessCount, 1);
   assert.equal(acquisition.articleFetchRequestFailureCount, 1);
   assert.equal(acquisition.articleExtractionFailureCount, 1);
+  assert.equal(acquisition.articleBodyUnavailableCount, 1);
+  assert.equal(acquisition.articleMetadataFailureCount, 0);
+  assert.equal(acquisition.articleIdentityHeadlineMismatchCount, 0);
+  assert.equal(acquisition.articleCanonicalRedirectMismatchCount, 0);
+  assert.equal(acquisition.otherArticleExtractionRejectionCount, 0);
   assert.equal(acquisition.acquiredCurrentSessionCount, 1);
   assert.equal(acquisition.backfillUsed, false);
   assert.equal(acquisition.duplicateEvidenceCount, 0);
   assert.equal(acquisition.activeWindowUnavailableCount, 0);
   assert.equal(acquisition.benchmarkOverlayInvalidCount, 0);
   assert.equal(acquisition.otherEvidenceConstructionRejectedCount, 0);
+});
+
+test('active Yahoo diagnostics classify each sanitized extraction rejection before a usable article', async () => {
+  const diagnostics = [];
+  const subtypes = [
+    'NO_COMPATIBLE_ARTICLE_METADATA',
+    'ARTICLE_IDENTITY_OR_HEADLINE_MISMATCH',
+    'NO_ARTICLE_BODY_CONTAINER_OR_TEXT',
+    'CANONICAL_OR_REDIRECT_MISMATCH',
+    'OTHER_EXTRACTION_REJECTION'
+  ];
+  const candidates = subtypes.concat('valid').map(value => ({
+    headline: `Current ${value} story`,
+    url: `https://finance.yahoo.com/news/current-${value.toLowerCase()}.html`,
+    uuid: null, publisher: 'Yahoo Finance'
+  }));
+  const {service} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {overlayAsOf: '2026-09-08T14:55:00.000Z'});
+      }
+    }),
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        const subtype = subtypes.find(value => candidate.url.includes(value.toLowerCase()));
+        if (subtype) return {
+          ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null,
+          extractionFailureType: subtype
+        };
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+          articleText: 'Usable current-session article content.'
+        }};
+      }
+    },
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  await service.assemble(request());
+  const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.articleExtractionFailureCount, 5);
+  assert.equal(acquisition.articleMetadataFailureCount, 1);
+  assert.equal(acquisition.articleIdentityHeadlineMismatchCount, 1);
+  assert.equal(acquisition.articleBodyUnavailableCount, 1);
+  assert.equal(acquisition.articleCanonicalRedirectMismatchCount, 1);
+  assert.equal(acquisition.otherArticleExtractionRejectionCount, 1);
+  assert.equal(acquisition.acquiredCurrentSessionCount, 1);
 });
 
 test('active Yahoo news becomes CURRENT_SESSION evidence and can support current catalysts and Section 4', async () => {

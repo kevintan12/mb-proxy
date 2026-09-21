@@ -6,6 +6,7 @@ const {
 
 const candidateUrl = 'https://finance.yahoo.com/news/nvidia-rallies-on-demand-120000123.html';
 const canonicalUrl = 'https://finance.yahoo.com/markets/articles/nvidia-rallies-on-demand-120000123.html';
+const liveCanonicalUrl = 'https://finance.yahoo.com/markets/stocks/articles/nvidia-rallies-on-demand-120000123.html';
 const headline = 'Nvidia rallies on demand';
 
 function metadata(overrides = {}) {
@@ -71,6 +72,23 @@ test('normalizes Singapore candidate URLs and canonical article URLs by stable i
   assert.equal(result.articleContent.canonicalUrl, canonicalUrl);
 });
 
+test('extracts the current Yahoo nested-category canonical article structure', async () => {
+  const liveArticle = metadata({
+    url: undefined,
+    mainEntityOfPage: {'@id': liveCanonicalUrl}
+  });
+  const html = page({article: liveArticle}).replace(
+    `<link rel="canonical" href="${canonicalUrl}">`,
+    `<link href="${liveCanonicalUrl}" rel="canonical">`
+  );
+  const result = await createYahooCurrentNewsArticleContentAcquisitionService({
+    fetchImpl: async () => response(html)
+  }).acquireArticleContent({url: candidateUrl, headline});
+  assert.equal(result.ok, true);
+  assert.equal(result.articleContent.canonicalUrl, liveCanonicalUrl);
+  assert.equal(result.articleContent.articleText, 'Markets moved as chip demand strengthened.');
+});
+
 test('rejects non-Yahoo URLs, identity mismatches and unusable articles', async () => {
   const service = createYahooCurrentNewsArticleContentAcquisitionService({
     fetchImpl: async () => response(page({body: ''}))
@@ -81,6 +99,35 @@ test('rejects non-Yahoo URLs, identity mismatches and unusable articles', async 
     fetchImpl: async () => response(page(), {url: 'https://finance.yahoo.com/news/other-120000999.html'})
   }).acquireArticleContent({url: candidateUrl, headline});
   assert.equal(mismatch.type, 'IDENTITY_MISMATCH');
+  assert.equal(mismatch.extractionFailureType, 'CANONICAL_OR_REDIRECT_MISMATCH');
+});
+
+test('subtypes sanitized current-news extraction rejections without changing failure behavior', async () => {
+  const noMetadata = await createYahooCurrentNewsArticleContentAcquisitionService({
+    fetchImpl: async () => response(page({article: {'@type': 'WebPage'}}))
+  }).acquireArticleContent({url: candidateUrl, headline});
+  assert.equal(noMetadata.type, 'NO_USABLE_ARTICLE');
+  assert.equal(noMetadata.extractionFailureType, 'NO_COMPATIBLE_ARTICLE_METADATA');
+
+  const wrongIdentity = await createYahooCurrentNewsArticleContentAcquisitionService({
+    fetchImpl: async () => response(page({article: metadata({
+      url: 'https://finance.yahoo.com/news/other-story-120000999.html', mainEntityOfPage: undefined
+    })}))
+  }).acquireArticleContent({url: candidateUrl, headline});
+  assert.equal(wrongIdentity.type, 'NO_USABLE_ARTICLE');
+  assert.equal(wrongIdentity.extractionFailureType, 'ARTICLE_IDENTITY_OR_HEADLINE_MISMATCH');
+
+  const wrongHeadline = await createYahooCurrentNewsArticleContentAcquisitionService({
+    fetchImpl: async () => response(page())
+  }).acquireArticleContent({url: candidateUrl, headline: 'Different supplied headline'});
+  assert.equal(wrongHeadline.type, 'NO_USABLE_ARTICLE');
+  assert.equal(wrongHeadline.extractionFailureType, 'ARTICLE_IDENTITY_OR_HEADLINE_MISMATCH');
+
+  const noBody = await createYahooCurrentNewsArticleContentAcquisitionService({
+    fetchImpl: async () => response(page({body: ''}))
+  }).acquireArticleContent({url: candidateUrl, headline});
+  assert.equal(noBody.type, 'NO_USABLE_ARTICLE');
+  assert.equal(noBody.extractionFailureType, 'NO_ARTICLE_BODY_CONTAINER_OR_TEXT');
 });
 
 test('enforces raw response, extracted article and normalized result bounds', async () => {
