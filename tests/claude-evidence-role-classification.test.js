@@ -18,6 +18,7 @@ const {
   buildClaudeEvidenceSubjectRepairRequest,
   canonicalClassificationInput,
   createClaudeEvidenceRoleClassificationOutput,
+  completeClaudeEvidenceRoleClassificationOutput,
   createClaudeEvidenceSubjectRepairOutput,
   validateClaudeEvidenceRoleClassificationOutput,
   invokeClaudeEvidenceRoleClassification,
@@ -283,6 +284,33 @@ test('rejects unknown, duplicate, missing, extra, and reordered references', () 
   const reordered = classifications(); [reordered.classifications[0], reordered.classifications[1]]
     = [reordered.classifications[1], reordered.classifications[0]]; cases.push(reordered);
   for (const raw of cases) assert.equal(validateClaudeEvidenceRoleClassificationOutput(raw, input()).valid, false);
+});
+
+test('conservatively completes only omitted CURRENT_SESSION classifications without relaxing reference integrity', () => {
+  const source = input(['COMPLETED_SESSION', 'CURRENT_SESSION', 'CURRENT_SESSION']);
+  const omitted = classifications();
+  omitted.classifications.splice(1, 1);
+  const completed = completeClaudeEvidenceRoleClassificationOutput(omitted, source, {
+    allowConservativeCompletion: true
+  });
+  assert.deepEqual(completed.output.classifications.map(entry => entry.reference), ['e1', 'e2', 'e3']);
+  assert.deepEqual(completed.output.classifications[1], {
+    reference: 'e2', materiality: 'LOW', roles: [], subjects: []
+  });
+  assert.deepEqual(completed.classificationCoverage, {
+    suppliedReferenceCount: 3,
+    returnedReferenceCount: 2,
+    missingReferenceCount: 1,
+    unknownOrExtraReferenceCount: 0,
+    deterministicCompletionApplied: true
+  });
+  assert.throws(() => completeClaudeEvidenceRoleClassificationOutput(omitted, source),
+    /cover every supplied reference/);
+  const unknown = classifications();
+  unknown.classifications[1].reference = 'e9';
+  assert.throws(() => completeClaudeEvidenceRoleClassificationOutput(unknown, source, {
+    allowConservativeCompletion: true
+  }), /references must match/);
 });
 
 test('classifier result shape excludes the removed reason field', () => {
@@ -551,6 +579,29 @@ test('makes exactly one Anthropic fetch with no retry and returns immutable outp
   assert.equal(source.evidence[0].item.title, 'Canonical evidence 1');
 });
 
+test('completes omitted active classifications with conservative non-causal defaults and diagnostics', async () => {
+  const source = input(['COMPLETED_SESSION', 'CURRENT_SESSION', 'CURRENT_SESSION']);
+  const omitted = classifications();
+  omitted.classifications.splice(1, 1);
+  const diagnostics = [];
+  const result = await invokeClaudeEvidenceRoleClassification({
+    input: source, apiKey: 'secret', fetchImpl: async () => response(omitted),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.output.classifications[1], {
+    reference: 'e2', materiality: 'LOW', roles: [], subjects: []
+  });
+  assert.deepEqual(result.classificationCoverage, {
+    suppliedReferenceCount: 3,
+    returnedReferenceCount: 2,
+    missingReferenceCount: 1,
+    unknownOrExtraReferenceCount: 0,
+    deterministicCompletionApplied: true
+  });
+  assert.deepEqual(diagnostics[0].classificationCoverage, result.classificationCoverage);
+});
+
 test('diagnoses primary subject omission separately from subjects sanitized to empty', async () => {
   const source = input(
     ['COMPLETED_SESSION', 'COMPLETED_SESSION'],
@@ -624,7 +675,7 @@ test('captures only sanitized size, counts, request-id, timing, usage, and fetch
   assert.equal(diagnostics.length, 1);
   assert.deepEqual(Object.keys(diagnostics[0]), [
     'model', 'requestId', 'requestSize', 'counts', 'timing', 'usage', 'fetchCount',
-    'subjectCoverage'
+    'classificationCoverage', 'subjectCoverage'
   ]);
   assert.deepEqual(diagnostics[0].counts, {evidenceCount: 3, benchmarkTelemetryCount: 1});
   assert.deepEqual(diagnostics[0].usage, {input_tokens: 300, output_tokens: 80});

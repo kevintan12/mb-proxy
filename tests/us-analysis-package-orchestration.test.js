@@ -751,6 +751,72 @@ test('active Yahoo news becomes CURRENT_SESSION evidence and can support current
   assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
 });
 
+test('PRE, REGULAR and POST conservatively complete an omitted CURRENT_SESSION classification', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, publishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z', '2026-09-08T11:45:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
+  ]) {
+    const diagnostics = [];
+    const {service, calls} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, marketState, {overlayAsOf});
+        }
+      }),
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() {
+          return {ok: true, type: 'SUCCESS', candidates: [{
+            headline: 'Current Yahoo market development',
+            url: 'https://finance.yahoo.com/news/current-yahoo-market-development.html',
+            uuid: null,
+            publisher: 'Yahoo Finance'
+          }]};
+        }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) {
+          return {ok: true, type: 'SUCCESS', articleContent: {
+            sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+            headline: candidate.headline, publisher: 'Yahoo Finance',
+            publishedAt, updatedAt: null,
+            articleText: 'Usable current-session Yahoo evidence.'
+          }};
+        }
+      },
+      evidenceRoleClassification: {
+        async classifyEvidenceRoles(input) {
+          calls.evidenceRoleClassification.push(input);
+          const current = input.evidence.find(entry => entry.horizon === 'CURRENT_SESSION');
+          return {ok: true, type: 'SUCCESS', output: {classifications: input.evidence
+            .filter(entry => entry.reference !== current.reference)
+            .map(entry => ({
+              reference: entry.reference,
+              materiality: 'LOW',
+              roles: [],
+              subjects: []
+            }))}};
+        },
+        async repairEvidenceSubjects() { throw new Error('not expected'); }
+      },
+      now: () => new Date(generatedAt),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const output = await service.assemble(request());
+    const current = calls.evidenceRoleClassification[0].evidence.find(entry =>
+      entry.horizon === 'CURRENT_SESSION');
+    assert.ok(current);
+    assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+      entry.reference === current.reference), true);
+    assert.ok(diagnostics.some(entry => entry.stage === 'evidenceRoleClassificationCoverage'
+      && entry.suppliedReferenceCount === calls.evidenceRoleClassification[0].evidence.length
+      && entry.returnedReferenceCount === calls.evidenceRoleClassification[0].evidence.length - 1
+      && entry.missingReferenceCount === 1
+      && entry.unknownOrExtraReferenceCount === 0
+      && entry.deterministicCompletionApplied === true));
+  }
+});
+
 test('stale and future Yahoo news never become CURRENT_SESSION evidence', async () => {
   const generatedAt = '2026-09-08T15:00:00.000Z';
   const candidates = [
