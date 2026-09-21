@@ -566,8 +566,16 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
       && item.analysisMode === 'ACTIVE_SESSION' && item.marketState === marketState));
     assert.ok(diagnostics.some(item => item.stage === 'activeYahooAcquisition'
       && item.mostActiveCount === 1 && item.latestNewsCandidateCount === 8
+      && item.selectedCandidateCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS
       && item.articleFetchAttemptCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS
-      && item.articleFetchSuccessCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS));
+      && item.articleFetchSuccessCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS
+      && item.missingOrMalformedPublicationTimeCount === 0
+      && item.beforeSessionWindowCount === 0
+      && item.afterSessionWindowCount === 0
+      && item.acquiredCurrentSessionCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS));
+    assert.ok(diagnostics.some(item => item.stage === 'activeYahooEvidenceHandoff'
+      && item.admittedCurrentSessionCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS
+      && item.classifierAdmissionRejectedCount === 0));
     assert.ok(diagnostics.some(item => item.stage === 'completedSessionResearch'
       && item.outcome === 'SKIPPED_ACTIVE_SESSION'));
   }
@@ -654,8 +662,11 @@ test('stale and future Yahoo news never become CURRENT_SESSION evidence', async 
   const candidates = [
     ['Stale market story', 'stale', '2026-09-05T14:00:00.000Z'],
     ['Future market story', 'future', '2026-09-08T15:00:00.001Z'],
-    ['Current market story', 'current', '2026-09-08T14:30:00.000Z']
+    ['Current market story', 'current', '2026-09-08T14:30:00.000Z'],
+    ['Missing-time market story', 'missing-time', null],
+    ['Malformed-time market story', 'malformed-time', 'not-a-date']
   ];
+  const diagnostics = [];
   const {service, calls} = harness({
     createTelemetryAcquisition: () => ({
       async acquireSnapshot({symbol}) {
@@ -682,11 +693,12 @@ test('stale and future Yahoo news never become CURRENT_SESSION evidence', async 
           sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
           headline: candidate.headline, publisher: 'Yahoo Finance',
           publishedAt: found[2], updatedAt: null,
-          articleText: `${candidate.headline} has bounded usable content.`
+          articleText: `PRIVATE_ARTICLE_BODY ${candidate.headline} has bounded usable content.`
         }};
       }
     },
-    now: () => new Date(generatedAt)
+    now: () => new Date(generatedAt),
+    onDiagnostics: value => diagnostics.push(value)
   });
   const output = await service.assemble(request());
   const currentEntries = calls.evidenceRoleClassification[0].evidence.filter(entry =>
@@ -695,6 +707,18 @@ test('stale and future Yahoo news never become CURRENT_SESSION evidence', async 
   assert.equal(currentEntries[0].item.title, 'Current market story');
   assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
     entry.item.title === 'Stale market story' || entry.item.title === 'Future market story'), false);
+  const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.latestNewsCandidateCount, 5);
+  assert.equal(acquisition.selectedCandidateCount, 5);
+  assert.equal(acquisition.articleFetchAttemptCount, 5);
+  assert.equal(acquisition.articleFetchSuccessCount, 5);
+  assert.equal(acquisition.missingOrMalformedPublicationTimeCount, 2);
+  assert.equal(acquisition.beforeSessionWindowCount, 1);
+  assert.equal(acquisition.afterSessionWindowCount, 1);
+  assert.equal(acquisition.acquiredCurrentSessionCount, 1);
+  assert.equal(diagnostics.find(item => item.stage === 'activeYahooEvidenceHandoff')
+    .admittedCurrentSessionCount, 1);
+  assert.equal(JSON.stringify(diagnostics).includes('PRIVATE_ARTICLE_BODY'), false);
 });
 
 test('CLOSED, WEEKEND and HOLIDAY preserve completed research and skip active Yahoo acquisition', async () => {
@@ -714,8 +738,12 @@ test('CLOSED, WEEKEND and HOLIDAY preserve completed research and skip active Ya
     assert.equal(calls.yahooRecapResearch.length, 1);
     assert.equal(calls.cnbcRecapResearch.length, 1);
     assert.equal(calls.cnbc.length, 1);
-    assert.ok(diagnostics.some(item => item.stage === 'activeYahooAcquisition'
-      && item.outcome === 'SKIPPED_COMPLETED_SESSION'));
+    assert.deepEqual(diagnostics.find(item => item.stage === 'activeYahooAcquisition'), {
+      stage: 'activeYahooAcquisition', outcome: 'SKIPPED_COMPLETED_SESSION',
+      mostActiveCount: 0, latestNewsCandidateCount: 0,
+      articleFetchAttemptCount: 0, articleFetchSuccessCount: 0
+    });
+    assert.equal(diagnostics.some(item => item.stage === 'activeYahooEvidenceHandoff'), false);
   }
 });
 

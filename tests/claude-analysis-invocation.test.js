@@ -16,6 +16,9 @@ const {
   createClaudeAnalysisInput,
   validateClaudeAnalysisOutput,
   MAX_ACTIVE_FURTHER_READINGS,
+  NO_CURRENT_SESSION_EVIDENCE_GAP,
+  NO_CURRENT_SESSION_SUMMARY,
+  noCurrentSessionEvidenceOutput,
   resolveActiveFurtherReadings
 } = require('../lib/claude-analysis-contract');
 const {
@@ -185,6 +188,14 @@ function sections(content = 'Supported analysis.') {
 
 function normalOutput(input, overrides = {}) {
   const reportSections = sections();
+  const activeState = input.marketPackages.find(item => item.market === 'US')
+    ?.marketContext?.marketState;
+  if (['PRE', 'REGULAR', 'POST'].includes(activeState)) {
+    const lead = activeState === 'PRE' ? 'pre-market'
+      : activeState === 'POST' ? 'post-market' : 'regular session';
+    reportSections[0].content = `In the ${lead}, current developments lead the analysis. `
+      + 'The previous completed session provides comparison only.';
+  }
   const firstFocus = input.marketPackages.flatMap(item => item.evidenceContext.broadMarketFocus)[0];
   if (firstFocus) reportSections[2].content = `Supported ${firstFocus.subjects[0].name} analysis.`;
   return {
@@ -318,6 +329,108 @@ test('active synthesis receives exact CURRENT_SESSION refs and state-aware secti
   assert.equal(Object.hasOwn(input, 'currentSessionContext'), false);
 });
 
+test('PRE summary must cite current evidence and lead with it, while prior close remains context', async () => {
+  const input = activeUsInput({
+    marketState: 'PRE', generatedAt: '2026-09-08T12:00:00.000Z',
+    overlayAsOf: '2026-09-08T11:55:00.000Z',
+    currentPublishedAt: '2026-09-08T11:30:00.000Z'
+  });
+  const current = normalOutput(input, {furtherReadings: ['e1']});
+  assert.equal(validateClaudeAnalysisOutput(current, input).valid, true);
+  const fridayFirst = structuredClone(current);
+  fridayFirst.sections[0].content = 'Friday\'s completed-session move dominated the week. '
+    + 'In the pre-market, current Microsoft news provided later context.';
+  assert.ok(validateClaudeAnalysisOutput(fridayFirst, input).errors.some(error =>
+    error.includes('active summary must lead with the current session')));
+  const rejectedDiagnostics = [];
+  const rejected = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(fridayFirst),
+    onDiagnostics: event => rejectedDiagnostics.push(event)
+  });
+  assert.equal(rejected.type, 'CONTRACT_FAILURE');
+  assert.equal(rejectedDiagnostics.find(event => event.stage === 'activeSessionOutput')
+    .sectionOneCurrentFirst, false);
+  const noSummaryCitation = structuredClone(current);
+  noSummaryCitation.sections[0].evidenceRefs = ['e2'];
+  noSummaryCitation.evidenceReferences = ['e2', 'e1'];
+  assert.ok(validateClaudeAnalysisOutput(noSummaryCitation, input).errors.some(error =>
+    error.includes('active summary requires a CURRENT_SESSION evidence reference')));
+
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'PRIVATE_API_KEY', fetchImpl: async () => anthropicResponse(
+      normalOutput(input, {furtherReadings: []})
+    ), onDiagnostics: event => diagnostics.push(event)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.furtherReadings, ['e1']);
+  assert.deepEqual(diagnostics.find(event => event.stage === 'activeSessionProjection'), {
+    stage: 'activeSessionProjection', projectedCurrentSessionRefCount: 1
+  });
+  assert.deepEqual(diagnostics.find(event => event.stage === 'activeSessionOutput'), {
+    stage: 'activeSessionOutput', projectedCurrentSessionRefCount: 1,
+    citedCurrentSessionRefCount: 1,
+    sectionOneCurrentRefFirst: true,
+    sectionOneCurrentFirst: true,
+    activeFurtherReadingsEligibleCount: 1,
+    activeFurtherReadingsSelectedCount: 1
+  });
+  assert.equal(JSON.stringify(diagnostics).includes('PRIVATE_API_KEY'), false);
+  assert.equal(JSON.stringify(diagnostics).includes('Microsoft raised its outlook'), false);
+});
+
+test('REGULAR and POST apply the same current-first Section 1 guard', () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z',
+      '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z',
+      '2026-09-08T20:30:00.000Z']
+  ]) {
+    const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
+    const current = normalOutput(input, {furtherReadings: ['e1']});
+    assert.equal(validateClaudeAnalysisOutput(current, input).valid, true, marketState);
+    const priorFirst = structuredClone(current);
+    priorFirst.sections[0].content = 'Friday dominated the market report. '
+      + `In the ${marketState === 'POST' ? 'post-market' : 'regular session'}, current news followed.`;
+    assert.equal(validateClaudeAnalysisOutput(priorFirst, input).valid, false, marketState);
+  }
+});
+
+test('PRE, REGULAR and POST with zero current refs return an explicit eight-section degraded report without a provider call', async () => {
+  for (const [marketState, generatedAt, overlayAsOf] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z']
+  ]) {
+    const input = activeUsInput({
+      marketState, generatedAt, overlayAsOf,
+      currentPublishedAt: '2026-09-04T19:00:00.000Z'
+    });
+    assert.ok(noCurrentSessionEvidenceOutput(input));
+    assert.equal(validateClaudeAnalysisOutput(normalOutput(input), input).valid, false);
+    let calls = 0;
+    const diagnostics = [];
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => { calls++; throw new Error('not expected'); },
+      onDiagnostics: event => diagnostics.push(event)
+    });
+    assert.equal(calls, 0);
+    assert.equal(result.type, 'SUCCESS', result.message);
+    assert.equal(result.output.status, 'DEGRADED');
+    assert.equal(result.output.sections.length, 8);
+    assert.equal(result.output.sections[0].content, NO_CURRENT_SESSION_SUMMARY);
+    assert.equal(result.output.sections.slice(1).every(section => section.content === null), true);
+    assert.deepEqual(result.output.evidenceReferences, []);
+    assert.deepEqual(result.output.furtherReadings, []);
+    assert.deepEqual(result.output.evidenceGaps, [NO_CURRENT_SESSION_EVIDENCE_GAP]);
+    assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
+    assert.equal(diagnostics.find(event => event.stage === 'activeSessionProjection')
+      .projectedCurrentSessionRefCount, 0);
+    assert.equal(diagnostics.find(event => event.stage === 'activeSessionOutput')
+      .citedCurrentSessionRefCount, 0);
+  }
+});
+
 test('current-session catalysts support current moves but not prior-session causality', () => {
   const input = activeUsInput();
   const current = normalOutput(input);
@@ -411,7 +524,7 @@ test('active Further Readings resolve only cited current Yahoo evidence in citat
   assert.equal(MAX_ACTIVE_FURTHER_READINGS, 5);
 });
 
-test('active Further Readings allow an empty final result when no current Yahoo evidence is cited', async () => {
+test('active Further Readings resolve empty without citations, but active analysis rejects no current citations', async () => {
   const input = activeUsInput();
   const raw = normalOutput(input, {
     status: 'DEGRADED', furtherReadings: ['e1'],
@@ -424,11 +537,11 @@ test('active Further Readings allow an empty final result when no current Yahoo 
     ...raw.sections[2], content: null, evidenceRefs: [], telemetryRefs: [],
     uncertainties: ['No current broad-market focus evidence was cited.']
   };
+  assert.deepEqual(resolveActiveFurtherReadings(raw, input).furtherReadings, []);
   const result = await invokeClaudeAnalysis({
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
   });
-  assert.equal(result.type, 'SUCCESS', result.message);
-  assert.deepEqual(result.output.furtherReadings, []);
+  assert.equal(result.type, 'CONTRACT_FAILURE');
 });
 
 test('active Further Readings permit an empty cited-result set and apply PRE, REGULAR, and POST semantics', () => {
