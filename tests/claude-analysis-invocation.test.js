@@ -204,6 +204,23 @@ function normalOutput(input, overrides = {}) {
   };
 }
 
+function activeOutputWithoutCurrentCitation(input) {
+  const output = normalOutput(input, {
+    status: 'DEGRADED',
+    evidenceGaps: ['Validated broad-market company or sector evidence was not used.']
+  });
+  for (const [index, section] of output.sections.entries()) {
+    if (index === 3 || index === 7) continue;
+    output.sections[index] = {...section, evidenceRefs: ['e2']};
+  }
+  output.sections[2] = {
+    ...output.sections[2], content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['No broad-market focus analysis was generated.']
+  };
+  output.evidenceReferences = ['e2'];
+  return output;
+}
+
 function anthropicResponse(output, overrides = {}) {
   return {
     ok: true,
@@ -369,7 +386,8 @@ test('PRE summary must cite current evidence and lead with it, while prior close
   });
   assert.deepEqual(diagnostics.find(event => event.stage === 'activeSessionOutput'), {
     stage: 'activeSessionOutput', projectedCurrentSessionRefCount: 1,
-    citedCurrentSessionRefCount: 1,
+    citedCurrentSessionRefCount: 1, returnedCurrentSessionRefCount: 1,
+    deterministicCitationRepairApplied: false, repairedCurrentSessionRefCount: 0,
     sectionOneCurrentRefFirst: true,
     sectionOneCurrentFirst: true,
     activeFurtherReadingsEligibleCount: 1,
@@ -394,6 +412,71 @@ test('REGULAR and POST apply the same current-first Section 1 guard', () => {
       + `In the ${marketState === 'POST' ? 'post-market' : 'regular session'}, current news followed.`;
     assert.equal(validateClaudeAnalysisOutput(priorFirst, input).valid, false, marketState);
   }
+});
+
+test('PRE, REGULAR and POST repair one omitted current citation only when attribution is unique', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z',
+      '2026-09-08T11:30:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z',
+      '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z',
+      '2026-09-08T20:30:00.000Z']
+  ]) {
+    const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
+    const raw = activeOutputWithoutCurrentCitation(input);
+    assert.equal(validateClaudeAnalysisOutput(raw, input).valid, false);
+    const diagnostics = [];
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw),
+      onDiagnostics: event => diagnostics.push(event)
+    });
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.deepEqual(result.output.sections[0].evidenceRefs, ['e1', 'e2']);
+    assert.deepEqual(result.output.furtherReadings, ['e1']);
+    assert.deepEqual(diagnostics.find(event => event.stage === 'activeSessionOutput'), {
+      stage: 'activeSessionOutput', projectedCurrentSessionRefCount: 1,
+      citedCurrentSessionRefCount: 1, returnedCurrentSessionRefCount: 0,
+      deterministicCitationRepairApplied: true, repairedCurrentSessionRefCount: 1,
+      sectionOneCurrentRefFirst: true, sectionOneCurrentFirst: true,
+      activeFurtherReadingsEligibleCount: 1, activeFurtherReadingsSelectedCount: 1
+    });
+  }
+});
+
+test('active citation repair rejects ambiguous or invalid generated attribution', async () => {
+  const secondCurrent = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Apple current-session update', summary: 'Apple moved in the regular session.',
+    canonicalUrl: 'https://finance.yahoo.com/news/apple-current-session-update.html',
+    publishedAt: '2026-09-08T14:35:00.000Z', symbols: ['AAPL'], publisher: 'Yahoo Finance'
+  });
+  const ambiguousInput = activeUsInput({additionalItems: [secondCurrent]});
+  const ambiguousDiagnostics = [];
+  const ambiguous = await invokeClaudeAnalysis({
+    input: ambiguousInput, apiKey: 'test-key',
+    fetchImpl: async () => anthropicResponse(activeOutputWithoutCurrentCitation(ambiguousInput)),
+    onDiagnostics: event => ambiguousDiagnostics.push(event)
+  });
+  assert.equal(ambiguous.type, 'CONTRACT_FAILURE');
+  const ambiguousEvent = ambiguousDiagnostics.find(event => event.stage === 'activeSessionOutput');
+  assert.equal(ambiguousEvent.projectedCurrentSessionRefCount, 2);
+  assert.equal(ambiguousEvent.returnedCurrentSessionRefCount, 0);
+  assert.equal(ambiguousEvent.deterministicCitationRepairApplied, false);
+  assert.equal(ambiguousEvent.repairedCurrentSessionRefCount, 0);
+
+  const invalidInput = activeUsInput();
+  const invalid = activeOutputWithoutCurrentCitation(invalidInput);
+  invalid.sections[0].evidenceRefs = ['e999'];
+  const invalidDiagnostics = [];
+  const invalidResult = await invokeClaudeAnalysis({
+    input: invalidInput, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(invalid),
+    onDiagnostics: event => invalidDiagnostics.push(event)
+  });
+  assert.equal(invalidResult.type, 'CONTRACT_FAILURE');
+  const invalidEvent = invalidDiagnostics.find(event => event.stage === 'activeSessionOutput');
+  assert.equal(invalidEvent.deterministicCitationRepairApplied, false);
+  assert.equal(invalidEvent.repairedCurrentSessionRefCount, 0);
 });
 
 test('PRE, REGULAR and POST with zero current refs return an explicit eight-section degraded report without a provider call', async () => {
@@ -524,7 +607,7 @@ test('active Further Readings resolve only cited current Yahoo evidence in citat
   assert.equal(MAX_ACTIVE_FURTHER_READINGS, 5);
 });
 
-test('active Further Readings resolve empty without citations, but active analysis rejects no current citations', async () => {
+test('active Further Readings resolve empty without citations before single-ref repair', async () => {
   const input = activeUsInput();
   const raw = normalOutput(input, {
     status: 'DEGRADED', furtherReadings: ['e1'],
@@ -541,7 +624,8 @@ test('active Further Readings resolve empty without citations, but active analys
   const result = await invokeClaudeAnalysis({
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
   });
-  assert.equal(result.type, 'CONTRACT_FAILURE');
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.furtherReadings, ['e1']);
 });
 
 test('active Further Readings permit an empty cited-result set and apply PRE, REGULAR, and POST semantics', () => {
