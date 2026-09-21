@@ -105,6 +105,25 @@ test('constructs compact provisional evidence for every retrieved candidate with
   assert.equal(Object.isFrozen(result.constructedEvidence[0]), true);
 });
 
+test('attributes provisional construction failure to the exact candidate reference', () => {
+  const candidates = collection();
+  const articles = candidates.candidates.map(item => articleFor(item));
+  articles[1] = {...articles[1], reference: 'c9'};
+
+  const result = service().constructProvisionalEvidence({
+    candidateCollection: candidates,
+    retrievedArticles: articles
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    type: 'ARTICLE_VALIDATION_FAILURE',
+    message: 'CNBC retrieved articles do not match candidates',
+    failedCandidateReferences: ['c2']
+  });
+  assert.equal(Object.isFrozen(result.failedCandidateReferences), true);
+});
+
 test('all SKIP produces an immutable empty constructed evidence result', () => {
   const result = service().constructEvidence({
     candidateCollection: collection(),

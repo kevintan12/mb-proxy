@@ -165,3 +165,34 @@ test('diagnostics distinguish all retained pages failing extraction from all ext
     assert.equal(summary.pageAttemptCount, 2);
   }
 });
+
+test('maps failed constructed candidate references only to their cached search intent', async () => {
+  const items = [discovery(1), discovery(11)];
+  const evictions = [];
+  let evictionSucceeds = true;
+  const discoveryService = {
+    discoverCnbcMarketNews: async () => ({ok: true, type: 'SUCCESS', discoveries: items}),
+    cacheMetadata: () => ({cachedSearchIndexes: [1, 2]}),
+    evictCachedSearchIndexes: value => {
+      evictions.push(value.searchIndexes);
+      return evictionSucceeds;
+    }
+  };
+  const service = createCnbcSearchNewsCandidateAcquisitionService({
+    discovery: discoveryService,
+    articleContentAcquisition: {
+      acquireDiscoveredArticleContent: async ({discovery: item}) => article(item)
+    }
+  });
+  const acquired = await service.acquireCandidates({
+    targetSessionDate: '2026-09-11', horizons, bounds, articleRetrievalBounds: articleBounds
+  });
+
+  assert.equal(service.evictValidatedCacheHits(acquired, ['c1']), true);
+  assert.equal(service.evictValidatedCacheHits(acquired, ['c2']), true);
+  assert.equal(service.evictValidatedCacheHits(acquired, ['c1', 'c2']), true);
+  assert.equal(service.evictValidatedCacheHits(acquired, ['c9']), false);
+  evictionSucceeds = false;
+  assert.equal(service.evictValidatedCacheHits(acquired, ['c1']), false);
+  assert.deepEqual(evictions, [[1], [2], [1, 2], [1]]);
+});

@@ -14,7 +14,6 @@ const {
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_SYSTEM_PROMPT,
   CLAUDE_EVIDENCE_SUBJECT_REPAIR_SYSTEM_PROMPT,
   EVIDENCE_ROLES,
-  MAX_CLASSIFICATION_REASON_BYTES,
   buildClaudeEvidenceRoleClassificationRequest,
   buildClaudeEvidenceSubjectRepairRequest,
   canonicalClassificationInput,
@@ -24,6 +23,9 @@ const {
   invokeClaudeEvidenceRoleClassification,
   invokeClaudeEvidenceSubjectRepair
 } = require('../lib/claude-evidence-role-classification');
+const {
+  projectClaudeEvidenceRoleClassificationInput
+} = require('../lib/claude-model-input-projection');
 
 test('rejects generic market and broad-index labels without rejecting specific names', () => {
   for (const name of [
@@ -81,9 +83,9 @@ function input(
 
 function classifications(overrides = {}) {
   const values = [
-    {reference: 'e1', materiality: 'MEDIUM', roles: ['MATERIAL_EVENT'], subjects: [], reason: 'A material event is supported.'},
-    {reference: 'e2', materiality: 'HIGH', roles: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'], subjects: [], reason: 'Supplied evidence and benchmark movement support causality.'},
-    {reference: 'e3', materiality: 'LOW', roles: [], subjects: [], reason: 'No supported semantic role.'}
+    {reference: 'e1', materiality: 'MEDIUM', roles: ['MATERIAL_EVENT'], subjects: []},
+    {reference: 'e2', materiality: 'HIGH', roles: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'], subjects: []},
+    {reference: 'e3', materiality: 'LOW', roles: [], subjects: []}
   ];
   if (overrides.index !== undefined) values[overrides.index] = {...values[overrides.index], ...overrides.value};
   return {classifications: values};
@@ -129,7 +131,7 @@ test('accepts completed material events, completed principal catalysts, and unsu
 
 test('permits a subsequent development to be a material event', () => {
   const raw = classifications({index: 2, value: {
-    materiality: 'HIGH', roles: ['MATERIAL_EVENT'], reason: 'Material forward-looking development.'
+    materiality: 'HIGH', roles: ['MATERIAL_EVENT']
   }});
   assert.equal(validateClaudeEvidenceRoleClassificationOutput(raw, input()).valid, true);
 });
@@ -207,8 +209,7 @@ test('requests grounded subjects for retained broad-market material news without
       {kind: 'COMPANY', name: 'Boeing'},
       {kind: 'COMPANY', name: 'GE Vernova'},
       {kind: 'COMPANY', name: 'Eaton'}
-    ],
-    reason: 'Named companies were material broad-market movers.'
+    ]
   };
   const output = createClaudeEvidenceRoleClassificationOutput(valid, source);
   assert.equal(output.classifications[0].subjects.some(subject => subject.name === 'Microsoft'), true);
@@ -229,10 +230,36 @@ test('allows empty subjects when broad-market subjects are not required or evide
 
 test('rejects a subsequent development classified as a principal catalyst', () => {
   const raw = classifications({index: 2, value: {
-    roles: ['PRINCIPAL_CATALYST'], reason: 'Claimed causal role.'
+    roles: ['PRINCIPAL_CATALYST']
   }});
   assert.deepEqual(validateClaudeEvidenceRoleClassificationOutput(raw, input()).errors,
     ['subsequent development cannot be a principal catalyst']);
+});
+
+test('CURRENT_SESSION evidence may support the current move but keeps subsequent restrictions', () => {
+  const source = input([
+    'COMPLETED_SESSION', 'CURRENT_SESSION', 'SUBSEQUENT_DEVELOPMENT'
+  ]);
+  const currentCatalyst = classifications();
+  assert.equal(validateClaudeEvidenceRoleClassificationOutput(currentCatalyst, source).valid, true);
+  assert.deepEqual(
+    createClaudeEvidenceRoleClassificationOutput(currentCatalyst, source)
+      .classifications[1].roles,
+    ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST']
+  );
+  const projected = JSON.parse(
+    buildClaudeEvidenceRoleClassificationRequest(source).messages[0].content
+  );
+  assert.equal(projected.evidence[1].horizon, 'CURRENT_SESSION');
+  const subsequentCatalyst = classifications({index: 2, value: {
+    roles: ['PRINCIPAL_CATALYST']
+  }});
+  assert.deepEqual(validateClaudeEvidenceRoleClassificationOutput(subsequentCatalyst, source).errors,
+    ['subsequent development cannot be a principal catalyst']);
+  assert.equal(CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_SYSTEM_PROMPT.includes(
+    'horizon CURRENT_SESSION may be MATERIAL_EVENT or PRINCIPAL_CATALYST'), true);
+  assert.equal(CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_SYSTEM_PROMPT.includes(
+    'must never be treated as causing an earlier completed-session move'), true);
 });
 
 test('restricts materiality and roles to their allowlists', () => {
@@ -258,13 +285,14 @@ test('rejects unknown, duplicate, missing, extra, and reordered references', () 
   for (const raw of cases) assert.equal(validateClaudeEvidenceRoleClassificationOutput(raw, input()).valid, false);
 });
 
-test('requires a bounded canonical reason including for principal catalysts', () => {
-  for (const reason of ['', ' ', `x${'é'.repeat(MAX_CLASSIFICATION_REASON_BYTES)}`]) {
-    assert.equal(validateClaudeEvidenceRoleClassificationOutput(
-      classifications({index: 1, value: {reason}}), input()).valid, false);
-  }
-  const missing = classifications(); delete missing.classifications[1].reason;
-  assert.equal(validateClaudeEvidenceRoleClassificationOutput(missing, input()).valid, false);
+test('classifier result shape excludes the removed reason field', () => {
+  const output = createClaudeEvidenceRoleClassificationOutput(classifications(), input());
+  assert.deepEqual(Object.keys(output.classifications[0]), [
+    'reference', 'materiality', 'roles', 'subjects'
+  ]);
+  const extra = classifications();
+  extra.classifications[0].reason = 'Unused explanation.';
+  assert.equal(validateClaudeEvidenceRoleClassificationOutput(extra, input()).valid, false);
 });
 
 test('canonical input is bounded, immutable, and independent of caller mutation', () => {
@@ -310,24 +338,43 @@ test('locks benchmark and evidence collection count boundaries', () => {
   assert.throws(() => canonicalClassificationInput(fiftyEvidence), /invalid bounded classification evidence/);
 });
 
-test('locks the 500 UTF-8 byte reason boundary', () => {
-  const exactlyFiveHundred = 'é'.repeat(250);
-  const fiveHundredAndOne = `${exactlyFiveHundred}x`;
-  assert.equal(Buffer.byteLength(exactlyFiveHundred, 'utf8'), 500);
-  assert.equal(Buffer.byteLength(fiveHundredAndOne, 'utf8'), 501);
-  assert.equal(validateClaudeEvidenceRoleClassificationOutput(
-    classifications({index: 0, value: {reason: exactlyFiveHundred}}), input()).valid, true);
-  assert.equal(validateClaudeEvidenceRoleClassificationOutput(
-    classifications({index: 0, value: {reason: fiveHundredAndOne}}), input()).valid, false);
-});
-
 test('builds a fixed server-owned request with no tools and no caller override surface', () => {
-  const request = buildClaudeEvidenceRoleClassificationRequest(input());
+  const source = input();
+  const original = JSON.stringify(source);
+  const canonical = canonicalClassificationInput(source);
+  const request = buildClaudeEvidenceRoleClassificationRequest(source);
+  const modelInput = JSON.parse(request.messages[0].content);
   assert.equal(request.model, 'claude-haiku-4-5-20251001');
   assert.equal(request.model, CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_MODEL);
   assert.equal('tools' in request, false);
   assert.equal(request.messages.length, 1);
-  assert.deepEqual(JSON.parse(request.messages[0].content), canonicalClassificationInput(input()));
+  assert.deepEqual(modelInput, projectClaudeEvidenceRoleClassificationInput(canonical));
+  assert.equal(JSON.stringify(source), original);
+  assert.equal(Object.isFrozen(projectClaudeEvidenceRoleClassificationInput(canonical)), true);
+  const canonicalSession = canonical.benchmarkTelemetry[0].snapshot.completedSessions[0];
+  const projectedSession = modelInput.benchmarkTelemetry[0].snapshot.completedSessions[0];
+  assert.deepEqual(projectedSession, {
+    ...canonicalSession,
+    provenance: {
+      publisher: canonicalSession.provenance.publisher,
+      authority: canonicalSession.provenance.authority
+    }
+  });
+  assert.equal(projectedSession.sourceId, canonicalSession.sourceId);
+  assert.deepEqual(Object.keys(projectedSession.provenance), ['publisher', 'authority']);
+  const projectedItem = modelInput.evidence[0].item;
+  assert.deepEqual(Object.keys(projectedItem), [
+    'sourceId', 'market', 'evidenceCategory', 'title', 'summary', 'publishedAt',
+    'symbols', 'provenance'
+  ]);
+  assert.deepEqual(Object.keys(projectedItem.provenance), ['publisher', 'authority']);
+  assert.equal(projectedItem.sourceId, canonical.evidence[0].item.sourceId);
+  assert.equal(projectedItem.provenance.publisher, canonical.evidence[0].item.provenance.publisher);
+  assert.equal(projectedItem.provenance.authority, canonical.evidence[0].item.provenance.authority);
+  assert.equal('canonicalUrl' in projectedItem, false);
+  for (const omitted of ['homepage', 'locator', 'applicableMarket', 'sourceJurisdiction']) {
+    assert.equal(omitted in projectedItem.provenance, false);
+  }
   assert.equal(request.system, CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_SYSTEM_PROMPT);
   for (const required of [
     'Materiality and causality are distinct judgments',
@@ -352,6 +399,35 @@ test('builds a fixed server-owned request with no tools and no caller override s
   assert.throws(() => buildClaudeEvidenceRoleClassificationRequest({...input(), prompt: 'override'}));
 });
 
+test('retains provider-owned Yahoo publisher while rejecting invalid canonical data before projection', () => {
+  const yahoo = evidence(1, {
+    sourceId: 'us.yahoo-finance',
+    publisher: 'Reuters',
+    canonicalUrl: 'https://finance.yahoo.com/markets/live/example.html'
+  });
+  const source = input(['COMPLETED_SESSION'], [yahoo]);
+  const projected = JSON.parse(
+    buildClaudeEvidenceRoleClassificationRequest(source).messages[0].content
+  );
+  assert.equal(projected.evidence[0].item.sourceId, 'us.yahoo-finance');
+  assert.equal(projected.evidence[0].item.provenance.publisher, 'Reuters');
+  assert.equal(projected.evidence[0].item.provenance.authority, 'secondary');
+
+  const invalid = JSON.parse(JSON.stringify(source));
+  invalid.evidence[0].item.canonicalUrl = 'http://example.com/invalid';
+  assert.throws(() => buildClaudeEvidenceRoleClassificationRequest(invalid),
+    /invalid canonical classification evidence/);
+  const spoofed = JSON.parse(JSON.stringify(source));
+  spoofed.evidence[0].item.provenance.authority = 'primary';
+  assert.throws(() => buildClaudeEvidenceRoleClassificationRequest(spoofed),
+    /invalid canonical classification evidence/);
+  const spoofedTelemetry = JSON.parse(JSON.stringify(source));
+  spoofedTelemetry.benchmarkTelemetry[0].snapshot.completedSessions[0]
+    .provenance.authority = 'primary';
+  assert.throws(() => buildClaudeEvidenceRoleClassificationRequest(spoofedTelemetry),
+    /invalid canonical benchmark telemetry/);
+});
+
 test('uses a provider-compatible schema without weakening authoritative subject bounds', () => {
   const authoritativeSubjects = CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_OUTPUT_JSON_SCHEMA
     .properties.classifications.items.properties.subjects;
@@ -363,6 +439,14 @@ test('uses a provider-compatible schema without weakening authoritative subject 
   assert.equal(Object.hasOwn(providerSubjects, 'maxItems'), false);
   assert.equal(request.output_config.format.schema,
     CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVIDER_JSON_SCHEMA);
+  const authoritativeClassification = CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_OUTPUT_JSON_SCHEMA
+    .properties.classifications.items;
+  const providerClassification = CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVIDER_JSON_SCHEMA
+    .properties.classifications.items;
+  assert.equal(authoritativeClassification.required.includes('reason'), false);
+  assert.equal(Object.hasOwn(authoritativeClassification.properties, 'reason'), false);
+  assert.equal(providerClassification.required.includes('reason'), false);
+  assert.equal(Object.hasOwn(providerClassification.properties, 'reason'), false);
   assert.equal(Object.hasOwn(
     request.output_config.format.schema.properties.classifications.items.properties.subjects,
     'maxItems'
@@ -478,12 +562,11 @@ test('diagnoses primary subject omission separately from subjects sanitized to e
   );
   const raw = {classifications: [
     {
-      reference: 'e1', materiality: 'HIGH', roles: ['MATERIAL_EVENT'], subjects: [],
-      reason: 'Material company move.'
+      reference: 'e1', materiality: 'HIGH', roles: ['MATERIAL_EVENT'], subjects: []
     },
     {
       reference: 'e2', materiality: 'MEDIUM', roles: ['MATERIAL_EVENT'],
-      subjects: [{kind: 'SECTOR', name: 'US stocks'}], reason: 'Material market move.'
+      subjects: [{kind: 'SECTOR', name: 'US stocks'}]
     }
   ]};
   const diagnostics = [];
@@ -551,6 +634,12 @@ test('captures only sanitized size, counts, request-id, timing, usage, and fetch
     primaryOmittedSubjectCount: 0,
     primarySanitizedEmptySubjectCount: 0
   });
+  assert.equal(diagnostics[0].requestSize.classificationInputBytes,
+    Buffer.byteLength(JSON.stringify(canonicalClassificationInput(input())), 'utf8'));
+  assert.equal(diagnostics[0].requestSize.projectedClassificationInputBytes,
+    Buffer.byteLength(buildClaudeEvidenceRoleClassificationRequest(input()).messages[0].content, 'utf8'));
+  assert.equal(diagnostics[0].requestSize.projectedClassificationInputBytes
+    < diagnostics[0].requestSize.classificationInputBytes, true);
   const serialized = JSON.stringify(diagnostics[0]);
   for (const forbidden of ['Canonical evidence', 'Bounded evidence', 'cnbc.com', 'TOP_SECRET', 'Classify every']) {
     assert.equal(serialized.includes(forbidden), false, forbidden);

@@ -8,6 +8,9 @@ const {
   YAHOO_RECAP_RESEARCH_MAX_SESSION_VALIDATION_ATTEMPTS,
   createYahooRecapResearchRuntime
 } = require('../lib/yahoo-recap-research-runtime');
+const {
+  createCompletedSessionRecapDiscoveryCache
+} = require('../lib/completed-session-recap-discovery-cache');
 
 const targetSessionDate = '2026-09-09';
 const recapUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-example.html';
@@ -134,6 +137,112 @@ test('discovery receives only targetSessionDate and successful metadata passes u
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.discovery), true);
   assert.equal(Object.isFrozen(result.validation), true);
+});
+
+test('reuses only an explicitly remembered validated identity and freshly validates every cache hit', async () => {
+  const cache = createCompletedSessionRecapDiscoveryCache();
+  const calls = [];
+  const diagnostics = [];
+  const service = runtime(async (url, options) => {
+    calls.push(url);
+    if (url === 'https://api.anthropic.com/v1/messages') {
+      return anthropicResponse([searchResult()]);
+    }
+    return yahooResponse();
+  }, {
+    completedSessionRecapDiscoveryCache: cache,
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const first = await service.discoverAndValidateRecap({targetSessionDate});
+  assert.equal(first.type, 'VALIDATED');
+  assert.equal(cache.get({provider: 'YAHOO', targetSessionDate}), null);
+  assert.equal(service.rememberValidatedDiscovery({
+    targetSessionDate, discovery: first.discovery
+  }), true);
+  const second = await service.discoverAndValidateRecap({targetSessionDate});
+  assert.deepEqual(second, first);
+  assert.equal(service.isValidatedCacheHit(first), false);
+  assert.equal(service.isValidatedCacheHit(second), true);
+  assert.deepEqual(calls, [
+    'https://api.anthropic.com/v1/messages', recapUrl, recapUrl
+  ]);
+  assert.deepEqual(diagnostics.filter(value =>
+    value.stage === 'completedSessionRecapDiscoveryCache'), [{
+    stage: 'completedSessionRecapDiscoveryCache', provider: 'YAHOO', outcome: 'MISS'
+  }, {
+    stage: 'completedSessionRecapDiscoveryCache', provider: 'YAHOO',
+    outcome: 'FALLBACK_DISCOVERY'
+  }, {
+    stage: 'completedSessionRecapDiscoveryCache', provider: 'YAHOO', outcome: 'VALIDATED_HIT'
+  }]);
+  assert.doesNotMatch(JSON.stringify(diagnostics.filter(value =>
+    value.stage === 'completedSessionRecapDiscoveryCache')),
+  /finance\.yahoo|Stock market today|articleBody/);
+});
+
+test('evicts a failed Yahoo cache hit and falls back to bounded discovery in the same request', async () => {
+  const cache = createCompletedSessionRecapDiscoveryCache();
+  const cached = {
+    title: 'Cached recap', url: recapUrl, discoveredVia: 'ANTHROPIC_WEB_SEARCH', targetSessionDate
+  };
+  cache.set({provider: 'YAHOO', targetSessionDate, discovery: cached});
+  const replacementUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-replacement.html';
+  const calls = [];
+  const diagnostics = [];
+  const service = runtime(async url => {
+    calls.push(url);
+    if (url === 'https://api.anthropic.com/v1/messages') {
+      return anthropicResponse([searchResult(replacementUrl, 'Replacement recap')]);
+    }
+    if (url === recapUrl) {
+      return yahooResponse(yahooHtml({
+        headline: 'Cached recap', datePublished: '2026-09-08T20:30:00Z',
+        dateModified: '2026-09-08T21:00:00Z'
+      }, recapUrl), {url: recapUrl});
+    }
+    return yahooResponse(yahooHtml({headline: 'Replacement recap'}, replacementUrl), {
+      url: replacementUrl
+    });
+  }, {
+    completedSessionRecapDiscoveryCache: cache,
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const result = await service.discoverAndValidateRecap({targetSessionDate});
+  assert.equal(result.type, 'VALIDATED');
+  assert.equal(result.discovery.url, replacementUrl);
+  assert.deepEqual(calls, [recapUrl, 'https://api.anthropic.com/v1/messages', replacementUrl]);
+  assert.equal(cache.get({provider: 'YAHOO', targetSessionDate}), null);
+  assert.deepEqual(diagnostics.filter(value =>
+    value.stage === 'completedSessionRecapDiscoveryCache'), [{
+    stage: 'completedSessionRecapDiscoveryCache', provider: 'YAHOO',
+    outcome: 'EVICTED_AFTER_VALIDATION_FAILURE'
+  }, {
+    stage: 'completedSessionRecapDiscoveryCache', provider: 'YAHOO',
+    outcome: 'FALLBACK_DISCOVERY'
+  }]);
+  assert.equal(service.rememberValidatedDiscovery({
+    targetSessionDate, discovery: result.discovery
+  }), true);
+  assert.equal(cache.get({provider: 'YAHOO', targetSessionDate}).url, replacementUrl);
+});
+
+test('Yahoo recap cache is date-scoped and absence never creates an entry', async () => {
+  const cache = createCompletedSessionRecapDiscoveryCache();
+  let discoveryCalls = 0;
+  const service = runtime(async url => {
+    if (url === 'https://api.anthropic.com/v1/messages') {
+      discoveryCalls++;
+      return anthropicResponse([]);
+    }
+    throw new Error('not expected');
+  }, {completedSessionRecapDiscoveryCache: cache});
+  assert.equal((await service.discoverAndValidateRecap({targetSessionDate})).type, 'NOT_FOUND');
+  assert.equal((await service.discoverAndValidateRecap({
+    targetSessionDate: '2026-09-10'
+  })).type, 'NOT_FOUND');
+  assert.equal(discoveryCalls, 2);
+  assert.equal(cache.get({provider: 'YAHOO', targetSessionDate}), null);
+  assert.equal(cache.get({provider: 'YAHOO', targetSessionDate: '2026-09-10'}), null);
 });
 
 test('uses the exact production response bound at session validation', async () => {

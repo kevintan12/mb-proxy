@@ -8,6 +8,7 @@ const {
   buildClaudeAnalysisRequest,
   invokeClaudeAnalysis
 } = require('../lib/claude-analysis-invocation');
+const {projectClaudeAnalysisInput} = require('../lib/claude-model-input-projection');
 const {
   createRuntimeFiveSessionSnapshotRepository
 } = require('../lib/runtime-five-session-snapshot-repository');
@@ -265,7 +266,44 @@ test('rich and thin fixtures survive the complete final invocation boundary with
   ]) {
     const request = buildClaudeAnalysisRequest(input);
     const serializedInput = JSON.parse(request.messages[0].content);
-    assert.deepEqual(serializedInput, input);
+    assert.deepEqual(serializedInput, projectClaudeAnalysisInput(input));
+    assert.equal(serializedInput.marketPackages[0].telemetry.benchmarkSnapshots.length,
+      input.marketPackages[0].telemetry.benchmarkSnapshots.length);
+    assert.equal(serializedInput.marketPackages[0].telemetry.stockSnapshots.length,
+      input.marketPackages[0].telemetry.stockSnapshots.length);
+    for (const collectionName of ['benchmarkSnapshots', 'stockSnapshots']) {
+      for (let snapshotIndex = 0;
+        snapshotIndex < input.marketPackages[0].telemetry[collectionName].length;
+        snapshotIndex++) {
+        const canonicalSnapshot = input.marketPackages[0].telemetry[collectionName][snapshotIndex];
+        const projectedSnapshot = serializedInput.marketPackages[0].telemetry[collectionName][snapshotIndex];
+        assert.equal(projectedSnapshot.reference, canonicalSnapshot.reference);
+        assert.equal(projectedSnapshot.snapshot.completedSessions.length,
+          canonicalSnapshot.snapshot.completedSessions.length);
+        for (let sessionIndex = 0;
+          sessionIndex < canonicalSnapshot.snapshot.completedSessions.length;
+          sessionIndex++) {
+          const canonicalSession = canonicalSnapshot.snapshot.completedSessions[sessionIndex];
+          const projectedSession = projectedSnapshot.snapshot.completedSessions[sessionIndex];
+          assert.deepEqual(projectedSession, {
+            ...canonicalSession,
+            provenance: {
+              publisher: canonicalSession.provenance.publisher,
+              authority: canonicalSession.provenance.authority
+            }
+          });
+        }
+      }
+    }
+    assert.deepEqual(
+      serializedInput.marketPackages[0].evidenceContext.furtherReadings,
+      input.marketPackages[0].evidenceContext.furtherReadings
+    );
+    const projectedYahoo = serializedInput.marketPackages[0].evidenceContext.evidence.find(
+      entry => entry.item.sourceId === 'us.yahoo-finance'
+    );
+    assert.equal(projectedYahoo.item.provenance.publisher, 'Yahoo Finance');
+    assert.equal(projectedYahoo.item.provenance.authority, 'secondary');
     const result = await invokeClaudeAnalysis({
       input,
       apiKey: 'test-key',
@@ -280,6 +318,7 @@ test('rich and thin fixtures survive the complete final invocation boundary with
     });
     assert.equal(result.type, 'SUCCESS', result.message);
     assert.equal(result.output.status, expectedStatus);
+    assert.deepEqual(result.output.furtherReadings, output.furtherReadings);
   }
 });
 
@@ -310,6 +349,36 @@ test('an optional provider gap does not force DEGRADED when supported analytical
   assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
   assert.equal(output.status, 'NORMAL');
   assert.equal(output.sections.every((section, index) => index === 7 || section.content !== null), true);
+});
+
+test('Section 6 remains populated with supported risks when no grounded opportunity exists', () => {
+  const input = richCompletedUsWeekInput();
+  const output = supportedOutput(input, {opportunity: false});
+  assert.equal(output.sections[5].content !== null, true);
+  assert.equal(output.sections[5].evidenceRefs.length > 0, true);
+  assert.doesNotMatch(output.sections[5].content, /opportunit|bullish|buy the dip/i);
+  assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
+});
+
+test('Section 7 may be null and degraded when no upcoming catalysts are supplied', () => {
+  const input = richCompletedUsWeekInput({
+    unresolvedGaps: ['CNBC market-news research was unavailable at package assembly time.']
+  });
+  const output = supportedOutput(input, {opportunity: false});
+  output.status = 'DEGRADED';
+  output.sections[6] = {
+    name: 'WHAT TO WATCH FOR NEXT',
+    content: null,
+    evidenceRefs: [],
+    telemetryRefs: [],
+    uncertainties: ['No supported upcoming catalysts were supplied.']
+  };
+  output.evidenceGaps = [
+    'CNBC market-news research was unavailable at package assembly time.',
+    'No supported upcoming catalysts were supplied.'
+  ];
+  output.evidenceReferences = ['e2', 'e3', 'e4', 'e5'];
+  assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
 });
 
 test('Section 3 rejects a portfolio reference without independent broad-market focus', async () => {
@@ -408,10 +477,95 @@ test('Production-shaped Section 3 overlap localizes mixed stock telemetry and pr
 test('request-specific Section 3 allowlist contains all benchmarks and excludes overlapping stocks', () => {
   const input = overlappingFocusInput();
   const system = buildClaudeAnalysisRequest(input).system;
-  assert.match(system,
+  const sectionThreeInstruction = system.slice(
+    system.lastIndexOf('Request-specific Section 3 telemetry allowlist:'),
+    system.lastIndexOf('Request-specific Section 4 reference allowlist for')
+  );
+  assert.match(sectionThreeInstruction,
     /Section 3 telemetryRefs may contain only these exact benchmark refs: \["t1","t2","t3","t4"\]\./);
   for (const stockReference of ['t5', 't6', 't7']) {
-    assert.equal(system.includes(`"${stockReference}"`), false, stockReference);
+    assert.equal(sectionThreeInstruction.includes(`"${stockReference}"`), false, stockReference);
+  }
+});
+
+test('Section 4 provider input lists only the selected portfolio refs, including its upcoming events', () => {
+  const input = overlappingFocusInput();
+  input.portfolioContext.myStocks[0].upcomingEvents = [{
+    title: 'Microsoft event', scheduledAt: '2026-09-10T12:00:00.000Z', evidenceRefs: ['e3']
+  }];
+  input.portfolioContext.watchlist[0].evidenceRefs = ['e4'];
+  input.portfolioContext.watchlist[0].upcomingEvents = [{
+    title: 'Apple event', scheduledAt: '2026-09-10T12:00:00.000Z', evidenceRefs: ['e5']
+  }];
+  assert.equal(validateClaudeAnalysisInput(input), true);
+  const original = structuredClone(input);
+
+  const myStocksRequest = buildClaudeAnalysisRequest(input);
+  const myStocksModelInput = JSON.parse(myStocksRequest.messages[0].content);
+  assert.deepEqual(myStocksModelInput.sectionFourReferenceAllowlist, {
+    initiatingList: 'myStocks', evidenceRefs: ['e2', 'e3'], telemetryRefs: ['t5', 't6']
+  });
+  assert.match(myStocksRequest.system,
+    /Request-specific Section 4 reference allowlist for myStocks: evidenceRefs may contain only these exact refs: \["e2","e3"\]; telemetryRefs may contain only these exact refs: \["t5","t6"\]\./);
+  assert.match(myStocksRequest.system,
+    /Section 3 telemetryRefs may contain only these exact benchmark refs: \["t1","t2","t3","t4"\]\./);
+  assert.deepEqual(myStocksModelInput.portfolioContext, input.portfolioContext);
+  assert.equal(Object.hasOwn(input, 'sectionFourReferenceAllowlist'), false);
+  assert.deepEqual(input, original);
+
+  input.analysisRequest.initiatingList = 'watchlist';
+  const watchlistRequest = buildClaudeAnalysisRequest(input);
+  const watchlistModelInput = JSON.parse(watchlistRequest.messages[0].content);
+  assert.deepEqual(watchlistModelInput.sectionFourReferenceAllowlist, {
+    initiatingList: 'watchlist', evidenceRefs: ['e4', 'e5'], telemetryRefs: ['t7']
+  });
+  assert.match(watchlistRequest.system,
+    /Request-specific Section 4 reference allowlist for watchlist: evidenceRefs may contain only these exact refs: \["e4","e5"\]; telemetryRefs may contain only these exact refs: \["t7"\]\./);
+  assert.match(watchlistRequest.system,
+    /Section 3 telemetryRefs may contain only these exact benchmark refs: \["t1","t2","t3","t4"\]\./);
+});
+
+test('Section 4 accepts selected refs and still localizes two appended refs from outside either initiating list', async () => {
+  for (const initiatingList of ['myStocks', 'watchlist']) {
+    const input = overlappingFocusInput();
+    input.analysisRequest.initiatingList = initiatingList;
+    input.portfolioContext.myStocks[0].upcomingEvents = [{
+      title: 'Microsoft event', scheduledAt: '2026-09-10T12:00:00.000Z', evidenceRefs: ['e3']
+    }];
+    input.portfolioContext.watchlist[0].evidenceRefs = ['e4', 'e5'];
+    const selected = initiatingList === 'myStocks'
+      ? {evidenceRefs: ['e2', 'e3'], telemetryRefs: ['t5', 't6']}
+      : {evidenceRefs: ['e4', 'e5'], telemetryRefs: ['t7']};
+    const outside = initiatingList === 'myStocks'
+      ? {evidenceRefs: ['e4', 'e5'], telemetryRefs: ['t1', 't7']}
+      : {evidenceRefs: ['e2', 'e3'], telemetryRefs: ['t5', 't6']};
+    assert.equal(validateClaudeAnalysisInput(input), true);
+    const valid = supportedOutput(input);
+    valid.sections[3] = {
+      name: valid.sections[3].name,
+      content: 'The initiating list had material developments.',
+      ...selected, uncertainties: []
+    };
+    const accepted = await invokeFixture(input, valid);
+    assert.equal(accepted.type, 'SUCCESS', accepted.message);
+    assert.deepEqual(accepted.output.sections[3], valid.sections[3]);
+
+    const mixed = structuredClone(valid);
+    mixed.sections[3].evidenceRefs.push(...outside.evidenceRefs);
+    mixed.sections[3].telemetryRefs.push(...outside.telemetryRefs);
+    const diagnostics = [];
+    const localized = await invokeFixture(input, mixed, diagnostics);
+    assert.equal(localized.type, 'SUCCESS', localized.message);
+    assert.equal(localized.output.status, 'DEGRADED');
+    assert.deepEqual(localized.output.sections[3], {
+      name: valid.sections[3].name, content: null, evidenceRefs: [], telemetryRefs: [],
+      uncertainties: ['Initiating-list support could not be validated from the generated citation set.']
+    });
+    assert.deepEqual(diagnostics.filter(event =>
+      event.stage === 'claudeAnalysisSectionNormalization' && event.sectionIndex === 3
+    ).map(event => [event.violationCategory, event.offendingReferenceCount]), [
+      ['NON_INITIATING_EVIDENCE', 2], ['NON_INITIATING_TELEMETRY', 2]
+    ]);
   }
 });
 

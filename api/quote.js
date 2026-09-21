@@ -93,6 +93,7 @@ module.exports = async function handler(req, res) {
 
   // ── Canonical analysis package endpoint (POST ?analysisPackage=1) ────────
   if (req.method === 'POST' && req.query.analysisPackage === '1') {
+    const generationId = analysisPackageRuntime.canonicalGenerationId(req.query.generationId);
     try {
       validateUsAnalysisOrchestrationRequest(req.body);
     } catch (error) {
@@ -105,7 +106,9 @@ module.exports = async function handler(req, res) {
     }
     try {
       const service = analysisPackageRuntime.getAnalysisPackageRuntime();
-      const envelope = await service.assemble(req.body);
+      const envelope = await analysisPackageRuntime.runWithGenerationId(
+        generationId, () => service.assemble(req.body)
+      );
       return res.status(200).json(envelope);
     } catch (error) {
       return res.status(502).json({
@@ -119,11 +122,14 @@ module.exports = async function handler(req, res) {
 
   // ── Structured Claude analysis endpoint (POST ?claudeAnalysis=1) ─────────
   if (req.method === 'POST' && req.query.claudeAnalysis) {
+    const generationId = analysisPackageRuntime.canonicalGenerationId(req.query.generationId);
     const invocation = await invokeClaudeAnalysis({
       input: req.body,
       apiKey: process.env.ANTHROPIC_API_KEY,
       onDiagnostics(diagnostics) {
-        console.info('[claude-analysis.invocation]', JSON.stringify(diagnostics));
+        console.info('[claude-analysis.invocation]', JSON.stringify(
+          analysisPackageRuntime.correlatedDiagnostics(diagnostics, generationId)
+        ));
       }
     });
     if (invocation.ok) return res.status(200).json({result: invocation.output});

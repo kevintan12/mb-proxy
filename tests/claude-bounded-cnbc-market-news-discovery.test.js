@@ -10,6 +10,8 @@ const {
   buildClaudeBoundedCnbcMarketNewsDiscoveryRequests,
   createClaudeBoundedCnbcMarketNewsDiscoveryService
 } = require('../lib/claude-bounded-cnbc-market-news-discovery');
+const {createCnbcMarketNewsDiscoveryCache}
+  = require('../lib/cnbc-market-news-discovery-cache');
 
 function result(url, title = 'CNBC market article') {
   return {type: 'web_search_result', url, title, page_age: 'ignored', encrypted_content: 'ignored'};
@@ -137,7 +139,7 @@ test('a full first-intent result set cannot starve company and sector discoverie
     [11, 'Company'],
     [12, 'Sector']
   ]);
-  assert.deepEqual(diagnostics[0].retainedResults.map(item => [
+  assert.deepEqual(diagnostics.find(item => item.stage === 'cnbcMarketNewsDiscovery').retainedResults.map(item => [
     item.rank, item.searchIndex, item.path, item.outcome
   ]), [
     [1, 1, '/2026/09/11/session-1.html', 'RETAINED'],
@@ -145,6 +147,34 @@ test('a full first-intent result set cannot starve company and sector discoverie
     [3, 1, '/2026/09/11/session-3.html', 'RETAINED'],
     [11, 2, '/2026/09/11/non-portfolio-company.html', 'RETAINED'],
     [12, 2, '/2026/09/11/constructive-sector.html', 'RETAINED']
+  ]);
+});
+
+test('cached intents retain the same deterministic 3+2 allocation without provider work', async () => {
+  const targetSessionDate = '2026-09-11';
+  const cache = createCnbcMarketNewsDiscoveryCache();
+  for (const searchIndex of [1, 2]) {
+    cache.set({
+      provider: 'CNBC', targetSessionDate, searchIndex,
+      identities: Array.from({length: 5}, (_, index) => ({
+        title: `Provider title ${searchIndex}-${index + 1}`,
+        url: `https://www.cnbc.com/2026/09/11/intent-${searchIndex}-${index + 1}.html`,
+        discoveredVia: 'ANTHROPIC_WEB_SEARCH', targetSessionDate
+      }))
+    });
+  }
+  let fetchCount = 0;
+  const service = createClaudeBoundedCnbcMarketNewsDiscoveryService({
+    apiKey: 'key', cnbcMarketNewsDiscoveryCache: cache,
+    fetchImpl: async () => { fetchCount++; throw new Error('must not fetch'); }
+  });
+
+  const output = await service.discoverCnbcMarketNews({targetSessionDate});
+
+  assert.equal(fetchCount, 0);
+  assert.deepEqual(output.discoveries.map(item => [item.rank, item.title]), [
+    [1, 'Provider title 1-1'], [2, 'Provider title 1-2'], [3, 'Provider title 1-3'],
+    [11, 'Provider title 2-1'], [12, 'Provider title 2-2']
   ]);
 });
 
@@ -168,24 +198,25 @@ test('emits bounded structural diagnostics without snippets or raw payloads', as
     fetchImpl: async () => response([result('https://www.cnbc.com/2026/09/11/article.html')])
   });
   await service.discoverCnbcMarketNews({targetSessionDate: '2026-09-11'});
-  assert.equal(diagnostics[0].outcome, 'SUCCESS');
-  assert.deepEqual(diagnostics[0].resultCount, 2);
-  assert.equal(diagnostics[0].inspectedResultCount, 2);
-  assert.equal(diagnostics[0].retainedResultCount, 1);
-  assert.deepEqual(diagnostics[0].retainedResults, [{
+  const aggregate = diagnostics.find(item => item.stage === 'cnbcMarketNewsDiscovery');
+  assert.equal(aggregate.outcome, 'SUCCESS');
+  assert.deepEqual(aggregate.resultCount, 2);
+  assert.equal(aggregate.inspectedResultCount, 2);
+  assert.equal(aggregate.retainedResultCount, 1);
+  assert.deepEqual(aggregate.retainedResults, [{
     rank: 1,
     searchIndex: 1,
     path: '/2026/09/11/article.html',
     outcome: 'RETAINED'
   }]);
-  assert.deepEqual(diagnostics[0].rejectionCounts, {
+  assert.deepEqual(aggregate.rejectionCounts, {
     INVALID_URL: 0,
     PATH_MISMATCH: 0,
     INVALID_TITLE: 0,
     DUPLICATE: 1,
     RETAINED_LIMIT: 0
   });
-  assert.equal(diagnostics[0].fetchCount, 2);
+  assert.equal(aggregate.fetchCount, 2);
   const serialized = JSON.stringify(diagnostics);
   for (const forbidden of ['CNBC market article', 'encrypted_content', 'server-key']) {
     assert.equal(serialized.includes(forbidden), false);
@@ -212,11 +243,12 @@ test('diagnostics distinguish zero results, validation rejection, and bounded pa
       fetchImpl: async () => responses[call++]
     });
     const output = await service.discoverCnbcMarketNews({targetSessionDate: '2026-09-11'});
+    const aggregate = diagnostics.find(item => item.stage === 'cnbcMarketNewsDiscovery');
     assert.equal(output.type, expected.type);
-    assert.equal(diagnostics[0].outcome, expected.outcome);
-    assert.equal(diagnostics[0].rejectionCounts.INVALID_URL, expected.invalidUrls);
-    assert.equal(diagnostics[0].rejectionCounts.PATH_MISMATCH, expected.pathMismatches || 0);
-    assert.equal(diagnostics[0].failedSearchCount, expected.failedSearchCount);
+    assert.equal(aggregate.outcome, expected.outcome);
+    assert.equal(aggregate.rejectionCounts.INVALID_URL, expected.invalidUrls);
+    assert.equal(aggregate.rejectionCounts.PATH_MISMATCH, expected.pathMismatches || 0);
+    assert.equal(aggregate.failedSearchCount, expected.failedSearchCount);
   }
 
   const diagnostics = [];
@@ -229,9 +261,121 @@ test('diagnostics distinguish zero results, validation rejection, and bounded pa
     }
   });
   const partialOutput = await partial.discoverCnbcMarketNews({targetSessionDate: '2026-09-11'});
+  const aggregate = diagnostics.find(item => item.stage === 'cnbcMarketNewsDiscovery');
   assert.equal(partialOutput.type, 'SUCCESS');
   assert.deepEqual(partialOutput.discoveries.map(item => item.rank), [11]);
-  assert.equal(diagnostics[0].outcome, 'PARTIAL_SUCCESS');
-  assert.equal(diagnostics[0].failedSearchCount, 1);
-  assert.equal(diagnostics[0].fetchCount, 2);
+  assert.equal(aggregate.outcome, 'PARTIAL_SUCCESS');
+  assert.equal(aggregate.failedSearchCount, 1);
+  assert.equal(aggregate.fetchCount, 2);
+  assert.deepEqual(diagnostics.filter(item => item.stage === 'cnbcMarketNewsSearchInvocation').map(item => item.outcome),
+    ['NETWORK_FAILURE', 'SUCCESS']);
+});
+
+test('attributes request size, provider usage, request ID, timing and tool counts to each search without changing discoveries', async () => {
+  const diagnostics = [];
+  const bodies = [];
+  let call = 0;
+  let clock = 0;
+  const service = createClaudeBoundedCnbcMarketNewsDiscoveryService({
+    apiKey: 'secret-key', onDiagnostics: value => diagnostics.push(value),
+    monotonicNow: () => clock++,
+    fetchImpl: async (_url, options) => {
+      bodies.push(options.body);
+      const index = ++call;
+      return {
+        ...response([result(`https://www.cnbc.com/2026/09/11/story-${index}.html`, `Story ${index}`)], {
+          usage: {input_tokens: index * 100, output_tokens: index * 10,
+            server_tool_use: {web_search_requests: index}}
+        }),
+        headers: {get: name => name === 'request-id' ? `req_test_${index}` : null}
+      };
+    }
+  });
+  const output = await service.discoverCnbcMarketNews({targetSessionDate: '2026-09-11'});
+  assert.deepEqual(output.discoveries.map(item => item.rank), [1, 11]);
+  assert.equal(bodies.length, 2);
+  const invocations = diagnostics.filter(item => item.stage === 'cnbcMarketNewsSearchInvocation');
+  assert.equal(invocations.length, 2);
+  for (const [index, invocation] of invocations.entries()) {
+    assert.deepEqual(Object.keys(invocation).sort(), [
+      'elapsedMs', 'httpStatus', 'model', 'outcome', 'requestId', 'requestSize',
+      'searchIndex', 'searchRequestCount', 'stage', 'usage'
+    ].sort());
+    assert.equal(invocation.searchIndex, index + 1);
+    assert.equal(invocation.outcome, 'SUCCESS');
+    assert.equal(invocation.requestId, `req_test_${index + 1}`);
+    assert.equal(invocation.httpStatus, 200);
+    assert.equal(invocation.requestSize.completeRequestBodyBytes, Buffer.byteLength(bodies[index], 'utf8'));
+    assert.equal(invocation.requestSize.systemPromptBytes > 0, true);
+    assert.equal(invocation.requestSize.userPromptBytes > 0, true);
+    assert.deepEqual(invocation.usage, {input_tokens: (index + 1) * 100, output_tokens: (index + 1) * 10});
+    assert.equal(invocation.searchRequestCount, index + 1);
+    assert.equal(invocation.elapsedMs >= 0, true);
+    assert.equal(Object.isFrozen(invocation), true);
+  }
+  const aggregate = diagnostics.find(item => item.stage === 'cnbcMarketNewsDiscovery');
+  assert.equal(aggregate.searchRequestCount, 3);
+  assert.equal(aggregate.fetchCount, 2);
+  const logged = JSON.stringify(diagnostics);
+  for (const forbidden of ['secret-key', 'Story 1', 'Story 2', 'encrypted_content', 'CNBC US stock market']) {
+    assert.equal(logged.includes(forbidden), false);
+  }
+});
+
+test('omits absent or invalid provider metadata and unexpected numeric usage fields', async () => {
+  const diagnostics = [];
+  let call = 0;
+  const service = createClaudeBoundedCnbcMarketNewsDiscoveryService({
+    apiKey: 'key', onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async () => {
+      call++;
+      if (call === 1) {
+        return response([], {usage: undefined});
+      }
+      return {
+        ...response([], {usage: {
+          input_tokens: 101,
+          output_tokens: Number.NaN,
+          unexpected_numeric_field: 999,
+          server_tool_use: {web_search_requests: 'invalid'}
+        }}),
+        headers: {get: () => 'invalid request id with spaces'}
+      };
+    }
+  });
+
+  const output = await service.discoverCnbcMarketNews({targetSessionDate: '2026-09-11'});
+
+  assert.deepEqual(output, {ok: true, type: 'NOT_FOUND', discoveries: []});
+  const invocations = diagnostics.filter(item => item.stage === 'cnbcMarketNewsSearchInvocation');
+  assert.equal(invocations.length, 2);
+  assert.equal(invocations[0].requestId, null);
+  assert.deepEqual(invocations[0].usage, {});
+  assert.equal(invocations[0].searchRequestCount, null);
+  assert.equal(invocations[1].requestId, null);
+  assert.deepEqual(invocations[1].usage, {input_tokens: 101});
+  assert.equal(invocations[1].searchRequestCount, null);
+  assert.equal('unexpected_numeric_field' in invocations[1].usage, false);
+});
+
+test('reports only allowlisted web-search tool failure subtypes without changing failure behavior', async () => {
+  const diagnostics = [];
+  let call = 0;
+  const service = createClaudeBoundedCnbcMarketNewsDiscoveryService({
+    apiKey: 'key', onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async () => response({
+      type: 'web_search_tool_result_error',
+      error_code: call++ === 0 ? 'unavailable' : 'private provider detail'
+    }, {usage: {input_tokens: 28000, server_tool_use: {web_search_requests: 1}}})
+  });
+
+  const output = await service.discoverCnbcMarketNews({targetSessionDate: '2026-09-11'});
+
+  assert.equal(output.type, 'SEARCH_TOOL_FAILURE');
+  const invocations = diagnostics.filter(item => item.stage === 'cnbcMarketNewsSearchInvocation');
+  assert.deepEqual(invocations.map(item => [item.outcome, item.toolFailureType]), [
+    ['SEARCH_TOOL_FAILURE', 'unavailable'],
+    ['SEARCH_TOOL_FAILURE', 'UNKNOWN_TOOL_FAILURE']
+  ]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /private provider detail/);
 });

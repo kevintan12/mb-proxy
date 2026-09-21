@@ -3,14 +3,20 @@ const assert = require('node:assert/strict');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
-const {createCompletedRegularSession, createFiveSessionSnapshot} = require('../lib/five-session-snapshot');
+const {
+  createCompletedRegularSession,
+  createCurrentSessionOverlay,
+  createFiveSessionSnapshot
+} = require('../lib/five-session-snapshot');
 const {
   CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA,
   REPORT_HEADER,
   REPORT_SECTION_NAMES,
   EMPTY_INITIATING_LIST_CONTENT,
   createClaudeAnalysisInput,
-  validateClaudeAnalysisOutput
+  validateClaudeAnalysisOutput,
+  MAX_ACTIVE_FURTHER_READINGS,
+  resolveActiveFurtherReadings
 } = require('../lib/claude-analysis-contract');
 const {
   CLAUDE_ANALYSIS_MODEL,
@@ -22,6 +28,7 @@ const {
   buildClaudeAnalysisRequest,
   invokeClaudeAnalysis
 } = require('../lib/claude-analysis-invocation');
+const {projectClaudeAnalysisInput} = require('../lib/claude-model-input-projection');
 
 function canonicalInput({
   includeSecondEvidence = false,
@@ -32,7 +39,8 @@ function canonicalInput({
   supportingEvidence = ['e1'],
   subsequentDevelopments = [],
   sessionAssociations = [],
-  broadMarketFocus = [{evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Technology'}]}]
+  broadMarketFocus = [{evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Technology'}]}],
+  includeCurrentOverlay = false
 } = {}) {
   const item = createEvidenceItem({
     sourceId: 'sg.reuters', market: 'SG', evidenceCategory: 'news', title: evidenceTitle,
@@ -49,9 +57,15 @@ function canonicalInput({
     close: 5747, previousClose: 5710, volume: null, asOf: '2026-09-04T17:00:00+08:00',
     sourceId: 'sg.yahoo-finance', validationState: 'VALIDATED'
   });
+  const currentOverlay = includeCurrentOverlay ? createCurrentSessionOverlay({
+    market: 'SG', marketState: 'OPEN', sessionDate: '2026-09-05',
+    asOf: '2026-09-05T10:00:00+08:00', lastPrice: 5760, referenceClose: 5747,
+    volume: 123456, sourceId: 'sg.yahoo-finance', validationState: 'VALIDATED'
+  }) : null;
   const snapshot = createFiveSessionSnapshot({
     market: 'SG', symbol: '^STI', instrumentName: 'Straits Times Index', instrumentType: 'INDEX',
-    currency: 'SGD', marketState: 'CLOSED', completedSessions: [session], currentOverlay: null
+    currency: 'SGD', marketState: includeCurrentOverlay ? 'OPEN' : 'CLOSED',
+    completedSessions: [session], currentOverlay
   });
   return createClaudeAnalysisInput({
     analysisRequest: {
@@ -61,8 +75,8 @@ function canonicalInput({
     marketPackages: [{
       market: 'SG',
       marketContext: {
-        exchangeTimezone: 'Asia/Singapore', marketState: 'CLOSED',
-        primaryCompletedSessionDate: '2026-09-04', includesCurrentOverlay: false,
+        exchangeTimezone: 'Asia/Singapore', marketState: includeCurrentOverlay ? 'OPEN' : 'CLOSED',
+        primaryCompletedSessionDate: '2026-09-04', includesCurrentOverlay: includeCurrentOverlay,
         calendarContext: 'Weekend; latest completed session remains applicable.'
       },
       telemetry: {benchmarkSnapshots: [snapshot], stockSnapshots: []},
@@ -79,10 +93,82 @@ function canonicalInput({
   });
 }
 
+function activeUsInput({
+  marketState = 'REGULAR',
+  generatedAt = '2026-09-08T15:00:00.000Z',
+  overlayAsOf = '2026-09-08T14:55:00.000Z',
+  currentPublishedAt = '2026-09-08T14:30:00.000Z',
+  additionalItems = []
+} = {}) {
+  const completed = createCompletedRegularSession({
+    market: 'US', sessionDate: '2026-09-04', open: 100, high: 105, low: 98,
+    close: 104, previousClose: 100, volume: 1000000,
+    asOf: '2026-09-04T16:00:00-04:00', sourceId: 'us.yahoo-finance',
+    validationState: 'VALIDATED'
+  });
+  const overlay = createCurrentSessionOverlay({
+    market: 'US', marketState, sessionDate: '2026-09-08',
+    asOf: overlayAsOf, lastPrice: 106, referenceClose: 104,
+    volume: 1200000, sourceId: 'us.yahoo-finance', validationState: 'VALIDATED'
+  });
+  const snapshot = createFiveSessionSnapshot({
+    market: 'US', symbol: '^GSPC', instrumentName: 'S&P 500', instrumentType: 'INDEX',
+    currency: 'USD', marketState, completedSessions: [completed],
+    currentOverlay: overlay
+  });
+  const current = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Microsoft outlook lifts stocks',
+    summary: 'Microsoft raised its outlook during the active US session.',
+    canonicalUrl: 'https://finance.yahoo.com/news/microsoft-outlook-lifts-stocks.html',
+    publishedAt: currentPublishedAt, symbols: ['MSFT'],
+    publisher: 'Yahoo Finance'
+  });
+  const completedEvidence = createEvidenceItem({
+    sourceId: 'us.reuters', market: 'US', evidenceCategory: 'news',
+    title: 'Prior completed-session market driver',
+    summary: 'A supported driver of the prior completed session.',
+    canonicalUrl: 'https://www.reuters.com/markets/us/prior-driver',
+    publishedAt: '2026-09-04T19:00:00.000Z', symbols: []
+  });
+  return createClaudeAnalysisInput({
+    analysisRequest: {
+      selectedScope: 'US', initiatingList: 'myStocks',
+      generatedAt, userTimezone: 'Asia/Singapore',
+      reportType: 'MARKET_BRIEF'
+    },
+    marketPackages: [{
+      market: 'US',
+      marketContext: {
+        exchangeTimezone: 'America/New_York', marketState,
+        primaryCompletedSessionDate: '2026-09-04', includesCurrentOverlay: true,
+        calendarContext: null
+      },
+      telemetry: {benchmarkSnapshots: [snapshot], stockSnapshots: []},
+      evidenceCollection: createEvidenceCollection({
+        market: 'US', items: [current, completedEvidence, ...additionalItems]
+      }),
+      evidenceContext: {
+        materialEvents: ['e1', 'e2'], authoritativeFacts: [],
+        principalCatalysts: ['e1', 'e2'], supportingEvidence: ['e2'],
+        conflictingEvidence: [], subsequentDevelopments: [], sessionAssociations: [],
+        broadMarketFocus: [{
+          evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]
+        }],
+        unresolvedGaps: [], furtherReadings: []
+      }
+    }],
+    portfolioContext: {myStocks: [], watchlist: []}
+  });
+}
+
 function reportContext(input) {
   return {
-    header: REPORT_HEADER, selectedScope: 'SG', generatedAt: input.analysisRequest.generatedAt,
-    userTimezone: 'Asia/Singapore', reportType: 'MARKET_BRIEF', markets: ['SG']
+    header: REPORT_HEADER, selectedScope: input.analysisRequest.selectedScope,
+    generatedAt: input.analysisRequest.generatedAt,
+    userTimezone: input.analysisRequest.userTimezone,
+    reportType: input.analysisRequest.reportType,
+    markets: input.marketPackages.map(item => item.market)
   };
 }
 
@@ -116,28 +202,269 @@ function anthropicResponse(output, overrides = {}) {
   };
 }
 
-test('builds one deterministic server-owned request with the full package and no tools', () => {
+test('builds one deterministic server-owned request with a projected package and no tools', () => {
   const input = canonicalInput({
     subsequentDevelopments: ['e1'],
-    sessionAssociations: [{evidenceRef: 'e1', sessionDate: '2026-09-04'}]
+    sessionAssociations: [{evidenceRef: 'e1', sessionDate: '2026-09-04'}],
+    includeCurrentOverlay: true
   });
+  const original = JSON.stringify(input);
   const request = buildClaudeAnalysisRequest(input);
+  const modelInput = JSON.parse(request.messages[0].content);
   assert.equal(CLAUDE_ANALYSIS_MODEL, 'claude-haiku-4-5-20251001');
   assert.equal(CLAUDE_ANALYSIS_MAX_TOKENS, 4000);
   assert.equal(request.model, CLAUDE_ANALYSIS_MODEL);
   assert.equal(request.max_tokens, CLAUDE_ANALYSIS_MAX_TOKENS);
-  assert.deepEqual(request.messages, [{role: 'user', content: JSON.stringify(input)}]);
-  assert.equal(JSON.parse(request.messages[0].content).analysisRequest.initiatingList, 'myStocks');
-  assert.equal(JSON.parse(request.messages[0].content).marketPackages[0].telemetry.benchmarkSnapshots[0].reference, 't1');
-  assert.deepEqual(JSON.parse(request.messages[0].content).marketPackages[0].evidenceContext.sessionAssociations, [
+  assert.deepEqual(request.messages, [{role: 'user', content: JSON.stringify(
+    projectClaudeAnalysisInput(input)
+  )}]);
+  assert.equal(JSON.stringify(input), original);
+  assert.equal(modelInput.analysisRequest.initiatingList, 'myStocks');
+  assert.deepEqual(modelInput.sectionFourReferenceAllowlist, {
+    initiatingList: 'myStocks', evidenceRefs: [], telemetryRefs: []
+  });
+  assert.equal(Object.hasOwn(modelInput, 'currentSessionContext'), false);
+  assert.equal(request.system.includes('ACTIVE_SESSION request-specific semantics'), false);
+  assert.equal(modelInput.marketPackages[0].telemetry.benchmarkSnapshots[0].reference, 't1');
+  const canonicalTelemetry = input.marketPackages[0].telemetry;
+  const projectedTelemetry = modelInput.marketPackages[0].telemetry;
+  assert.equal(projectedTelemetry.benchmarkSnapshots.length,
+    canonicalTelemetry.benchmarkSnapshots.length);
+  assert.equal(projectedTelemetry.stockSnapshots.length, canonicalTelemetry.stockSnapshots.length);
+  const canonicalSession = canonicalTelemetry.benchmarkSnapshots[0].snapshot.completedSessions[0];
+  const projectedSession = projectedTelemetry.benchmarkSnapshots[0].snapshot.completedSessions[0];
+  assert.deepEqual(projectedSession, {
+    ...canonicalSession,
+    provenance: {
+      publisher: canonicalSession.provenance.publisher,
+      authority: canonicalSession.provenance.authority
+    }
+  });
+  assert.equal(projectedSession.sourceId, canonicalSession.sourceId);
+  assert.deepEqual(Object.keys(projectedSession.provenance), ['publisher', 'authority']);
+  const canonicalOverlay = canonicalTelemetry.benchmarkSnapshots[0].snapshot.currentOverlay;
+  const projectedOverlay = projectedTelemetry.benchmarkSnapshots[0].snapshot.currentOverlay;
+  assert.deepEqual(projectedOverlay, {
+    ...canonicalOverlay,
+    provenance: {
+      publisher: canonicalOverlay.provenance.publisher,
+      authority: canonicalOverlay.provenance.authority
+    }
+  });
+  assert.equal(projectedOverlay.sourceId, canonicalOverlay.sourceId);
+  for (const omitted of ['homepage', 'locator', 'applicableMarket', 'sourceJurisdiction']) {
+    assert.equal(omitted in projectedSession.provenance, false);
+    assert.equal(omitted in projectedOverlay.provenance, false);
+  }
+  assert.deepEqual(modelInput.marketPackages[0].evidenceContext.sessionAssociations, [
     {evidenceRef: 'e1', sessionDate: '2026-09-04'}
   ]);
+  const projectedItem = modelInput.marketPackages[0].evidenceContext.evidence[0].item;
+  assert.deepEqual(Object.keys(projectedItem.provenance), ['publisher', 'authority']);
+  assert.equal(projectedItem.sourceId, 'sg.reuters');
+  assert.equal(projectedItem.provenance.publisher, 'Reuters');
+  assert.equal(projectedItem.provenance.authority, 'secondary');
+  assert.equal('canonicalUrl' in projectedItem, false);
+  for (const omitted of ['homepage', 'locator', 'applicableMarket', 'sourceJurisdiction']) {
+    assert.equal(omitted in projectedItem.provenance, false);
+  }
   assert.equal(Object.isFrozen(input.marketPackages[0].evidenceContext.sessionAssociations), true);
   assert.equal(request.output_config.format.type, 'json_schema');
   assert.equal(request.output_config.format.schema, CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA);
   assert.equal(Object.hasOwn(request, 'tools'), false);
   assert.equal(JSON.stringify(request).includes('web_search'), false);
   assert.equal(Object.isFrozen(request), true);
+  const projection = projectClaudeAnalysisInput(input);
+  assert.equal(Object.isFrozen(projection), true);
+  assert.equal(Object.isFrozen(
+    projection.marketPackages[0].evidenceContext.evidence[0].item.provenance
+  ), true);
+  assert.deepEqual(projection, projectClaudeAnalysisInput(input));
+
+  const spoofedTelemetry = JSON.parse(JSON.stringify(input));
+  spoofedTelemetry.marketPackages[0].telemetry.benchmarkSnapshots[0]
+    .snapshot.completedSessions[0].provenance.authority = 'primary';
+  assert.throws(() => buildClaudeAnalysisRequest(spoofedTelemetry),
+    /invalid canonical Claude analysis input/);
+});
+
+test('active synthesis receives exact CURRENT_SESSION refs and state-aware section semantics', () => {
+  const input = activeUsInput();
+  const original = JSON.stringify(input);
+  const request = buildClaudeAnalysisRequest(input);
+  const modelInput = JSON.parse(request.messages[0].content);
+  assert.deepEqual(modelInput.currentSessionContext, [{
+    market: 'US', sessionDate: '2026-09-08', evidenceRefs: ['e1']
+  }]);
+  for (const instruction of [
+    'current in-progress session as the primary analytical focus',
+    'previous completed session only as historical comparison or baseline',
+    'Section 1 must lead with the current session',
+    'Section 2 must explain current-session drivers',
+    'must never be presented as causing the earlier completed-session move',
+    'must not list every Most Active security',
+    'Section 4 may use supported CURRENT_SESSION news only when its reference is present',
+    'Section 5 should interpret current breadth, risk appetite, momentum',
+    'Section 6 keeps all existing risk and grounded-opportunity rules',
+    'Section 7 should prioritize unresolved current-session developments',
+    'output top-level furtherReadings as []',
+    'deterministically resolves it from eligible CURRENT_SESSION Yahoo evidence actually cited'
+  ]) assert.equal(request.system.includes(instruction), true, instruction);
+  assert.equal(modelInput.marketPackages[0].telemetry.benchmarkSnapshots[0]
+    .snapshot.completedSessions[0].sessionDate, '2026-09-04');
+  assert.equal(modelInput.marketPackages[0].telemetry.benchmarkSnapshots[0]
+    .snapshot.currentOverlay.sessionDate, '2026-09-08');
+  assert.equal(JSON.stringify(input), original);
+  assert.equal(Object.hasOwn(input, 'currentSessionContext'), false);
+});
+
+test('current-session catalysts support current moves but not prior-session causality', () => {
+  const input = activeUsInput();
+  const current = normalOutput(input);
+  current.furtherReadings = ['e1'];
+  current.sections[1].content = 'Microsoft outlook sent stocks higher in the current session.';
+  assert.equal(validateClaudeAnalysisOutput(current, input).valid, true);
+
+  for (const content of [
+    'Microsoft outlook sent stocks lower in yesterday\'s session.',
+    'Microsoft outlook sent stocks lower at Friday\'s close.',
+    'Microsoft outlook sent stocks lower on September 4.',
+    'Microsoft outlook sent stocks lower on 2026-09-04.',
+    'Microsoft outlook sent stocks lower at the completed-session close.'
+  ]) {
+    const prior = normalOutput(input);
+    prior.furtherReadings = ['e1'];
+    prior.sections[1].content = content;
+    const validation = validateClaudeAnalysisOutput(prior, input);
+    assert.equal(validation.valid, false, content);
+    assert.equal(validation.errors.includes(
+      'sections[1]: prior completed-session causality requires a completed-session principal catalyst'
+    ), true, content);
+  }
+
+  const completed = normalOutput(input);
+  completed.furtherReadings = ['e1'];
+  completed.sections[1].content = 'The prior driver sent stocks lower at Friday\'s close.';
+  completed.sections[1].evidenceRefs = ['e2'];
+  completed.evidenceReferences = ['e1', 'e2'];
+  assert.equal(validateClaudeAnalysisOutput(completed, input).valid, true);
+});
+
+test('active Further Readings resolve only cited current Yahoo evidence in citation order', async () => {
+  const secondYahoo = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Apple gains during the active session', summary: 'Apple shares gained in current trading.',
+    canonicalUrl: 'https://finance.yahoo.com/news/apple-gains-active-session.html',
+    publishedAt: '2026-09-08T14:40:00.000Z', symbols: ['AAPL'], publisher: 'Yahoo Finance'
+  });
+  const duplicateYahooUrl = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Duplicate Apple citation', summary: 'The same article has another evidence reference.',
+    canonicalUrl: 'https://finance.yahoo.com/news/apple-gains-active-session.html',
+    publishedAt: '2026-09-08T14:41:00.000Z', symbols: ['AAPL'], publisher: 'Yahoo Finance'
+  });
+  const cnbcCurrent = createEvidenceItem({
+    sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news', title: 'CNBC current item',
+    canonicalUrl: 'https://www.cnbc.com/2026/09/08/current-item.html',
+    publishedAt: '2026-09-08T14:42:00.000Z'
+  });
+  const staleYahoo = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Stale Yahoo recap', summary: 'Prior-session recap.',
+    canonicalUrl: 'https://finance.yahoo.com/news/stale-yahoo-recap.html',
+    publishedAt: '2026-09-04T20:30:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
+  const uncitedYahoo = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Uncited current Yahoo article', summary: 'Current session but not used by the report.',
+    canonicalUrl: 'https://finance.yahoo.com/news/uncited-current-yahoo.html',
+    publishedAt: '2026-09-08T14:45:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
+  const additionalCurrentYahoo = Array.from({length: 4}, (_, index) => createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: `Current Yahoo article ${index + 1}`, summary: 'Validated current-session Yahoo coverage.',
+    canonicalUrl: `https://finance.yahoo.com/news/current-yahoo-${index + 1}.html`,
+    publishedAt: `2026-09-08T14:4${index + 6}:00.000Z`, symbols: [], publisher: 'Yahoo Finance'
+  }));
+  const input = activeUsInput({
+    additionalItems: [secondYahoo, duplicateYahooUrl, cnbcCurrent, staleYahoo, uncitedYahoo, ...additionalCurrentYahoo]
+  });
+  const raw = normalOutput(input, {furtherReadings: ['e2', 'e4', 'e5']});
+  raw.sections[0].evidenceRefs = ['e3', 'e4', 'e1', 'e8', 'e9', 'e10', 'e11'];
+  raw.sections[1].evidenceRefs = ['e3', 'e1'];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.furtherReadings, ['e3', 'e1', 'e8', 'e9', 'e10']);
+  assert.equal(result.output.furtherReadings.includes('e2'), false);
+  assert.equal(result.output.furtherReadings.includes('e4'), false);
+  assert.equal(result.output.furtherReadings.includes('e5'), false);
+  assert.equal(result.output.furtherReadings.includes('e6'), false);
+  assert.equal(result.output.furtherReadings.includes('e7'), false);
+  assert.equal(result.output.furtherReadings.includes('e11'), false);
+  for (const invalidReference of ['e2', 'e4', 'e5', 'e6', 'e7', 'e11']) {
+    const invalid = structuredClone(result.output);
+    invalid.furtherReadings = ['e3', 'e1', 'e8', 'e9', 'e10', invalidReference];
+    assert.equal(validateClaudeAnalysisOutput(invalid, input).valid, false, invalidReference);
+  }
+  assert.equal(MAX_ACTIVE_FURTHER_READINGS, 5);
+});
+
+test('active Further Readings allow an empty final result when no current Yahoo evidence is cited', async () => {
+  const input = activeUsInput();
+  const raw = normalOutput(input, {
+    status: 'DEGRADED', furtherReadings: ['e1'],
+    evidenceGaps: ['Validated current Yahoo evidence was not cited by populated analytical sections.']
+  });
+  for (const [index, section] of raw.sections.slice(0, 7).entries()) {
+    if (index !== 3 && section.content !== null) section.evidenceRefs = ['e2'];
+  }
+  raw.sections[2] = {
+    ...raw.sections[2], content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['No current broad-market focus evidence was cited.']
+  };
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.furtherReadings, []);
+});
+
+test('active Further Readings permit an empty cited-result set and apply PRE, REGULAR, and POST semantics', () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z', '2026-09-08T11:30:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
+  ]) {
+    const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
+    const cited = normalOutput(input, {furtherReadings: []});
+    assert.deepEqual(resolveActiveFurtherReadings(cited, input).furtherReadings, ['e1']);
+    const uncited = normalOutput(input, {furtherReadings: ['e1']});
+    for (const section of uncited.sections.slice(0, 7)) {
+      if (section.content !== null) section.evidenceRefs = ['e2'];
+    }
+    assert.deepEqual(resolveActiveFurtherReadings(uncited, input).furtherReadings, []);
+  }
+});
+
+test('prior-session causality supported only by CURRENT_SESSION evidence localizes safely', async () => {
+  const input = activeUsInput();
+  const raw = normalOutput(input);
+  raw.sections[1].content = 'Microsoft outlook sent stocks lower at Friday\'s close.';
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input,
+    apiKey: 'test-key',
+    fetchImpl: async () => anthropicResponse(raw),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.equal(result.output.sections[1].content, null);
+  assert.deepEqual(result.output.sections[1].evidenceRefs, []);
+  assert.ok(diagnostics.some(value => value.violationCategory
+    === 'MISSING_COMPLETED_SESSION_PRINCIPAL_CATALYST'));
 });
 
 function canonicalInputAtRequestSize(targetBytes) {
@@ -196,7 +523,7 @@ test('reports deterministic sanitized request sizes and provider usage on succes
   const input = canonicalInput({evidenceTitle: '亚洲 Technology sector update'});
   const request = buildClaudeAnalysisRequest(input);
   const serializedRequest = JSON.stringify(request);
-  const canonicalPackage = JSON.parse(request.messages[0].content);
+  const projectedPackage = JSON.parse(request.messages[0].content);
   const diagnostics = [];
   let sentBody;
   let monotonicTime = 0;
@@ -229,20 +556,26 @@ test('reports deterministic sanitized request sizes and provider usage on succes
 
   assert.equal(result.type, 'SUCCESS');
   assert.equal(sentBody, serializedRequest);
-  assert.equal(diagnostics.length, 1);
-  assert.deepEqual(diagnostics[0], {
+  const invocationDiagnostics = diagnostics.filter(value => value.model === CLAUDE_ANALYSIS_MODEL);
+  assert.equal(invocationDiagnostics.length, 1);
+  const invocationDiagnostic = invocationDiagnostics[0];
+  assert.deepEqual(invocationDiagnostic, {
     model: CLAUDE_ANALYSIS_MODEL,
     requestId: 'req_test_123',
     requestSize: {
       systemPromptBytes: Buffer.byteLength(request.system, 'utf8'),
-      canonicalPackageBytes: Buffer.byteLength(request.messages[0].content, 'utf8'),
+      canonicalPackageBytes: Buffer.byteLength(JSON.stringify(input), 'utf8'),
+      projectedModelInputBytes: Buffer.byteLength(request.messages[0].content, 'utf8'),
       telemetryBytes: Buffer.byteLength(JSON.stringify(
-        canonicalPackage.marketPackages.map(item => item.telemetry)
+        input.marketPackages.map(item => item.telemetry)
+      ), 'utf8'),
+      projectedTelemetryBytes: Buffer.byteLength(JSON.stringify(
+        projectedPackage.marketPackages.map(item => item.telemetry)
       ), 'utf8'),
       evidenceContextBytes: Buffer.byteLength(JSON.stringify(
-        canonicalPackage.marketPackages.map(item => item.evidenceContext)
+        input.marketPackages.map(item => item.evidenceContext)
       ), 'utf8'),
-      portfolioContextBytes: Buffer.byteLength(JSON.stringify(canonicalPackage.portfolioContext), 'utf8'),
+      portfolioContextBytes: Buffer.byteLength(JSON.stringify(input.portfolioContext), 'utf8'),
       providerSchemaBytes: Buffer.byteLength(JSON.stringify(request.output_config.format.schema), 'utf8'),
       completeRequestBodyBytes: Buffer.byteLength(serializedRequest, 'utf8')
     },
@@ -262,11 +595,15 @@ test('reports deterministic sanitized request sizes and provider usage on succes
   });
   const encodedCanonicalPackage = JSON.stringify(request.messages[0].content);
   assert.equal(sentBody.split(encodedCanonicalPackage).length - 1, 1);
-  assert.equal(Object.isFrozen(diagnostics[0]), true);
-  assert.equal(Object.isFrozen(diagnostics[0].requestSize), true);
-  assert.equal(Object.isFrozen(diagnostics[0].timing), true);
-  assert.equal(Object.isFrozen(diagnostics[0].usage), true);
-  const serializedDiagnostics = JSON.stringify(diagnostics[0]);
+  assert.equal(Object.isFrozen(invocationDiagnostic), true);
+  assert.equal(Object.isFrozen(invocationDiagnostic.requestSize), true);
+  assert.equal(Object.isFrozen(invocationDiagnostic.timing), true);
+  assert.equal(Object.isFrozen(invocationDiagnostic.usage), true);
+  assert.equal(invocationDiagnostic.requestSize.projectedTelemetryBytes
+    < invocationDiagnostic.requestSize.telemetryBytes, true);
+  assert.equal(invocationDiagnostic.requestSize.projectedModelInputBytes
+    < invocationDiagnostic.requestSize.canonicalPackageBytes, true);
+  const serializedDiagnostics = JSON.stringify(invocationDiagnostic);
   assert.equal(serializedDiagnostics.includes('亚洲 Technology sector update'), false);
   assert.equal(serializedDiagnostics.includes('^STI'), false);
   assert.equal(serializedDiagnostics.includes('Analyze only'), false);
@@ -293,11 +630,13 @@ test('reports request sizes and optional usage on later contract failure', async
   });
 
   assert.equal(result.type, 'CONTRACT_FAILURE');
-  assert.equal(diagnostics.length, 1);
-  assert.equal(diagnostics[0].requestId, null);
-  assert.deepEqual(diagnostics[0].usage, {input_tokens: 321});
-  assert.equal(Number.isInteger(diagnostics[0].requestSize.completeRequestBodyBytes), true);
-  for (const elapsed of Object.values(diagnostics[0].timing)) {
+  const invocationDiagnostics = diagnostics.filter(value => value.model === CLAUDE_ANALYSIS_MODEL);
+  assert.equal(invocationDiagnostics.length, 1);
+  const invocationDiagnostic = invocationDiagnostics[0];
+  assert.equal(invocationDiagnostic.requestId, null);
+  assert.deepEqual(invocationDiagnostic.usage, {input_tokens: 321});
+  assert.equal(Number.isInteger(invocationDiagnostic.requestSize.completeRequestBodyBytes), true);
+  for (const elapsed of Object.values(invocationDiagnostic.timing)) {
     assert.equal(typeof elapsed, 'number');
     assert.equal(elapsed >= 0, true);
   }
@@ -331,22 +670,149 @@ test('reports only sanitized Section 4 structure when populated content lacks ev
     message: 'Invalid Claude analysis output: sections[2]: stocks and sectors require broad-market focus evidence; sections[2]: factual content requires supplied evidence',
     upstreamStatus: 200
   });
-  assert.equal(diagnostics.length, 1);
-  assert.deepEqual(diagnostics[0].contractFailure, {
+  const invocationDiagnostics = diagnostics.filter(value => value.model === CLAUDE_ANALYSIS_MODEL);
+  assert.equal(invocationDiagnostics.length, 1);
+  const invocationDiagnostic = invocationDiagnostics[0];
+  assert.deepEqual(invocationDiagnostic.contractFailure, {
     sectionIndex: 2,
     sectionName: 'STOCKS & SECTORS IN FOCUS',
     contentIsNull: false,
     evidenceRefCount: 0,
     telemetryRefCount: 1
   });
-  assert.equal(diagnostics[0].requestId, 'req_contract_4');
-  assert.deepEqual(diagnostics[0].usage, {input_tokens: 321, output_tokens: 45});
-  const serialized = JSON.stringify(diagnostics[0]);
+  assert.equal(invocationDiagnostic.requestId, 'req_contract_4');
+  assert.deepEqual(invocationDiagnostic.usage, {input_tokens: 321, output_tokens: 45});
+  const serialized = JSON.stringify(diagnostics);
   for (const forbidden of [
     'PRIVATE SECTION PROSE', '亚洲 Technology sector update', '^STI', 'https://',
     'Analyze only', 'test-key'
   ]) assert.equal(serialized.includes(forbidden), false, forbidden);
-  assert.equal(Object.isFrozen(diagnostics[0].contractFailure), true);
+  assert.equal(Object.isFrozen(invocationDiagnostic.contractFailure), true);
+});
+
+test('pre-normalization diagnostics report grounded Sections 6 and 7 without changing output', async () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  output.sections[5].content = 'Technology has a qualified constructive opportunity.';
+  output.sections[6].content = 'Watch the supported Technology development.';
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.sections[5], output.sections[5]);
+  assert.deepEqual(result.output.sections[6], output.sections[6]);
+  assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisPreNormalization'), [
+    {
+      stage: 'claudeAnalysisPreNormalization', sectionIndex: 5,
+      rawContentIsNull: false, evidenceRefs: ['e1'], telemetryRefs: ['t1'],
+      suppliedReferenceCount: 1, hasCitedFocus: true, hasExactCitedSubject: true
+    },
+    {
+      stage: 'claudeAnalysisPreNormalization', sectionIndex: 6,
+      rawContentIsNull: false, evidenceRefs: ['e1'], telemetryRefs: ['t1'],
+      suppliedReferenceCount: 1
+    }
+  ]);
+});
+
+test('pre-normalization diagnostics identify Section 6 violation and raw Section 7 null safely', async () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  output.sections[5].content = 'PRIVATE rebound opportunity for an unnamed company.';
+  output.sections[6] = {
+    name: REPORT_SECTION_NAMES[6], content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['No supported future development.']
+  };
+  const diagnostics = [];
+  const withDiagnostics = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const withoutDiagnostics = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+  });
+  assert.equal(withDiagnostics.type, 'SUCCESS', withDiagnostics.message);
+  assert.equal(JSON.stringify(withDiagnostics.output), JSON.stringify(withoutDiagnostics.output));
+  assert.equal(withDiagnostics.output.sections[5].content, null);
+  assert.equal(withDiagnostics.output.sections[6].content, null);
+  assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisPreNormalization'), [
+    {
+      stage: 'claudeAnalysisPreNormalization', sectionIndex: 5,
+      rawContentIsNull: false, evidenceRefs: ['e1'], telemetryRefs: ['t1'],
+      suppliedReferenceCount: 1, hasCitedFocus: true, hasExactCitedSubject: false,
+      violationCategory: 'GENERIC_OPPORTUNITY_CLAIM',
+      violationSubtype: 'MISSING_GROUNDED_SUBJECT'
+    },
+    {
+      stage: 'claudeAnalysisPreNormalization', sectionIndex: 6,
+      rawContentIsNull: true, evidenceRefs: [], telemetryRefs: [], suppliedReferenceCount: 0
+    }
+  ]);
+  assert.equal(JSON.stringify(diagnostics).includes('PRIVATE'), false);
+  assert.equal(JSON.stringify(diagnostics).includes('Technology'), false);
+});
+
+test('pre-normalization diagnostics mark a raw null Section 6 without changing degradation', async () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  output.status = 'DEGRADED';
+  output.sections[5] = {
+    name: REPORT_SECTION_NAMES[5], content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['No supported risk or opportunity.']
+  };
+  output.evidenceGaps = ['No supported risk or opportunity.'];
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.sections[5], output.sections[5]);
+  assert.deepEqual(diagnostics.find(value => value.stage === 'claudeAnalysisPreNormalization'
+    && value.sectionIndex === 5), {
+    stage: 'claudeAnalysisPreNormalization', sectionIndex: 5,
+    rawContentIsNull: true, evidenceRefs: [], telemetryRefs: [], suppliedReferenceCount: 0,
+    hasCitedFocus: false, hasExactCitedSubject: false
+  });
+});
+
+test('pre-normalization refs are capped and exclude unknown or noncanonical values', async () => {
+  const input = canonicalInput({includeSecondEvidence: true});
+  const output = normalOutput(input);
+  output.sections[6].content = 'PRIVATE PROVIDER RESPONSE';
+  output.sections[6].evidenceRefs = [
+    ...Array.from({length: 20}, (_, index) => index % 2 ? 'e2' : 'e1'),
+    'e999', 'e1-secret', 'https://private.example'
+  ];
+  output.sections[6].telemetryRefs = ['t1', 't999', 't1-secret'];
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.type, 'CONTRACT_FAILURE');
+  assert.deepEqual(diagnostics.find(value => value.stage === 'claudeAnalysisPreNormalization'
+    && value.sectionIndex === 6), {
+    stage: 'claudeAnalysisPreNormalization', sectionIndex: 6, rawContentIsNull: false,
+    evidenceRefs: ['e1', 'e2', 'e1', 'e2', 'e1', 'e2', 'e1', 'e2'],
+    telemetryRefs: ['t1'], suppliedReferenceCount: 23
+  });
+  const serialized = JSON.stringify(diagnostics);
+  for (const forbidden of ['PRIVATE PROVIDER RESPONSE', 'e999', 'e1-secret', 't999',
+    't1-secret', 'https://private.example']) assert.equal(serialized.includes(forbidden), false);
+});
+
+test('pre-normalization logging failures cannot change analysis output', async () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+    onDiagnostics() { throw new Error('private diagnostic failure'); }
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.sections, output.sections);
 });
 
 test('gives Claude explicit validator-sensitive Section 4 and Further Readings instructions', () => {
@@ -359,6 +825,9 @@ test('gives Claude explicit validator-sensitive Section 4 and Further Readings i
     "initiating security's upcomingEvents[].evidenceRefs",
     'only telemetryRefs belonging to securities in that initiating list',
     'Never use securities, evidenceRefs, or telemetryRefs from the non-initiating list',
+    'top-level sectionFourReferenceAllowlist in the supplied model input',
+    'Section 4 evidenceRefs must be drawn only from its evidenceRefs',
+    'Section 4 telemetryRefs only from its telemetryRefs',
     'No securities are configured in My Stocks.',
     'No securities are configured in Watchlist.',
     'Section 4 evidenceRefs, telemetryRefs, and uncertainties must all be empty arrays',
@@ -372,6 +841,19 @@ test('gives Claude explicit validator-sensitive Section 4 and Further Readings i
   ]) {
     assert.equal(system.includes(requirement), true, requirement);
   }
+});
+
+test('keeps an empty initiating Section 4 allowlist even when the other list has refs', () => {
+  const input = structuredClone(canonicalInput());
+  input.portfolioContext.watchlist = [{
+    market: 'SG', symbol: '^STI', telemetryRefs: ['t1'], evidenceRefs: ['e1'], upcomingEvents: []
+  }];
+  const request = buildClaudeAnalysisRequest(input);
+  assert.deepEqual(JSON.parse(request.messages[0].content).sectionFourReferenceAllowlist, {
+    initiatingList: 'myStocks', evidenceRefs: [], telemetryRefs: []
+  });
+  assert.match(request.system,
+    /Request-specific Section 4 reference allowlist for myStocks: evidenceRefs may contain only these exact refs: \[\]; telemetryRefs may contain only these exact refs: \[\]\./);
 });
 
 test('adds the exact package benchmark refs to the request-specific Section 3 allowlist', () => {

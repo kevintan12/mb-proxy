@@ -2,12 +2,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {createNewsEvidenceCandidate} = require('../lib/news-evidence-candidates');
+const {deterministicCnbcRecapCandidate} = require('../lib/cnbc-deterministic-recap-discovery');
 const {
   CNBC_ARTICLE_CONTENT_RESULT_KEYS,
   CNBC_DISCOVERED_ARTICLE_RESULT_KEYS,
   CNBC_EXTRACTION_DIAGNOSTIC_FAILURE_TYPES,
   CNBC_RECAP_ARTICLE_CONTENT_RESULT_KEYS,
   CnbcArticleContentAcquisitionError,
+  dailyRecapSessionDate,
   createCnbcArticleContentAcquisitionService
 } = require('../lib/cnbc-article-content-acquisition');
 const {
@@ -29,6 +31,110 @@ const retrievalBounds = Object.freeze({
   maxResultBytes: 3000
 });
 const url = 'https://www.cnbc.com/2026/09/08/market-update.html';
+
+test('recognizes only a real date in the exact CNBC daily market recap headline', () => {
+  assert.equal(dailyRecapSessionDate('Stock market news for Sep. 18, 2026'), '2026-09-18');
+  assert.equal(dailyRecapSessionDate('Stock market news for Sept. 18, 2026'), '2026-09-18');
+  assert.equal(dailyRecapSessionDate('Stock market news for Sep. 31, 2026'), null);
+  assert.equal(dailyRecapSessionDate('Stocks making the biggest moves on Sep. 18, 2026'), null);
+});
+
+test('deterministic recap accepts the predicted URL with usable content regardless of headline or publication session', async () => {
+  const pointer = deterministicCnbcRecapCandidate('2026-09-16');
+  const page = (headline, publishedAt = '2026-09-17T12:05:00Z',
+    updatedAt = '2026-09-17T12:10:00Z') => liveBlogHtml({
+    liveBlog: {headline},
+    updates: [blogUpdate({
+      datePublished: publishedAt, dateModified: updatedAt,
+      articleBody: 'US stocks finished the Wednesday session after broad sector rotation.'
+    })]
+  });
+  const service = html => createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(html, {url: pointer.url})
+  });
+  const valid = await service(page('Stock market news for Sep. 16, 2026'))
+    .acquireRecapArticleContent({discovery: pointer, bounds: retrievalBounds});
+  assert.equal(valid.title, 'Stock market news for Sep. 16, 2026');
+  assert.equal(valid.publishedAt, '2026-09-17T12:05:00.000Z');
+  assert.equal(valid.canonicalUrl, pointer.url);
+  for (const [html, expectedTitle] of [
+    [page('Stock market news for Sep. 17, 2026'), 'Stock market news for Sep. 17, 2026'],
+    [page('A general CNBC company article'), 'A general CNBC company article'],
+    [page('Stock market news for Sep. 16, 2026', '2026-09-15T19:00:00Z',
+      '2026-09-15T19:05:00Z'), 'Stock market news for Sep. 16, 2026']
+  ]) {
+    const accepted = await service(html).acquireRecapArticleContent({
+      discovery: pointer, bounds: retrievalBounds
+    });
+    assert.equal(accepted.title, expectedTitle);
+    assert.equal(accepted.canonicalUrl, pointer.url);
+  }
+  const withoutHeadline = await service(liveBlogHtml({
+    updates: [blogUpdate({
+      datePublished: '2026-09-17T12:05:00Z',
+      dateModified: '2026-09-17T12:10:00Z',
+      articleBody: 'CNBC market recap body remains usable without a headline.'
+    })]
+  })).acquireRecapArticleContent({discovery: pointer, bounds: retrievalBounds});
+  assert.equal(withoutHeadline.title, pointer.title);
+  const reversedModified = await service(page('Stock market news for Sep. 16, 2026',
+    '2026-09-17T12:05:00Z', '2026-09-17T11:00:00Z'))
+    .acquireRecapArticleContent({discovery: pointer, bounds: retrievalBounds});
+  assert.equal(reversedModified.updatedAt, null);
+  let calls = 0;
+  await assert.rejects(createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => { calls++; return response(); }
+  }).acquireRecapArticleContent({
+    discovery: Object.freeze({...pointer,
+      url: 'https://www.cnbc.com/2026/09/14/stock-market-today-live-updates.html'}),
+    bounds: retrievalBounds
+  }), assertCode('INVALID_INPUT'));
+  assert.equal(calls, 0);
+});
+
+test('deterministic recap still rejects wrong ownership or family, failed retrieval and unusable content', async () => {
+  const pointer = deterministicCnbcRecapCandidate('2026-09-16');
+  for (const candidateUrl of [
+    'https://example.com/2026/09/15/stock-market-today-live-updates.html',
+    'https://www.cnbc.com/2026/09/15/other-article.html'
+  ]) {
+    let fetchCount = 0;
+    const service = createCnbcArticleContentAcquisitionService({
+      fetchImpl: async () => { fetchCount++; return response(); }
+    });
+    await assert.rejects(service.acquireRecapArticleContent({
+      discovery: Object.freeze({...pointer, url: candidateUrl}), bounds: retrievalBounds
+    }), assertCode('INVALID_INPUT'));
+    assert.equal(fetchCount, 0);
+  }
+  await assert.rejects(createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response('', {ok: false, status: 404, url: pointer.url})
+  }).acquireRecapArticleContent({discovery: pointer, bounds: retrievalBounds}),
+  assertCode('HTTP_FAILURE'));
+  const unusable = liveBlogHtml({
+    liveBlog: {headline: 'Unrelated editorial wording'},
+    updates: [blogUpdate({articleBody: ' <b> </b> &nbsp; '})]
+  });
+  await assert.rejects(createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(unusable, {url: pointer.url})
+  }).acquireRecapArticleContent({discovery: pointer, bounds: retrievalBounds}),
+  assertExtractionFailure('NO_USABLE_BODY'));
+});
+
+test('deterministic recap accepts provider state content with no JSON-LD or valid timestamp metadata', async () => {
+  const pointer = deterministicCnbcRecapCandidate('2026-09-16');
+  const html = stateArticleHtml({header: {
+    url: pointer.url, headline: ' ', datePublished: 'invalid', dateModified: 'invalid'
+  }}).replace(/<script type="application\/ld\+json">[\s\S]*?<\/script>/, '');
+  const article = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(html, {url: pointer.url})
+  }).acquireRecapArticleContent({discovery: pointer, bounds: retrievalBounds});
+  assert.equal(article.canonicalUrl, pointer.url);
+  assert.equal(article.title, pointer.title);
+  assert.equal(article.articleText, 'Provider state article body.');
+  assert.equal(article.publishedAt, null);
+  assert.equal(article.updatedAt, null);
+});
 
 function candidate(overrides = {}) {
   return createNewsEvidenceCandidate({
@@ -527,7 +633,7 @@ test('accepts the expanded bounded global discovery rank and rejects ranks beyon
   assert.equal(calls, 1);
 });
 
-test('validates recap session identity from selected publishedAt only', async () => {
+test('rejects wrong recap publication date without validated editorial session identity', async () => {
   const recapUrl = 'https://www.cnbc.com/2026/09/10/stock-market-today-live-updates.html';
   const discovery = Object.freeze({
     title: 'Stock market news for Sept. 11, 2026', url: recapUrl,
@@ -544,6 +650,69 @@ test('validates recap session identity from selected publishedAt only', async ()
     service.acquireRecapArticleContent({discovery, bounds: retrievalBounds}),
     assertCode('SESSION_MISMATCH')
   );
+});
+
+test('uses provider-owned daily recap headline for a prior-day publication within the target session horizon', async () => {
+  const recapUrl = 'https://www.cnbc.com/2026/09/10/stock-market-today-live-updates.html';
+  const input = Object.freeze({
+    title: 'Search result title is not session authority',
+    url: recapUrl,
+    discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+    targetSessionDate: '2026-09-11'
+  });
+  const html = liveBlogHtml({
+    liveBlog: {
+      headline: 'Stock market news for Sept. 11, 2026',
+      datePublished: '2026-09-10T22:00:00Z'
+    },
+    updates: [blogUpdate({
+      headline: 'Overnight market developments',
+      datePublished: '2026-09-10T22:15:00Z',
+      dateModified: '2026-09-10T22:20:00Z'
+    })]
+  });
+  const result = await createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => response(html, {url: recapUrl})
+  }).acquireRecapArticleContent({discovery: input, bounds: retrievalBounds});
+  assert.equal(result.title, 'Stock market news for Sept. 11, 2026');
+  assert.equal(result.publishedAt, '2026-09-10T22:15:00.000Z');
+  assert.equal(result.targetSessionDate, '2026-09-11');
+
+  for (const headline of [
+    'Stock market news for Sept. 12, 2026',
+    'Stock market news for Sept. 31, 2026',
+    'Overnight market developments'
+  ]) {
+    await assert.rejects(
+      createCnbcArticleContentAcquisitionService({
+        fetchImpl: async () => response(liveBlogHtml({
+          liveBlog: {headline},
+          updates: [blogUpdate({
+            datePublished: '2026-09-10T22:15:00Z',
+            dateModified: '2026-09-10T22:20:00Z'
+          })]
+        }), {url: recapUrl})
+      }).acquireRecapArticleContent({discovery: input, bounds: retrievalBounds}),
+      assertCode('SESSION_MISMATCH')
+    );
+  }
+});
+
+test('does not promote an unrelated post-close CNBC article to a completed-session recap', async () => {
+  let fetchCount = 0;
+  const service = createCnbcArticleContentAcquisitionService({
+    fetchImpl: async () => { fetchCount++; return response(); }
+  });
+  await assert.rejects(service.acquireRecapArticleContent({
+    discovery: Object.freeze({
+      title: 'Stock market news for Sept. 11, 2026',
+      url: 'https://www.cnbc.com/2026/09/11/after-hours-company-news.html',
+      discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+      targetSessionDate: '2026-09-11'
+    }),
+    bounds: retrievalBounds
+  }), assertCode('INVALID_INPUT'));
+  assert.equal(fetchCount, 0);
 });
 
 test('keeps the conventional candidate-based acquisition contract unchanged', async () => {

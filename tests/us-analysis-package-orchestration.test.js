@@ -1,6 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const {createCompletedRegularSession, createFiveSessionSnapshot} = require('../lib/five-session-snapshot');
+const {
+  createCompletedRegularSession,
+  createCurrentSessionOverlay,
+  createFiveSessionSnapshot
+} = require('../lib/five-session-snapshot');
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
 const {
@@ -11,6 +15,7 @@ const {
   CNBC_US_NEWS_RESEARCH_PRODUCTION_BOUNDS,
   createCnbcNewsResearchRuntime
 } = require('../lib/cnbc-news-research-runtime');
+const {createCnbcRecapResearchRuntime} = require('../lib/cnbc-recap-research-runtime');
 const {createYahooRecapResearchRuntime} = require('../lib/yahoo-recap-research-runtime');
 const {
   createYahooRecapArticleContentAcquisitionService
@@ -40,6 +45,9 @@ const {
   YAHOO_RECAP_RETRIEVAL_FAILURE_GAP,
   YAHOO_RECAP_EVIDENCE_CONSTRUCTION_FAILURE_GAP,
   ORCHESTRATION_REQUEST_KEYS,
+  ANALYSIS_MODES,
+  ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS,
+  analysisModeForMarketState,
   broadMarketNewsReferences,
   createUsAnalysisPackageOrchestrationService,
   validateUsAnalysisOrchestrationRequest
@@ -98,6 +106,26 @@ function snapshotWithoutCompletedSessions(symbol) {
     marketState: 'CLOSED',
     completedSessions: [],
     currentOverlay: null
+  });
+}
+
+function snapshotWithState(symbol, marketState, {
+  sessionDate = '2026-09-08',
+  overlayAsOf = '2026-09-08T11:30:00.000Z'
+} = {}) {
+  const base = snapshot(symbol);
+  const currentOverlay = ['PRE', 'REGULAR', 'POST'].includes(marketState)
+    ? createCurrentSessionOverlay({
+        market: 'US', marketState, sessionDate,
+        asOf: overlayAsOf, lastPrice: 106,
+        referenceClose: 105, volume: 1200, sourceId: 'us.yahoo-finance',
+        validationState: 'VALIDATED'
+      })
+    : null;
+  return createFiveSessionSnapshot({
+    market: 'US', symbol, instrumentName: base.instrumentName,
+    instrumentType: base.instrumentType, currency: base.currency, marketState,
+    completedSessions: base.completedSessions, currentOverlay
   });
 }
 
@@ -306,6 +334,7 @@ function cnbcRecapResearchSuccess({
 function harness(overrides = {}) {
   const calls = {
     factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
+    yahooMostActive: 0, yahooLatestNews: 0, yahooCurrentNewsArticle: [],
     yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [],
     cnbcRecapResearch: [], cnbc: [],
     evidenceRoleClassification: [], evidenceSubjectRepair: []
@@ -330,6 +359,24 @@ function harness(overrides = {}) {
       async acquireEvidence({symbol}) {
         calls.yahoo.push(symbol);
         return yahooEvidence(symbol);
+      }
+    },
+    yahooMostActiveAcquisition: {
+      async acquireMostActive() {
+        calls.yahooMostActive++;
+        return {ok: true, type: 'NOT_FOUND', candidates: []};
+      }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() {
+        calls.yahooLatestNews++;
+        return {ok: true, type: 'NOT_FOUND', candidates: []};
+      }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(value) {
+        calls.yahooCurrentNewsArticle.push(value);
+        return {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
       }
     },
     federalReserveEvidenceAcquisition: {
@@ -380,8 +427,7 @@ function harness(overrides = {}) {
               reference,
               materiality: 'LOW',
               roles: [],
-              subjects: [],
-              reason: 'No supported evidence role.'
+              subjects: []
             }))
           }
         };
@@ -427,15 +473,267 @@ function roleClassificationSuccess(
           reference: entry.reference,
           materiality,
           roles,
-          subjects,
-          reason: roles.includes('PRINCIPAL_CATALYST')
-            ? 'This evidence causally supports the completed-session move.'
-            : 'This evidence supports the assigned role assessment.'
+          subjects
         };
       })
     }
   };
 }
+
+test('maps supported US market states to explicit package-owned analysis modes', () => {
+  for (const state of ['PRE', 'REGULAR', 'POST']) {
+    assert.equal(analysisModeForMarketState(state), ANALYSIS_MODES.ACTIVE_SESSION);
+  }
+  for (const state of ['CLOSED', 'WEEKEND', 'HOLIDAY']) {
+    assert.equal(analysisModeForMarketState(state), ANALYSIS_MODES.COMPLETED_SESSION);
+  }
+  assert.throws(
+    () => analysisModeForMarketState('UNSUPPORTED_SPECIAL_SESSION'),
+    /Unsupported US market state/
+  );
+});
+
+test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip completed-session research', async () => {
+  for (const [marketState, generatedAt, overlayAsOf] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z']
+  ]) {
+    const diagnostics = [];
+    const candidates = Array.from({length: 8}, (_, index) => ({
+      headline: index === 7 ? 'NVDA leads active stocks' : `Current market story ${index + 1}`,
+      url: `https://finance.yahoo.com/news/current-market-story-${index + 1}.html`,
+      uuid: null,
+      publisher: 'Yahoo Finance'
+    }));
+    const {service, calls} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, marketState, {overlayAsOf});
+        }
+      }),
+      yahooMostActiveAcquisition: {
+        async acquireMostActive() {
+          calls.yahooMostActive++;
+          return {ok: true, type: 'SUCCESS', candidates: [{
+            symbol: 'NVDA', shortName: 'Nvidia', longName: 'Nvidia Corporation'
+          }]};
+        }
+      },
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() {
+          calls.yahooLatestNews++;
+          return {ok: true, type: 'SUCCESS', candidates};
+        }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) {
+          calls.yahooCurrentNewsArticle.push(candidate);
+          return {
+            ok: true, type: 'SUCCESS', articleContent: {
+              sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+              headline: candidate.headline, publisher: 'Yahoo Finance',
+              publishedAt: '2026-09-08T11:00:00.000Z', updatedAt: null,
+              articleText: `Bounded current article for ${candidate.headline}.`
+            }
+          };
+        }
+      },
+      now: () => new Date(generatedAt),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const output = await service.assemble(request());
+    assert.equal(output.marketPackages[0].marketContext.marketState, marketState);
+    assert.equal(output.marketPackages[0].marketContext.includesCurrentOverlay, true);
+    assert.equal(output.marketPackages[0].telemetry.benchmarkSnapshots[0]
+      .snapshot.completedSessions.length, 5);
+    assert.equal(output.marketPackages[0].telemetry.benchmarkSnapshots[0]
+      .snapshot.currentOverlay.marketState, marketState);
+    assert.equal(calls.yahooMostActive, 1);
+    assert.equal(calls.yahooLatestNews, 1);
+    assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    assert.equal(calls.yahooCurrentNewsArticle[0].headline, 'NVDA leads active stocks');
+    assert.equal(calls.yahooRecapResearch.length, 0);
+    assert.equal(calls.cnbcRecapResearch.length, 0);
+    assert.equal(calls.cnbc.length, 0);
+    const currentEntries = calls.evidenceRoleClassification[0].evidence.filter(entry =>
+      entry.item.evidenceCategory === 'news');
+    assert.equal(currentEntries.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    assert.equal(currentEntries.every(entry => entry.horizon === 'CURRENT_SESSION'), true);
+    assert.deepEqual(output.marketPackages[0].evidenceContext.subsequentDevelopments, []);
+    assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
+    assert.ok(diagnostics.some(item => item.stage === 'analysisModeSelection'
+      && item.analysisMode === 'ACTIVE_SESSION' && item.marketState === marketState));
+    assert.ok(diagnostics.some(item => item.stage === 'activeYahooAcquisition'
+      && item.mostActiveCount === 1 && item.latestNewsCandidateCount === 8
+      && item.articleFetchAttemptCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS
+      && item.articleFetchSuccessCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS));
+    assert.ok(diagnostics.some(item => item.stage === 'completedSessionResearch'
+      && item.outcome === 'SKIPPED_ACTIVE_SESSION'));
+  }
+});
+
+test('active Yahoo news becomes CURRENT_SESSION evidence and can support current catalysts and Section 4', async () => {
+  const generatedAt = '2026-09-08T15:00:00.000Z';
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {
+          overlayAsOf: '2026-09-08T14:55:00.000Z'
+        });
+      }
+    }),
+    yahooMostActiveAcquisition: {
+      async acquireMostActive() {
+        calls.yahooMostActive++;
+        return {ok: true, type: 'SUCCESS', candidates: [{
+          symbol: 'MSFT', shortName: 'Microsoft', longName: 'Microsoft Corporation'
+        }]};
+      }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() {
+        calls.yahooLatestNews++;
+        return {ok: true, type: 'SUCCESS', candidates: [{
+          headline: 'Microsoft outlook lifts stocks',
+          url: 'https://finance.yahoo.com/news/microsoft-outlook-lifts-stocks.html',
+          uuid: null,
+          publisher: 'Yahoo Finance'
+        }]};
+      }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        calls.yahooCurrentNewsArticle.push(candidate);
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+          articleText: 'Microsoft raised its outlook during the active US session.'
+        }};
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        calls.evidenceRoleClassification.push(input);
+        return {ok: true, type: 'SUCCESS', output: {classifications: input.evidence.map(entry => ({
+          reference: entry.reference,
+          materiality: entry.horizon === 'CURRENT_SESSION' ? 'HIGH' : 'LOW',
+          roles: entry.horizon === 'CURRENT_SESSION'
+            ? ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'] : [],
+          subjects: entry.horizon === 'CURRENT_SESSION'
+            ? [{kind: 'COMPANY', name: 'Microsoft'}] : []
+        }))}};
+      },
+      async repairEvidenceSubjects() { throw new Error('not expected'); }
+    },
+    now: () => new Date(generatedAt)
+  });
+  const output = await service.assemble(request('US', {
+    myStocks: [{market: 'US', symbol: 'MSFT'}]
+  }));
+  const classificationInput = calls.evidenceRoleClassification[0];
+  const current = classificationInput.evidence.find(entry => entry.horizon === 'CURRENT_SESSION');
+  assert.ok(current);
+  assert.equal(output.marketPackages[0].evidenceContext.materialEvents.includes(current.reference), true);
+  assert.equal(output.marketPackages[0].evidenceContext.principalCatalysts.includes(current.reference), true);
+  assert.equal(output.marketPackages[0].evidenceContext.subsequentDevelopments.includes(current.reference), false);
+  assert.equal(output.portfolioContext.myStocks[0].evidenceRefs.includes(current.reference), true);
+  assert.equal(Object.hasOwn(output, 'currentSessionContext'), false);
+  assert.equal(Object.hasOwn(output.marketPackages[0].evidenceContext, 'currentSessionEvidence'), false);
+  const providerInput = JSON.parse(buildClaudeAnalysisRequest(output).messages[0].content);
+  assert.deepEqual(providerInput.currentSessionContext, [{
+    market: 'US', sessionDate: '2026-09-08', evidenceRefs: [current.reference]
+  }]);
+  assert.equal(providerInput.sectionFourReferenceAllowlist.evidenceRefs.includes(current.reference), true);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
+});
+
+test('stale and future Yahoo news never become CURRENT_SESSION evidence', async () => {
+  const generatedAt = '2026-09-08T15:00:00.000Z';
+  const candidates = [
+    ['Stale market story', 'stale', '2026-09-05T14:00:00.000Z'],
+    ['Future market story', 'future', '2026-09-08T15:00:00.001Z'],
+    ['Current market story', 'current', '2026-09-08T14:30:00.000Z']
+  ];
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {
+          overlayAsOf: '2026-09-08T14:55:00.000Z'
+        });
+      }
+    }),
+    yahooMostActiveAcquisition: {
+      async acquireMostActive() { return {ok: true, type: 'NOT_FOUND', candidates: []}; }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() {
+        return {ok: true, type: 'SUCCESS', candidates: candidates.map(([headline, slug]) => ({
+          headline, url: `https://finance.yahoo.com/news/${slug}.html`,
+          uuid: null, publisher: 'Yahoo Finance'
+        }))};
+      }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        const found = candidates.find(([, slug]) => candidate.url.endsWith(`/${slug}.html`));
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: found[2], updatedAt: null,
+          articleText: `${candidate.headline} has bounded usable content.`
+        }};
+      }
+    },
+    now: () => new Date(generatedAt)
+  });
+  const output = await service.assemble(request());
+  const currentEntries = calls.evidenceRoleClassification[0].evidence.filter(entry =>
+    entry.horizon === 'CURRENT_SESSION');
+  assert.equal(currentEntries.length, 1);
+  assert.equal(currentEntries[0].item.title, 'Current market story');
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.title === 'Stale market story' || entry.item.title === 'Future market story'), false);
+});
+
+test('CLOSED, WEEKEND and HOLIDAY preserve completed research and skip active Yahoo acquisition', async () => {
+  for (const marketState of ['CLOSED', 'WEEKEND', 'HOLIDAY']) {
+    const diagnostics = [];
+    const {service, calls} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) { return snapshotWithState(symbol, marketState); }
+      }),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const output = await service.assemble(request());
+    assert.equal(output.marketPackages[0].marketContext.marketState, marketState);
+    assert.equal(calls.yahooMostActive, 0);
+    assert.equal(calls.yahooLatestNews, 0);
+    assert.equal(calls.yahooCurrentNewsArticle.length, 0);
+    assert.equal(calls.yahooRecapResearch.length, 1);
+    assert.equal(calls.cnbcRecapResearch.length, 1);
+    assert.equal(calls.cnbc.length, 1);
+    assert.ok(diagnostics.some(item => item.stage === 'activeYahooAcquisition'
+      && item.outcome === 'SKIPPED_COMPLETED_SESSION'));
+  }
+});
+
+test('unsupported special session fails closed before any news research path', async () => {
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'UNSUPPORTED_SPECIAL_SESSION');
+      }
+    })
+  });
+  await assert.rejects(service.assemble(request()), /Unsupported US market state/);
+  assert.equal(calls.yahooMostActive, 0);
+  assert.equal(calls.yahooLatestNews, 0);
+  assert.equal(calls.yahooRecapResearch.length, 0);
+  assert.equal(calls.cnbcRecapResearch.length, 0);
+  assert.equal(calls.cnbc.length, 0);
+});
 
 test('assembles a canonical US package with supplied benchmarks and deterministic refs', async () => {
   const {service, calls} = harness();
@@ -574,7 +872,7 @@ test('fails package assembly when required evidence-role classification fails or
           return {
             ok: false,
             type: 'CONTRACT_FAILURE',
-            message: 'invalid evidence role classification reason',
+            message: 'Claude evidence role classification result was malformed',
             upstreamStatus: 200
           };
         }
@@ -601,7 +899,7 @@ test('fails package assembly when required evidence-role classification fails or
       assert.deepEqual(diagnostics.find(value => value.stage === 'evidenceRoleClassificationFailure'), {
         stage: 'evidenceRoleClassificationFailure',
         failureType: 'CONTRACT_FAILURE',
-        failureMessage: 'invalid evidence role classification reason',
+        failureMessage: 'Claude evidence role classification result was malformed',
         upstreamStatus: 200
       });
     } else {
@@ -650,6 +948,9 @@ test('reports sanitized non-negative timings for existing package stages', async
     'yahooTelemetryAcquisitionMs',
     'postgresPersistenceReadbackMs',
     'yahooMarketDataEvidenceAcquisitionMs',
+    'yahooMostActiveAcquisitionMs',
+    'yahooLatestNewsDiscoveryMs',
+    'yahooCurrentNewsArticleAcquisitionMs',
     'federalReserveEvidenceAcquisitionMs',
     'yahooRecapResearchMs',
     'yahooRecapArticleContentAcquisitionMs',
@@ -710,11 +1011,16 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
   const article = yahooRecapArticle();
   const articleCalls = [];
   const evidenceCalls = [];
+  const rememberedDiscoveries = [];
   const {service, calls} = harness({
     yahooRecapResearch: {
       async discoverAndValidateRecap(value) {
         calls.yahooRecapResearch.push(value);
         return yahooRecapResearchSuccess();
+      },
+      rememberValidatedDiscovery(value) {
+        rememberedDiscoveries.push(value);
+        return true;
       }
     },
     yahooRecapArticleContentAcquisition: {
@@ -741,6 +1047,10 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
     bounds: YAHOO_RECAP_ARTICLE_BOUNDS
   });
   assert.equal(evidenceCalls.length, 1);
+  assert.deepEqual(rememberedDiscoveries, [{
+    targetSessionDate: '2026-09-04',
+    discovery: yahooRecapResearchSuccess().discovery
+  }]);
   assert.deepEqual(evidenceCalls[0].horizon, {
     classification: 'SUBSEQUENT_DEVELOPMENT',
     startsAtExclusive: '2026-09-04T20:00:00.000Z',
@@ -768,6 +1078,62 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
   }]);
   assert.equal(JSON.stringify(output).includes('c1'), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('evicts a Yahoo cache hit after article failure and completes through cold fallback discovery', async () => {
+  const cachedResearch = yahooRecapResearchSuccess({
+    title: 'Stale cached identity',
+    url: 'https://finance.yahoo.com/markets/live/stale-cached-identity.html'
+  });
+  const fallbackResearch = yahooRecapResearchSuccess();
+  const researchCalls = [];
+  const evictions = [];
+  const remembered = [];
+  let acquisitionCalls = 0;
+  const {service} = harness({
+    yahooRecapResearch: {
+      async discoverAndValidateRecap(value) {
+        researchCalls.push(value);
+        return researchCalls.length === 1 ? cachedResearch : fallbackResearch;
+      },
+      isValidatedCacheHit(value) { return value === cachedResearch; },
+      evictValidatedCacheHit(value) {
+        evictions.push(value);
+        return value === cachedResearch;
+      },
+      rememberValidatedDiscovery(value) {
+        remembered.push(value);
+        return true;
+      }
+    },
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() {
+        acquisitionCalls += 1;
+        return acquisitionCalls === 1
+          ? {ok: false, type: 'INVALID_METADATA'}
+          : {ok: true, type: 'SUCCESS', articleContent: yahooRecapArticle()};
+      }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) {
+        return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+      }
+    }
+  });
+
+  const output = await service.assemble(request());
+  assert.equal(researchCalls.length, 2);
+  assert.equal(acquisitionCalls, 2);
+  assert.deepEqual(evictions, [cachedResearch]);
+  assert.deepEqual(remembered, [{
+    targetSessionDate: '2026-09-04', discovery: fallbackResearch.discovery
+  }]);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(record =>
+    record.item.sourceId === 'us.yahoo-finance'
+      && record.item.evidenceCategory === 'news'), true);
+  assert.equal(output.marketPackages[0].evidenceContext.unresolvedGaps.includes(
+    YAHOO_RECAP_RETRIEVAL_FAILURE_GAP
+  ), false);
 });
 
 test('broad-market news lane uses validated record identity, not provider or portfolio membership', () => {
@@ -1388,8 +1754,19 @@ test('maps Yahoo recap stage failures to sanitized deterministic gaps', async ()
   ];
   for (const item of cases) {
     const diagnostics = [];
+    const rememberedDiscoveries = [];
+    const originalResearch = item.overrides.yahooRecapResearch;
     const {service} = harness({
       ...item.overrides,
+      ...(originalResearch ? {
+        yahooRecapResearch: {
+          ...originalResearch,
+          rememberValidatedDiscovery(value) {
+            rememberedDiscoveries.push(value);
+            return true;
+          }
+        }
+      } : {}),
       onDiagnostics(value) { diagnostics.push(value); }
     });
     const output = await service.assemble(request());
@@ -1405,6 +1782,7 @@ test('maps Yahoo recap stage failures to sanitized deterministic gaps', async ()
     const serialized = JSON.stringify(diagnostics);
     assert.equal(serialized.includes('articleText'), false);
     assert.equal(serialized.includes('canonicalUrl'), false);
+    assert.deepEqual(rememberedDiscoveries, []);
   }
 });
 
@@ -1528,6 +1906,7 @@ test('rejects overlap between supplied anchors and either portfolio list before 
     await assert.rejects(service.assemble(request('US', membership)), /cannot be portfolio membership/);
     assert.deepEqual(calls, {
       factories: [], telemetry: [], persistence: [], yahoo: [], fed: 0,
+      yahooMostActive: 0, yahooLatestNews: 0, yahooCurrentNewsArticle: [],
       yahooRecapResearch: [], yahooRecapArticle: [], yahooRecapEvidence: [],
       cnbcRecapResearch: [], cnbc: [],
       evidenceRoleClassification: [], evidenceSubjectRepair: []
@@ -1609,6 +1988,128 @@ test('integrates one CNBC recap before general CNBC with package-owned associati
   assert.equal(context.evidence[4].item.canonicalUrl,
     'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html');
   assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('validated CNBC daily recap uses one package evidence ref for analysis and Further Readings', async () => {
+  const recapUrl = 'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html';
+  const recapTitle = 'Stock market news for Sep. 5, 2026';
+  const html = `<script type="application/ld+json">${JSON.stringify({
+    '@type': 'LiveBlogPosting', headline: recapTitle,
+    liveBlogUpdate: [{
+      '@type': 'BlogPosting', headline: 'Overnight markets',
+      datePublished: '2026-09-05T12:15:00Z',
+      dateModified: '2026-09-05T12:20:00Z',
+      articleBody: 'US stocks finished the Friday session after a volatile close.'
+    }]
+  })}</script>`;
+  const fetched = [];
+  const cnbcRecapResearch = createCnbcRecapResearchRuntime({
+    fetchImpl: async url => {
+      fetched.push(url);
+      return {
+            ok: true, status: 200, url: recapUrl,
+            headers: {get: name => name === 'content-type' ? 'text/html' : null},
+            async text() { return html; }
+          };
+    }
+  });
+  const {service} = harness({
+    cnbcRecapResearch,
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        const recap = input.evidence.find(entry => entry.item.canonicalUrl === recapUrl);
+        assert.ok(recap);
+        return roleClassificationSuccess(input, {[recap.reference]: ['MATERIAL_EVENT']}, {
+          [recap.reference]: []
+        });
+      },
+      async repairEvidenceSubjects(input) {
+        return {ok: true, type: 'SUCCESS', output: {repairs: input.evidence.map(entry => ({
+          reference: entry.reference, subjects: []
+        }))}};
+      }
+    }
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  const recapEntries = context.evidence.filter(entry => entry.item.canonicalUrl === recapUrl);
+  assert.equal(recapEntries.length, 1);
+  const recapReference = recapEntries[0].reference;
+  assert.equal(recapEntries[0].item.title, recapTitle);
+  assert.ok(context.materialEvents.includes(recapReference));
+  assert.ok(context.subsequentDevelopments.includes(recapReference));
+  assert.equal(context.principalCatalysts.includes(recapReference), false);
+  assert.deepEqual(context.furtherReadings.filter(entry => entry.evidenceRef === recapReference), [
+    {evidenceRef: recapReference, sessionDate: '2026-09-04'}
+  ]);
+  assert.deepEqual(fetched, [recapUrl]);
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('predicted CNBC recap remains analysis evidence and Further Reading with unusable timestamp metadata', async () => {
+  const recapUrl = 'https://www.cnbc.com/2026/09/03/stock-market-today-live-updates.html';
+  for (const metadata of [
+    {datePublished: 'not-a-date', dateModified: 'also-invalid', expectedPublishedAt: null},
+    {datePublished: undefined, dateModified: undefined, expectedPublishedAt: null},
+    {datePublished: '2026-09-04T20:15:00Z', dateModified: '2026-09-04T19:00:00Z',
+      expectedPublishedAt: '2026-09-04T20:15:00.000Z'},
+    {datePublished: '2026-09-03T12:00:00Z', dateModified: null,
+      expectedPublishedAt: '2026-09-03T12:00:00.000Z'},
+    {datePublished: '2026-09-07T12:00:00Z', dateModified: null,
+      expectedPublishedAt: null}
+  ]) {
+    const html = `<script type="application/ld+json">${JSON.stringify({
+      '@type': 'LiveBlogPosting', headline: 'Unrelated editorial date',
+      liveBlogUpdate: [{
+        '@type': 'BlogPosting', articleBody: 'US stocks finished Friday after sector rotation.',
+        datePublished: metadata.datePublished, dateModified: metadata.dateModified
+      }]
+    })}</script>`;
+    const fetched = [];
+    const cnbcRecapResearch = createCnbcRecapResearchRuntime({
+      fetchImpl: async url => {
+        fetched.push(url);
+        return {
+          ok: true, status: 200, url: recapUrl,
+          headers: {get: name => name === 'content-type' ? 'text/html' : null},
+          async text() { return html; }
+        };
+      }
+    });
+    const {service} = harness({
+      cnbcRecapResearch,
+      evidenceRoleClassification: {
+        async classifyEvidenceRoles(input) {
+          const recap = input.evidence.find(entry => entry.item.canonicalUrl === recapUrl);
+          assert.ok(recap);
+          assert.equal(recap.horizon, 'SUBSEQUENT_DEVELOPMENT');
+          assert.equal(recap.item.publishedAt, metadata.expectedPublishedAt);
+          return roleClassificationSuccess(input, {[recap.reference]: ['MATERIAL_EVENT']}, {
+            [recap.reference]: []
+          });
+        },
+        async repairEvidenceSubjects(input) {
+          return {ok: true, type: 'SUCCESS', output: {repairs: input.evidence.map(entry => ({
+            reference: entry.reference, subjects: []
+          }))}};
+        }
+      }
+    });
+    const output = await service.assemble(request());
+    const context = output.marketPackages[0].evidenceContext;
+    const recapEntries = context.evidence.filter(entry => entry.item.canonicalUrl === recapUrl);
+    assert.equal(recapEntries.length, 1);
+    const reference = recapEntries[0].reference;
+    assert.equal(recapEntries[0].item.publishedAt, metadata.expectedPublishedAt);
+    assert.ok(context.materialEvents.includes(reference));
+    assert.ok(context.subsequentDevelopments.includes(reference));
+    assert.equal(context.principalCatalysts.includes(reference), false);
+    assert.deepEqual(context.furtherReadings.filter(entry => entry.evidenceRef === reference), [
+      {evidenceRef: reference, sessionDate: '2026-09-04'}
+    ]);
+    assert.deepEqual(fetched, [recapUrl]);
+    assert.equal(validateClaudeAnalysisInput(output), true);
+  }
 });
 
 test('CNBC recap optional outcomes and failures never block general CNBC research', async () => {
