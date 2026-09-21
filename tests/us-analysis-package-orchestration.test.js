@@ -111,10 +111,11 @@ function snapshotWithoutCompletedSessions(symbol) {
 
 function snapshotWithState(symbol, marketState, {
   sessionDate = '2026-09-08',
-  overlayAsOf = '2026-09-08T11:30:00.000Z'
+  overlayAsOf = '2026-09-08T11:30:00.000Z',
+  hasOverlay = true
 } = {}) {
   const base = snapshot(symbol);
-  const currentOverlay = ['PRE', 'REGULAR', 'POST'].includes(marketState)
+  const currentOverlay = hasOverlay && ['PRE', 'REGULAR', 'POST'].includes(marketState)
     ? createCurrentSessionOverlay({
         market: 'US', marketState, sessionDate,
         asOf: overlayAsOf, lastPrice: 106,
@@ -579,6 +580,99 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
     assert.ok(diagnostics.some(item => item.stage === 'completedSessionResearch'
       && item.outcome === 'SKIPPED_ACTIVE_SESSION'));
   }
+});
+
+test('one matching benchmark overlay admits current Yahoo evidence in PRE, REGULAR and POST', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, publishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z', '2026-09-08T11:45:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
+  ]) {
+    const diagnostics = [];
+    const candidates = ['one', 'two'].map(slug => ({
+      headline: `Current ${slug} story`,
+      url: `https://finance.yahoo.com/news/current-${slug}.html`,
+      uuid: null,
+      publisher: 'Yahoo Finance'
+    }));
+    const {service, calls} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, marketState, {
+            overlayAsOf,
+            hasOverlay: symbol === '^RUT'
+          });
+        }
+      }),
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) {
+          return {ok: true, type: 'SUCCESS', articleContent: {
+            sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+            headline: candidate.headline, publisher: 'Yahoo Finance',
+            publishedAt, updatedAt: null,
+            articleText: `Usable current-session content for ${candidate.headline}.`
+          }};
+        }
+      },
+      now: () => new Date(generatedAt),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const output = await service.assemble(request('US', {
+      benchmarkAnchors: [{market: 'US', symbol: '^RUT'}, {market: 'US', symbol: '^DJI'}]
+    }));
+    const current = calls.evidenceRoleClassification[0].evidence.filter(entry =>
+      entry.horizon === 'CURRENT_SESSION');
+    assert.equal(current.length, 2);
+    const providerInput = JSON.parse(buildClaudeAnalysisRequest(output).messages[0].content);
+    assert.equal(providerInput.currentSessionContext[0].evidenceRefs.length, 2);
+    const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+    assert.equal(acquisition.activeWindowUnavailableCount, 0);
+    assert.equal(acquisition.benchmarkOverlayInvalidCount, 0);
+    assert.equal(acquisition.acquiredCurrentSessionCount, 2);
+  }
+});
+
+test('active Yahoo diagnostics count duplicate evidence independently of active-window failures', async () => {
+  const diagnostics = [];
+  const candidates = ['one', 'two'].map(slug => ({
+    headline: `Current ${slug} story`,
+    url: `https://finance.yahoo.com/news/current-${slug}.html`,
+    uuid: null,
+    publisher: 'Yahoo Finance'
+  }));
+  const {service} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {overlayAsOf: '2026-09-08T14:55:00.000Z'});
+      }
+    }),
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance',
+          canonicalUrl: 'https://finance.yahoo.com/news/one-current-article.html',
+          headline: candidate.headline,
+          publisher: 'Yahoo Finance',
+          publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+          articleText: 'Usable current-session article content.'
+        }};
+      }
+    },
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  await service.assemble(request());
+  const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.duplicateEvidenceCount, 1);
+  assert.equal(acquisition.activeWindowUnavailableCount, 0);
+  assert.equal(acquisition.benchmarkOverlayInvalidCount, 0);
+  assert.equal(acquisition.otherEvidenceConstructionRejectedCount, 0);
 });
 
 test('active Yahoo news becomes CURRENT_SESSION evidence and can support current catalysts and Section 4', async () => {

@@ -14,7 +14,8 @@ const {
 function benchmark(marketState, asOf, {
   sessionDate = '2026-09-08',
   completedSessionDate = '2026-09-04',
-  completedAsOf = '2026-09-04T20:00:00.000Z'
+  completedAsOf = '2026-09-04T20:00:00.000Z',
+  hasOverlay = true
 } = {}) {
   const completed = createCompletedRegularSession({
     market: 'US', sessionDate: completedSessionDate, open: 100, high: 105, low: 99,
@@ -22,11 +23,11 @@ function benchmark(marketState, asOf, {
     asOf: completedAsOf, sourceId: 'us.yahoo-finance',
     validationState: 'VALIDATED'
   });
-  const overlay = createCurrentSessionOverlay({
+  const overlay = hasOverlay ? createCurrentSessionOverlay({
     market: 'US', marketState, sessionDate, asOf,
     lastPrice: 105, referenceClose: 104, volume: 200,
     sourceId: 'us.yahoo-finance', validationState: 'VALIDATED'
-  });
+  }) : null;
   return createFiveSessionSnapshot({
     market: 'US', symbol: '^GSPC', instrumentName: 'S&P 500', instrumentType: 'INDEX',
     currency: 'USD', marketState, completedSessions: [completed], currentOverlay: overlay
@@ -125,16 +126,44 @@ test('fails closed when declared and canonical active states disagree', () => {
   }
 });
 
-test('requires every benchmark overlay to agree with the canonical active session', () => {
+test('requires one matching overlay while allowing other benchmark overlays to be absent', () => {
+  for (const [marketState, generatedAt, asOf] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z']
+  ]) {
+    assert.ok(deriveUsActiveSessionEvidenceWindow({
+      marketState,
+      generatedAt,
+      benchmarkSnapshots: [
+        benchmark(marketState, asOf),
+        benchmark(marketState, asOf, {hasOverlay: false})
+      ]
+    }));
+  }
+});
+
+test('requires at least one overlay and rejects a conflicting overlay state or date', () => {
   assert.equal(deriveUsActiveSessionEvidenceWindow({
     marketState: 'REGULAR',
     generatedAt: '2026-09-08T15:00:00.000Z',
-    benchmarkSnapshots: []
+    benchmarkSnapshots: [benchmark('REGULAR', '2026-09-08T14:55:00.000Z', {hasOverlay: false})]
   }), null);
   assert.equal(deriveUsActiveSessionEvidenceWindow({
     marketState: 'REGULAR',
     generatedAt: '2026-09-08T15:00:00.000Z',
-    benchmarkSnapshots: [benchmark('PRE', '2026-09-08T12:55:00.000Z')]
+    benchmarkSnapshots: [
+      benchmark('REGULAR', '2026-09-08T14:55:00.000Z'),
+      benchmark('PRE', '2026-09-08T12:55:00.000Z')
+    ]
+  }), null);
+  assert.equal(deriveUsActiveSessionEvidenceWindow({
+    marketState: 'REGULAR',
+    generatedAt: '2026-09-08T15:00:00.000Z',
+    benchmarkSnapshots: [
+      benchmark('REGULAR', '2026-09-08T14:55:00.000Z'),
+      {currentOverlay: {marketState: 'REGULAR', sessionDate: '2026-09-07'}}
+    ]
   }), null);
 });
 
