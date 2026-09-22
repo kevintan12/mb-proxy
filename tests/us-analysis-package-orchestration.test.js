@@ -30,6 +30,7 @@ const {
   validateClaudeAnalysisOutput
 } = require('../lib/claude-analysis-contract');
 const {buildClaudeAnalysisRequest} = require('../lib/claude-analysis-invocation');
+const {parseUsActiveSessionAnchor} = require('../lib/us-active-session-evidence');
 const {
   buildClaudeEvidenceRoleClassificationRequest,
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES
@@ -644,6 +645,85 @@ test('one matching benchmark overlay admits current Yahoo evidence in PRE, REGUL
   }
 });
 
+test('PRE, REGULAR and POST admit one current article with zero benchmark overlays', async () => {
+  for (const [marketState, generatedAt, publishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:45:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:30:00.000Z']
+  ]) {
+    const {service, calls} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, marketState, {hasOverlay: false});
+        }
+      }),
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates: [{
+          headline: 'Current Yahoo market development',
+          url: 'https://finance.yahoo.com/news/current-yahoo-market-development.html',
+          uuid: null, publisher: 'Yahoo Finance'
+        }]}; }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) { return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance', publishedAt,
+          updatedAt: null, articleText: 'Usable current-session Yahoo evidence.'
+        }}; }
+      },
+      now: () => new Date(generatedAt)
+    });
+    const output = await service.assemble(request());
+    assert.equal(output.marketPackages[0].marketContext.includesCurrentOverlay, false);
+    assert.equal(calls.evidenceRoleClassification.length, 1);
+    assert.equal(calls.evidenceRoleClassification[0].evidence.some(entry =>
+      entry.horizon === 'CURRENT_SESSION'), true);
+  }
+});
+
+test('active package anchor survives PRE to REGULAR, REGULAR to POST, and POST to CLOSED transitions', async () => {
+  for (const [marketState, acquisitionStartedAt, finalGeneratedAt, publishedAt] of [
+    ['PRE', '2026-09-08T12:59:59.000Z', '2026-09-08T13:31:00.000Z', '2026-09-08T12:30:00.000Z'],
+    ['REGULAR', '2026-09-08T19:59:59.000Z', '2026-09-08T20:01:00.000Z', '2026-09-08T19:30:00.000Z'],
+    ['POST', '2026-09-08T23:59:59.000Z', '2026-09-09T00:01:00.000Z', '2026-09-08T23:30:00.000Z']
+  ]) {
+    const clock = [acquisitionStartedAt, finalGeneratedAt];
+    const {service} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, marketState, {hasOverlay: false});
+        }
+      }),
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates: [{
+          headline: 'Current Yahoo market development',
+          url: 'https://finance.yahoo.com/news/current-yahoo-market-development.html',
+          uuid: null, publisher: 'Yahoo Finance'
+        }]}; }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) { return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance', publishedAt,
+          updatedAt: null, articleText: 'Current evidence remains anchored to acquisition start.'
+        }}; }
+      },
+      now: () => new Date(clock.shift())
+    });
+    const output = await service.assemble(request());
+    const marketPackage = output.marketPackages[0];
+    const anchor = parseUsActiveSessionAnchor(marketPackage.marketContext.calendarContext);
+    assert.equal(output.analysisRequest.generatedAt, finalGeneratedAt);
+    assert.equal(marketPackage.marketContext.marketState, marketState);
+    assert.equal(anchor.marketState, marketState);
+    assert.equal(anchor.endsAtInclusive, acquisitionStartedAt);
+    assert.equal(marketPackage.evidenceContext.evidence.some(entry =>
+      entry.item.evidenceCategory === 'news'), true);
+    const providerInput = JSON.parse(buildClaudeAnalysisRequest(output).messages[0].content);
+    assert.equal(providerInput.currentSessionContext[0].evidenceRefs.length, 1);
+  }
+});
+
 test('PRE, REGULAR and POST backfill past five unusable Yahoo articles to the sixth valid article', async () => {
   for (const [marketState, generatedAt, overlayAsOf, publishedAt] of [
     ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z', '2026-09-08T11:45:00.000Z'],
@@ -696,7 +776,100 @@ test('PRE, REGULAR and POST backfill past five unusable Yahoo articles to the si
   }
 });
 
-test('active Yahoo all-failure backfill stops at the fixed attempt ceiling', async () => {
+test('classifier-preflight rejection continues to the next package-admissible active candidate', async () => {
+  const activeBenchmark = snapshotWithState('^RUT', 'REGULAR', {hasOverlay: false});
+  const yahooItem = yahooEvidence('^RUT').items[0];
+  const smallCandidate = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Small current Yahoo article', summary: 'Small admissible summary.',
+    canonicalUrl: 'https://finance.yahoo.com/news/small-current-yahoo-article.html',
+    publishedAt: '2026-09-08T14:30:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
+  const largeCandidate = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Large current Yahoo article', summary: 'y'.repeat(8192),
+    canonicalUrl: 'https://finance.yahoo.com/news/large-current-yahoo-article.html',
+    publishedAt: '2026-09-08T14:29:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
+  function activeClassifierBytes(federalItems, candidate) {
+    const items = [yahooItem, ...federalItems, candidate];
+    const collection = createEvidenceCollection({market: 'US', items});
+    return Buffer.byteLength(JSON.stringify(buildClaudeEvidenceRoleClassificationRequest({
+      marketContext: {
+        market: 'US', exchangeTimezone: 'America/New_York', marketState: 'REGULAR',
+        primaryCompletedSessionDate: '2026-09-04'
+      },
+      benchmarkTelemetry: [{reference: 't1', snapshot: activeBenchmark}],
+      evidence: collection.items.map((item, index) => ({
+        reference: `e${index + 1}`,
+        horizon: index === collection.items.length - 1 ? 'CURRENT_SESSION' : 'COMPLETED_SESSION',
+        requiresBroadMarketSubjects: index === collection.items.length - 1,
+        item
+      }))
+    })), 'utf8');
+  }
+  let low = 0;
+  let high = 4000;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const federalItems = manyFedEvidence(20, middle).items;
+    if (activeClassifierBytes(federalItems, smallCandidate)
+        <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) low = middle;
+    else high = middle - 1;
+  }
+  const federalCollection = manyFedEvidence(20, low);
+  assert.ok(activeClassifierBytes(federalCollection.items, smallCandidate)
+    <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  assert.ok(activeClassifierBytes(federalCollection.items, largeCandidate)
+    > CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+
+  const diagnostics = [];
+  const candidates = [{
+    headline: largeCandidate.title, url: largeCandidate.canonicalUrl,
+    uuid: null, publisher: 'Yahoo Finance'
+  }, {
+    headline: smallCandidate.title, url: smallCandidate.canonicalUrl,
+    uuid: null, publisher: 'Yahoo Finance'
+  }];
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {hasOverlay: false});
+      }
+    }),
+    federalReserveEvidenceAcquisition: {
+      async acquireEvidence() { return federalCollection; }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        calls.yahooCurrentNewsArticle.push(candidate);
+        const large = candidate.url === largeCandidate.canonicalUrl;
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: large ? largeCandidate.publishedAt : smallCandidate.publishedAt,
+          updatedAt: null, articleText: large ? 'y'.repeat(8192) : 'Small admissible summary.'
+        }};
+      }
+    },
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const output = await service.assemble(request());
+  const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+  assert.equal(calls.yahooCurrentNewsArticle.length, 2);
+  assert.equal(acquisition.classifierPreflightRejectedCount, 1);
+  assert.equal(acquisition.acquiredCurrentSessionCount, 1);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.title === smallCandidate.title), true);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.title === largeCandidate.title), false);
+});
+
+test('active Yahoo stops at eight attempts even when the ninth candidate would be usable', async () => {
   const diagnostics = [];
   const candidates = Array.from({length: ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS + 2}, (_, index) => ({
     headline: `Unusable Yahoo story ${index + 1}`,
@@ -716,6 +889,12 @@ test('active Yahoo all-failure backfill stops at the fixed attempt ceiling', asy
     yahooCurrentNewsArticleContentAcquisition: {
       async acquireArticleContent(candidate) {
         calls.yahooCurrentNewsArticle.push(candidate);
+        if (candidate.url.endsWith('-9.html')) return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+          articleText: 'This valid ninth article must remain outside the fixed attempt ceiling.'
+        }};
         return {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
       }
     },
@@ -733,8 +912,52 @@ test('active Yahoo all-failure backfill stops at the fixed attempt ceiling', asy
     ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
   assert.equal(acquisition.acquiredCurrentSessionCount, 0);
   assert.equal(acquisition.backfillUsed, true);
+  assert.equal(calls.evidenceRoleClassification.length, 0);
+  assert.ok(diagnostics.some(item => item.stage === 'evidenceRoleClassification'
+    && item.outcome === 'SKIPPED_ZERO_CURRENT_SESSION_EVIDENCE'));
   assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
     entry.item.evidenceCategory === 'news'), false);
+});
+
+test('ambiguous common-word tickers do not reorder unrelated Yahoo headlines', async () => {
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {hasOverlay: false});
+      }
+    }),
+    yahooMostActiveAcquisition: {
+      async acquireMostActive() { return {ok: true, type: 'SUCCESS', candidates: [{
+        symbol: 'A', shortName: 'Agilent Technologies', longName: 'Agilent Technologies, Inc.'
+      }]}; }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates: [{
+        headline: 'A broad rally lifts global markets',
+        url: 'https://finance.yahoo.com/news/a-broad-rally.html', uuid: null, publisher: 'Yahoo Finance'
+      }, {
+        headline: 'Agilent Technologies raises its outlook',
+        url: 'https://finance.yahoo.com/news/agilent-raises-outlook.html', uuid: null,
+        publisher: 'Yahoo Finance'
+      }]}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        calls.yahooCurrentNewsArticle.push(candidate);
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+          articleText: 'Usable current-session Yahoo evidence.'
+        }};
+      }
+    },
+    now: () => new Date('2026-09-08T15:00:00.000Z')
+  });
+  await service.assemble(request());
+  assert.equal(calls.yahooCurrentNewsArticle.length, 1);
+  assert.equal(calls.yahooCurrentNewsArticle[0].headline,
+    'Agilent Technologies raises its outlook');
 });
 
 test('active Yahoo diagnostics distinguish retrieval and extraction failures before a usable article', async () => {

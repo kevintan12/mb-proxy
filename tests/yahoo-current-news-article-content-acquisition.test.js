@@ -89,6 +89,35 @@ test('extracts the current Yahoo nested-category canonical article structure', a
   assert.equal(result.articleContent.articleText, 'Markets moved as chip demand strengthened.');
 });
 
+test('accepts harmless headline variation only after strong Yahoo article identity is established', async () => {
+  const requestedHeadline = 'Nvidia rallies on demand as AI spending rises';
+  const actualHeadline = 'Nvidia rallies on demand as AI spending rises today';
+  const strong = await createYahooCurrentNewsArticleContentAcquisitionService({
+    fetchImpl: async () => response(page({article: metadata({headline: actualHeadline})}))
+  }).acquireArticleContent({url: candidateUrl, headline: requestedHeadline});
+  assert.equal(strong.ok, true);
+  assert.equal(strong.articleContent.headline, actualHeadline);
+
+  const withoutCanonical = page({article: metadata({headline: actualHeadline})})
+    .replace(`<link rel="canonical" href="${canonicalUrl}">`, '');
+  const weak = await createYahooCurrentNewsArticleContentAcquisitionService({
+    fetchImpl: async () => response(withoutCanonical)
+  }).acquireArticleContent({url: candidateUrl, headline: requestedHeadline});
+  assert.equal(weak.type, 'NO_USABLE_ARTICLE');
+  assert.equal(weak.extractionFailureType, 'ARTICLE_IDENTITY_OR_HEADLINE_MISMATCH');
+});
+
+test('rejects a true headline conflict despite matching Yahoo URL identity', async () => {
+  const conflict = await createYahooCurrentNewsArticleContentAcquisitionService({
+    fetchImpl: async () => response(page())
+  }).acquireArticleContent({
+    url: candidateUrl,
+    headline: 'Federal Reserve cuts rates after inflation report'
+  });
+  assert.equal(conflict.type, 'NO_USABLE_ARTICLE');
+  assert.equal(conflict.extractionFailureType, 'ARTICLE_IDENTITY_OR_HEADLINE_MISMATCH');
+});
+
 test('rejects non-Yahoo URLs, identity mismatches and unusable articles', async () => {
   const service = createYahooCurrentNewsArticleContentAcquisitionService({
     fetchImpl: async () => response(page({body: ''}))

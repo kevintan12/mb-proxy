@@ -7,6 +7,9 @@ const {
   createFiveSessionSnapshot
 } = require('../lib/five-session-snapshot');
 const {
+  createUsActiveSessionAnchor,
+  serializeUsActiveSessionAnchor,
+  parseUsActiveSessionAnchor,
   deriveUsActiveSessionEvidenceWindow,
   isTimestampWithinUsActiveSessionWindow
 } = require('../lib/us-active-session-evidence');
@@ -46,6 +49,7 @@ test('derives one exchange-owned active evidence window for PRE, REGULAR and POS
       benchmarkSnapshots: [benchmark(marketState, asOf)]
     });
     assert.deepEqual(window, {
+      marketState,
       sessionDate: '2026-09-08',
       startsAtInclusive: '2026-09-08T08:00:00.000Z',
       endsAtInclusive: generatedAt
@@ -143,12 +147,12 @@ test('requires one matching overlay while allowing other benchmark overlays to b
   }
 });
 
-test('requires at least one overlay and rejects a conflicting overlay state or date', () => {
-  assert.equal(deriveUsActiveSessionEvidenceWindow({
+test('allows zero overlays but rejects every present conflicting overlay state or date', () => {
+  assert.ok(deriveUsActiveSessionEvidenceWindow({
     marketState: 'REGULAR',
     generatedAt: '2026-09-08T15:00:00.000Z',
     benchmarkSnapshots: [benchmark('REGULAR', '2026-09-08T14:55:00.000Z', {hasOverlay: false})]
-  }), null);
+  }));
   assert.equal(deriveUsActiveSessionEvidenceWindow({
     marketState: 'REGULAR',
     generatedAt: '2026-09-08T15:00:00.000Z',
@@ -165,6 +169,30 @@ test('requires at least one overlay and rejects a conflicting overlay state or d
       {currentOverlay: {marketState: 'REGULAR', sessionDate: '2026-09-07'}}
     ]
   }), null);
+});
+
+test('serializes one stable package-owned anchor across later state transitions', () => {
+  for (const fixture of [{
+    marketState: 'PRE', cutoffAt: '2026-09-08T12:59:59.000Z',
+    laterState: 'REGULAR', laterAt: '2026-09-08T13:31:00.000Z'
+  }, {
+    marketState: 'REGULAR', cutoffAt: '2026-09-08T19:59:59.000Z',
+    laterState: 'POST', laterAt: '2026-09-08T20:01:00.000Z'
+  }, {
+    marketState: 'POST', cutoffAt: '2026-09-08T23:59:59.000Z',
+    laterState: 'CLOSED', laterAt: '2026-09-09T00:01:00.000Z'
+  }]) {
+    const anchor = createUsActiveSessionAnchor(fixture);
+    const serialized = serializeUsActiveSessionAnchor(anchor);
+    assert.ok(serialized);
+    assert.deepEqual(parseUsActiveSessionAnchor(serialized), anchor);
+    assert.equal(anchor.marketState, fixture.marketState);
+    assert.equal(anchor.endsAtInclusive, fixture.cutoffAt);
+    assert.notEqual(fixture.marketState, fixture.laterState);
+    assert.ok(Date.parse(fixture.laterAt) > Date.parse(anchor.endsAtInclusive));
+    assert.equal(isTimestampWithinUsActiveSessionWindow(anchor.endsAtInclusive, anchor), true);
+    assert.equal(isTimestampWithinUsActiveSessionWindow(fixture.laterAt, anchor), false);
+  }
 });
 
 test('completed and unsupported states do not create an active evidence window', () => {

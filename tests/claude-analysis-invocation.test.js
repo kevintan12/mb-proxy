@@ -32,6 +32,10 @@ const {
   invokeClaudeAnalysis
 } = require('../lib/claude-analysis-invocation');
 const {projectClaudeAnalysisInput} = require('../lib/claude-model-input-projection');
+const {
+  createUsActiveSessionAnchor,
+  serializeUsActiveSessionAnchor
+} = require('../lib/us-active-session-evidence');
 
 function canonicalInput({
   includeSecondEvidence = false,
@@ -101,19 +105,28 @@ function activeUsInput({
   generatedAt = '2026-09-08T15:00:00.000Z',
   overlayAsOf = '2026-09-08T14:55:00.000Z',
   currentPublishedAt = '2026-09-08T14:30:00.000Z',
-  additionalItems = []
+  additionalItems = [],
+  includeOverlay = true,
+  materialEvents = ['e1', 'e2'],
+  principalCatalysts = ['e1', 'e2'],
+  supportingEvidence = ['e2']
 } = {}) {
+  const activeSessionAnchor = serializeUsActiveSessionAnchor(createUsActiveSessionAnchor({
+    marketState,
+    cutoffAt: generatedAt
+  }));
+  assert.ok(activeSessionAnchor);
   const completed = createCompletedRegularSession({
     market: 'US', sessionDate: '2026-09-04', open: 100, high: 105, low: 98,
     close: 104, previousClose: 100, volume: 1000000,
     asOf: '2026-09-04T16:00:00-04:00', sourceId: 'us.yahoo-finance',
     validationState: 'VALIDATED'
   });
-  const overlay = createCurrentSessionOverlay({
+  const overlay = includeOverlay ? createCurrentSessionOverlay({
     market: 'US', marketState, sessionDate: '2026-09-08',
     asOf: overlayAsOf, lastPrice: 106, referenceClose: 104,
     volume: 1200000, sourceId: 'us.yahoo-finance', validationState: 'VALIDATED'
-  });
+  }) : null;
   const snapshot = createFiveSessionSnapshot({
     market: 'US', symbol: '^GSPC', instrumentName: 'S&P 500', instrumentType: 'INDEX',
     currency: 'USD', marketState, completedSessions: [completed],
@@ -144,16 +157,16 @@ function activeUsInput({
       market: 'US',
       marketContext: {
         exchangeTimezone: 'America/New_York', marketState,
-        primaryCompletedSessionDate: '2026-09-04', includesCurrentOverlay: true,
-        calendarContext: null
+        primaryCompletedSessionDate: '2026-09-04', includesCurrentOverlay: includeOverlay,
+        calendarContext: activeSessionAnchor
       },
       telemetry: {benchmarkSnapshots: [snapshot], stockSnapshots: []},
       evidenceCollection: createEvidenceCollection({
         market: 'US', items: [current, completedEvidence, ...additionalItems]
       }),
       evidenceContext: {
-        materialEvents: ['e1', 'e2'], authoritativeFacts: [],
-        principalCatalysts: ['e1', 'e2'], supportingEvidence: ['e2'],
+        materialEvents, authoritativeFacts: [],
+        principalCatalysts, supportingEvidence,
         conflictingEvidence: [], subsequentDevelopments: [], sessionAssociations: [],
         broadMarketFocus: [{
           evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]
@@ -444,6 +457,29 @@ test('PRE, REGULAR and POST repair one omitted current citation only when attrib
   }
 });
 
+test('PRE, REGULAR and POST accept natural current-first wording, later current citations, and zero overlays', () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z',
+      '2026-09-08T11:30:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z',
+      '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z',
+      '2026-09-08T20:30:00.000Z']
+  ]) {
+    for (const includeOverlay of [true, false]) {
+      const input = activeUsInput({
+        marketState, generatedAt, overlayAsOf, currentPublishedAt, includeOverlay
+      });
+      const output = normalOutput(input, {furtherReadings: ['e1']});
+      output.sections[0].content = 'Stocks are responding to live developments now; the prior close is context only.';
+      output.sections[0].evidenceRefs = ['e2', 'e1'];
+      output.evidenceReferences = ['e2', 'e1'];
+      assert.equal(validateClaudeAnalysisOutput(output, input).valid, true,
+        `${marketState} overlay=${includeOverlay}`);
+    }
+  }
+});
+
 test('active citation repair rejects ambiguous or invalid generated attribution', async () => {
   const secondCurrent = createEvidenceItem({
     sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
@@ -477,6 +513,128 @@ test('active citation repair rejects ambiguous or invalid generated attribution'
   const invalidEvent = invalidDiagnostics.find(event => event.stage === 'activeSessionOutput');
   assert.equal(invalidEvent.deterministicCitationRepairApplied, false);
   assert.equal(invalidEvent.repairedCurrentSessionRefCount, 0);
+});
+
+test('PRE, REGULAR and POST preserve strict ambiguity when multiple current refs exist', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z',
+      '2026-09-08T11:30:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z',
+      '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z',
+      '2026-09-08T20:30:00.000Z']
+  ]) {
+    const secondCurrent = createEvidenceItem({
+      sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+      title: 'Apple current-session update', summary: 'Apple moved in the active session.',
+      canonicalUrl: `https://finance.yahoo.com/news/apple-${marketState.toLowerCase()}-update.html`,
+      publishedAt: currentPublishedAt, symbols: ['AAPL'], publisher: 'Yahoo Finance'
+    });
+    const input = activeUsInput({
+      marketState, generatedAt, overlayAsOf, currentPublishedAt,
+      additionalItems: [secondCurrent]
+    });
+    const raw = activeOutputWithoutCurrentCitation(input);
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+    });
+    assert.equal(result.type, 'CONTRACT_FAILURE', marketState);
+  }
+});
+
+test('single-current citation repair also applies when the sole current ref was cited outside Section 1', async () => {
+  const input = activeUsInput();
+  const raw = activeOutputWithoutCurrentCitation(input);
+  raw.sections[4].evidenceRefs = ['e1'];
+  raw.evidenceReferences = ['e2', 'e1'];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.sections[0].evidenceRefs, ['e1', 'e2']);
+});
+
+test('active FAILED is rejected when usable current evidence exists', async () => {
+  const input = activeUsInput();
+  const failed = {
+    status: 'FAILED', reportContext: reportContext(input), sections: sections(null),
+    evidenceReferences: [], furtherReadings: [], evidenceGaps: ['Coverage is sparse.']
+  };
+  assert.ok(validateClaudeAnalysisOutput(failed, input).errors.includes(
+    'active analysis with CURRENT_SESSION evidence cannot use FAILED status'
+  ));
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(failed)
+  });
+  assert.equal(result.type, 'CONTRACT_FAILURE');
+});
+
+test('active optional unknown references localize while an unknown Section 1 ref remains a hard failure', async () => {
+  const input = activeUsInput();
+  const optional = normalOutput(input, {furtherReadings: []});
+  optional.sections[4].evidenceRefs = ['e999'];
+  const localized = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(optional)
+  });
+  assert.equal(localized.type, 'SUCCESS', localized.message);
+  assert.equal(localized.output.status, 'DEGRADED');
+  assert.equal(localized.output.sections[4].content, null);
+  assert.deepEqual(localized.output.sections[4].evidenceRefs, []);
+
+  const summary = normalOutput(input, {furtherReadings: []});
+  summary.sections[0].evidenceRefs = ['e999'];
+  const rejected = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(summary)
+  });
+  assert.equal(rejected.type, 'CONTRACT_FAILURE');
+});
+
+test('active causal safety hard-fails Section 1 and localizes unsupported Sections 5-7', async () => {
+  const input = activeUsInput({
+    materialEvents: ['e1', 'e2'], principalCatalysts: ['e2'], supportingEvidence: ['e1']
+  });
+  const summary = normalOutput(input, {furtherReadings: []});
+  summary.sections[0].content = 'Inflation data sent stocks higher in the current session.';
+  const summaryResult = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(summary)
+  });
+  assert.equal(summaryResult.type, 'CONTRACT_FAILURE');
+
+  for (const index of [4, 5, 6]) {
+    const output = normalOutput(input, {furtherReadings: []});
+    output.sections[index].content = 'Inflation data sent stocks higher in the current session.';
+    output.sections[index].evidenceRefs = ['e1'];
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+    });
+    assert.equal(result.type, 'SUCCESS', `section ${index + 1}: ${result.message}`);
+    assert.equal(result.output.status, 'DEGRADED');
+    assert.equal(result.output.sections[index].content, null);
+    assert.deepEqual(result.output.sections[index].evidenceRefs, []);
+  }
+});
+
+test('active Section 2 localizes missing current driver or current principal-catalyst support', async () => {
+  const noDriverInput = activeUsInput();
+  const noDriver = normalOutput(noDriverInput, {furtherReadings: []});
+  noDriver.sections[1].evidenceRefs = ['e2'];
+  const noDriverResult = await invokeClaudeAnalysis({
+    input: noDriverInput, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(noDriver)
+  });
+  assert.equal(noDriverResult.type, 'SUCCESS', noDriverResult.message);
+  assert.equal(noDriverResult.output.sections[1].content, null);
+
+  const noCurrentCatalystInput = activeUsInput({
+    materialEvents: ['e1', 'e2'], principalCatalysts: ['e2'], supportingEvidence: ['e1']
+  });
+  const noCurrentCatalyst = normalOutput(noCurrentCatalystInput, {furtherReadings: []});
+  noCurrentCatalyst.sections[1].content = 'Inflation data sent stocks higher in the current session.';
+  const noCurrentCatalystResult = await invokeClaudeAnalysis({
+    input: noCurrentCatalystInput, apiKey: 'test-key',
+    fetchImpl: async () => anthropicResponse(noCurrentCatalyst)
+  });
+  assert.equal(noCurrentCatalystResult.type, 'SUCCESS', noCurrentCatalystResult.message);
+  assert.equal(noCurrentCatalystResult.output.sections[1].content, null);
 });
 
 test('PRE, REGULAR and POST with zero current refs return an explicit eight-section degraded report without a provider call', async () => {
@@ -541,9 +699,17 @@ test('current-session catalysts support current moves but not prior-session caus
   const completed = normalOutput(input);
   completed.furtherReadings = ['e1'];
   completed.sections[1].content = 'The prior driver sent stocks lower at Friday\'s close.';
-  completed.sections[1].evidenceRefs = ['e2'];
+  completed.sections[1].evidenceRefs = ['e1', 'e2'];
   completed.evidenceReferences = ['e1', 'e2'];
   assert.equal(validateClaudeAnalysisOutput(completed, input).valid, true);
+
+  const supportedBaseline = normalOutput(input);
+  supportedBaseline.furtherReadings = ['e1'];
+  supportedBaseline.sections[0].content = 'Stocks are responding to current developments now. '
+    + 'The prior driver sent stocks lower at Friday\'s close.';
+  supportedBaseline.sections[0].evidenceRefs = ['e1', 'e2'];
+  supportedBaseline.evidenceReferences = ['e1', 'e2'];
+  assert.equal(validateClaudeAnalysisOutput(supportedBaseline, input).valid, true);
 });
 
 test('active Further Readings resolve only cited current Yahoo evidence in citation order', async () => {
