@@ -1790,6 +1790,54 @@ test('keeps network, HTTP and response-body failures distinct and never retries'
   assert.equal(bodyRead.type, 'UPSTREAM_FAILURE');
 });
 
+test('logs only sanitized Anthropic details for a failed final synthesis request', async () => {
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input: canonicalInput(),
+    apiKey: 'test-key',
+    onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async () => ({
+      ok: false,
+      status: 400,
+      headers: {get: name => name === 'request-id' ? 'req_final_123' : null},
+      async json() {
+        return {
+          error: {
+            type: 'invalid_request_error',
+            code: 'invalid_request',
+            message: 'bad request https://api.anthropic.com/v1/messages '
+              + 'prompt=PRIVATE_PROMPT article=PRIVATE_ARTICLE'
+          },
+          sensitive: 'PRIVATE_FULL_PROVIDER_RESPONSE'
+        };
+      }
+    })
+  });
+  assert.equal(result.type, 'UPSTREAM_FAILURE');
+  const event = diagnostics.find(value => value.stage === 'claudeAnalysisUpstreamFailure');
+  assert.deepEqual(event, {
+    stage: 'claudeAnalysisUpstreamFailure',
+    upstreamStatus: 400,
+    upstreamErrorType: 'invalid_request_error',
+    upstreamErrorMessage: 'bad request [url] prompt=PRIVATE_PROMPT article=PRIVATE_ARTICLE',
+    requestId: 'req_final_123'
+  });
+  const serialized = JSON.stringify(event);
+  assert.equal(serialized.includes('PRIVATE_FULL_PROVIDER_RESPONSE'), false);
+  assert.equal(serialized.includes('api.anthropic.com'), false);
+});
+
+test('successful final synthesis emits no upstream-failure diagnostic', async () => {
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input: canonicalInput(), apiKey: 'test-key',
+    onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async () => anthropicResponse(normalOutput(canonicalInput()))
+  });
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(diagnostics.some(value => value.stage === 'claudeAnalysisUpstreamFailure'), false);
+});
+
 test('treats successfully read malformed Anthropic envelopes as contract failures', async () => {
   for (const envelope of [{}, {content: []}, {content: [{type: 'image', source: {}}]}]) {
     const result = await invokeClaudeAnalysis({
