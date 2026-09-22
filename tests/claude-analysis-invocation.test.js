@@ -1465,13 +1465,7 @@ test('provider schema uses an exact keyed section transport without weakening ru
       {
         type: 'object',
         additionalProperties: false,
-        required: ['content', 'evidenceRefs', 'telemetryRefs', 'uncertainties'],
-        properties: {
-          content: {type: ['string', 'null']},
-          evidenceRefs: {type: 'array'},
-          telemetryRefs: {type: 'array'},
-          uncertainties: {type: 'array'}
-        }
+        required: ['content', 'evidenceRefs', 'telemetryRefs', 'uncertainties']
       }
     );
   }
@@ -1753,6 +1747,12 @@ test('hard-fails missing, unknown, and malformed keyed provider section transpor
   const malformedPayload = providerTransport(normalOutput(input));
   malformedPayload.sectionsById[REPORT_SECTION_NAMES[1]] = {content: 'Malformed'};
   cases.push(malformedPayload);
+  const extraPayload = providerTransport(normalOutput(input));
+  extraPayload.sectionsById[REPORT_SECTION_NAMES[1]].unexpected = true;
+  cases.push(extraPayload);
+  const wrongValueType = providerTransport(normalOutput(input));
+  wrongValueType.sectionsById[REPORT_SECTION_NAMES[1]].evidenceRefs = 'e1';
+  cases.push(wrongValueType);
   for (const raw of cases) {
     const diagnostics = [];
     const result = await invokeClaudeAnalysis({
