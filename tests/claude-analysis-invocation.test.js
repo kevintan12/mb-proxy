@@ -1827,6 +1827,26 @@ test('logs only sanitized Anthropic details for a failed final synthesis request
   assert.equal(serialized.includes('api.anthropic.com'), false);
 });
 
+test('logs a sanitized NETWORK_FAILURE when the final Claude fetch rejects', async () => {
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input: canonicalInput(), apiKey: 'test-key',
+    onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async () => { throw new Error('PRIVATE raw exception and prompt contents'); }
+  });
+  assert.equal(result.type, 'UPSTREAM_FAILURE');
+  assert.deepEqual(diagnostics.find(value => value.stage === 'claudeAnalysisUpstreamFailure'), {
+    stage: 'claudeAnalysisUpstreamFailure',
+    upstreamStatus: null,
+    upstreamErrorType: 'NETWORK_FAILURE',
+    upstreamErrorMessage: 'Claude network request failed',
+    requestId: null
+  });
+  const serialized = JSON.stringify(diagnostics);
+  assert.equal(serialized.includes('PRIVATE raw exception'), false);
+  assert.equal(serialized.includes('prompt contents'), false);
+});
+
 test('successful final synthesis emits no upstream-failure diagnostic', async () => {
   const diagnostics = [];
   const result = await invokeClaudeAnalysis({
