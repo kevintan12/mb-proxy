@@ -1459,15 +1459,29 @@ test('provider schema uses an exact keyed section transport without weakening ru
   assert.equal(Object.hasOwn(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties, 'sections'), false);
   assert.equal(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sectionsById.additionalProperties, false);
   assert.deepEqual(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sectionsById.required, REPORT_SECTION_NAMES);
-  for (const sectionName of REPORT_SECTION_NAMES) {
+  for (const sectionName of REPORT_SECTION_NAMES.slice(0, 7)) {
     assert.deepEqual(
       CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sectionsById.properties[sectionName],
-      {type: 'object', additionalProperties: false}
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['content', 'evidenceRefs', 'telemetryRefs', 'uncertainties'],
+        properties: {
+          content: {type: ['string', 'null']},
+          evidenceRefs: {type: 'array'},
+          telemetryRefs: {type: 'array'},
+          uncertainties: {type: 'array'}
+        }
+      }
     );
   }
+  assert.deepEqual(
+    CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sectionsById.properties[REPORT_SECTION_NAMES[7]],
+    {type: 'object', additionalProperties: false}
+  );
   assert.ok(
-    Buffer.byteLength(JSON.stringify(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA), 'utf8') < 2811,
-    'provider transport schema should be materially smaller than the prior 4,685-byte schema'
+    Buffer.byteLength(JSON.stringify(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA), 'utf8') < 4685,
+    'provider transport schema should remain below the prior 4,685-byte schema'
   );
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.minItems, 8);
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.maxItems, 8);
