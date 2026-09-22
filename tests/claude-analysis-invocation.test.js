@@ -357,12 +357,13 @@ test('active synthesis receives exact CURRENT_SESSION refs and state-aware secti
   for (const instruction of [
     'current in-progress session as the primary analytical focus',
     'previous completed session only as historical comparison or baseline',
-    'Section 1 must lead with the current session',
+    'Section 1 must begin its first sentence with the current state',
     'Section 2 must explain current-session drivers',
     'must never be presented as causing the earlier completed-session move',
     'must not list every Most Active security',
     'Section 4 may use supported CURRENT_SESSION news only when its reference is present',
     'Section 5 should explain in plain language whether market gains or losses are broad',
+    'when populated, cite current evidence before any earlier-session context',
     'Section 6 keeps all existing risk and grounded-opportunity rules',
     'Section 7 should prioritize unresolved current-session developments',
     'output top-level furtherReadings as []',
@@ -427,8 +428,10 @@ test('PRE summary must cite current evidence and lead with it, while prior close
   assert.equal(JSON.stringify(diagnostics).includes('Microsoft raised its outlook'), false);
 });
 
-test('REGULAR and POST apply the same current-first Section 1 guard', () => {
+test('PRE, REGULAR and POST reject an indirect prior-session recap at the start of Section 1', () => {
   for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z',
+      '2026-09-08T11:30:00.000Z'],
     ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z',
       '2026-09-08T14:30:00.000Z'],
     ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z',
@@ -438,9 +441,13 @@ test('REGULAR and POST apply the same current-first Section 1 guard', () => {
     const current = normalOutput(input, {furtherReadings: ['e1']});
     assert.equal(validateClaudeAnalysisOutput(current, input).valid, true, marketState);
     const priorFirst = structuredClone(current);
-    priorFirst.sections[0].content = 'Friday dominated the market report. '
-      + `In the ${marketState === 'POST' ? 'post-market' : 'regular session'}, current news followed.`;
-    assert.equal(validateClaudeAnalysisOutput(priorFirst, input).valid, false, marketState);
+    priorFirst.sections[0].content = 'The S&P 500 finished Friday higher after a mixed session. '
+      + 'Current developments are discussed only afterward.';
+    const validation = validateClaudeAnalysisOutput(priorFirst, input);
+    assert.equal(validation.valid, false, marketState);
+    assert.equal(validation.errors.includes(
+      'sections[0]: active summary must lead with the current session'
+    ), true, marketState);
   }
 });
 
@@ -488,12 +495,35 @@ test('PRE, REGULAR and POST accept natural current-first wording, later current 
         marketState, generatedAt, overlayAsOf, currentPublishedAt, includeOverlay
       });
       const output = normalOutput(input, {furtherReadings: ['e1']});
-      output.sections[0].content = 'Stocks are responding to live developments now; the prior close is context only.';
+      output.sections[0].content = 'Stocks are responding to live developments now. '
+        + 'The prior close is context only.';
       output.sections[0].evidenceRefs = ['e2', 'e1'];
       output.evidenceReferences = ['e2', 'e1'];
       assert.equal(validateClaudeAnalysisOutput(output, input).valid, true,
         `${marketState} overlay=${includeOverlay}`);
     }
+  }
+});
+
+test('active Sections 5 and 7 localize rather than lead with earlier-session-only support', async () => {
+  const input = activeUsInput();
+  const output = normalOutput(input, {furtherReadings: ['e1']});
+  output.sections[4].content = 'The market is broadening, but the earlier session remains context.';
+  output.sections[4].evidenceRefs = ['e2'];
+  output.sections[6].content = 'Watch for the next development after the earlier session.';
+  output.sections[6].evidenceRefs = ['e2'];
+  const validation = validateClaudeAnalysisOutput(output, input);
+  for (const index of [4, 6]) assert.equal(validation.errors.includes(
+    `sections[${index}]: active section requires CURRENT_SESSION evidence first`
+  ), true, `section ${index + 1}`);
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  for (const index of [4, 6]) {
+    assert.equal(result.output.sections[index].content, null);
+    assert.deepEqual(result.output.sections[index].evidenceRefs, []);
   }
 });
 
@@ -830,9 +860,11 @@ test('CLOSED, WEEKEND and HOLIDAY retain the completed US validation boundary', 
     input.marketPackages[0].marketContext.marketState = marketState;
     for (const snapshot of input.marketPackages[0].telemetry.benchmarkSnapshots.concat(
       input.marketPackages[0].telemetry.stockSnapshots)) snapshot.snapshot.marketState = marketState;
+    const completedFirst = supportedCompletedUsOutput(input);
+    completedFirst.sections[0].content = 'Friday\'s completed session remains the main market context.';
     const valid = await invokeClaudeAnalysis({
       input, apiKey: 'test-key',
-      fetchImpl: async () => anthropicResponse(supportedCompletedUsOutput(input))
+      fetchImpl: async () => anthropicResponse(completedFirst)
     });
     assert.equal(valid.type, 'SUCCESS', `${marketState}: ${valid.message}`);
     const invalid = supportedCompletedUsOutput(input);
