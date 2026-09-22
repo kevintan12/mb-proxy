@@ -1749,6 +1749,55 @@ test('hard-fails malformed direct transport and preserves internal structural an
   }
 });
 
+test('logs sanitized malformed compact section slot diagnostics without changing validation', async () => {
+  const input = canonicalInput();
+  const cases = [
+    {mutate: raw => { raw.s1 = ['content']; }, slotLength: 1, valueTypes: ['STRING']},
+    {mutate: raw => { raw.s1[0] = []; }, valueTypes: ['ARRAY', 'ARRAY', 'ARRAY', 'ARRAY']},
+    {mutate: raw => { raw.s1[1] = 'e1'; }, valueTypes: ['STRING', 'STRING', 'ARRAY', 'ARRAY']},
+    {mutate: raw => { raw.s1[2] = 't1'; }, valueTypes: ['STRING', 'ARRAY', 'STRING', 'ARRAY']},
+    {mutate: raw => { raw.s1[3] = 'uncertainty'; }, valueTypes: ['STRING', 'ARRAY', 'ARRAY', 'STRING']}
+  ];
+  for (const testCase of cases) {
+    const raw = providerTransport(normalOutput(input));
+    testCase.mutate(raw);
+    const diagnostics = [];
+    const result = await invokeClaudeAnalysis({
+      input,
+      apiKey: 'test-key',
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        async json() { return {content: [{type: 'text', text: JSON.stringify(raw)}]}; }
+      }),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    assert.equal(result.type, 'CONTRACT_FAILURE');
+    const event = diagnostics.find(value => value.stage === 'claudeAnalysisMalformedSectionSlot');
+    assert.ok(event);
+    assert.equal(event.sectionSlot, 's1');
+    assert.equal(event.isArray, true);
+    if (Object.prototype.hasOwnProperty.call(testCase, 'slotLength')) assert.equal(event.slotLength, testCase.slotLength);
+    assert.deepEqual(event.valueTypes, testCase.valueTypes);
+    const serialized = JSON.stringify(event);
+    assert.equal(serialized.includes('Supported analysis.'), false);
+    assert.equal(serialized.includes('uncertainty'), false);
+  }
+});
+
+test('valid compact section slots emit no malformed-slot diagnostic', async () => {
+  const input = canonicalInput();
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input,
+    apiKey: 'test-key',
+    fetchImpl: async () => anthropicResponse(normalOutput(input)),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(diagnostics.some(value => value.stage === 'claudeAnalysisMalformedSectionSlot'), false);
+});
+
 test('normalizes supported FAILED output with sparse optional sections to DEGRADED', async () => {
   const input = canonicalInput();
   const raw = normalOutput(input, {status: 'FAILED', evidenceGaps: []});
