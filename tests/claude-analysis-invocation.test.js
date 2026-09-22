@@ -234,11 +234,25 @@ function activeOutputWithoutCurrentCitation(input) {
   return output;
 }
 
+function providerTransport(output) {
+  if (!output || typeof output !== 'object' || Array.isArray(output)
+      || !Array.isArray(output.sections)) return output;
+  const {sections: reportSections, ...rest} = output;
+  const sectionsById = {};
+  for (const section of reportSections) {
+    if (!section || typeof section !== 'object' || Array.isArray(section)
+        || typeof section.name !== 'string') continue;
+    const {name, ...payload} = section;
+    sectionsById[name] = payload;
+  }
+  return {...rest, sectionsById};
+}
+
 function anthropicResponse(output, overrides = {}) {
   return {
     ok: true,
     status: 200,
-    async json() { return {content: [{type: 'text', text: JSON.stringify(output)}]}; },
+    async json() { return {content: [{type: 'text', text: JSON.stringify(providerTransport(output))}]}; },
     ...overrides
   };
 }
@@ -900,7 +914,7 @@ test('reports deterministic sanitized request sizes and provider usage on succes
       return anthropicResponse(normalOutput(input), {
         async json() {
           return {
-            content: [{type: 'text', text: JSON.stringify(normalOutput(input))}],
+            content: [{type: 'text', text: JSON.stringify(providerTransport(normalOutput(input))) }],
             usage: {
               input_tokens: 123,
               output_tokens: 45,
@@ -985,7 +999,7 @@ test('reports request sizes and optional usage on later contract failure', async
     fetchImpl: async () => anthropicResponse(invalidOutput, {
       async json() {
         return {
-          content: [{type: 'text', text: JSON.stringify(invalidOutput)}],
+          content: [{type: 'text', text: JSON.stringify(providerTransport(invalidOutput))}],
           usage: {input_tokens: 321, service_tier: 'standard'}
         };
       }
@@ -1020,7 +1034,7 @@ test('reports only sanitized Section 4 structure when populated content lacks ev
       headers: {get: name => name === 'request-id' ? 'req_contract_4' : null},
       async json() {
         return {
-          content: [{type: 'text', text: JSON.stringify(invalidOutput)}],
+          content: [{type: 'text', text: JSON.stringify(providerTransport(invalidOutput))}],
           usage: {input_tokens: 321, output_tokens: 45}
         };
       }
@@ -1159,8 +1173,7 @@ test('pre-normalization refs are capped and exclude unknown or noncanonical valu
   assert.deepEqual(diagnostics.find(value => value.stage === 'claudeAnalysisPreNormalization'
     && value.sectionIndex === 6), {
     stage: 'claudeAnalysisPreNormalization', sectionIndex: 6, rawContentIsNull: false,
-    evidenceRefs: ['e1', 'e2', 'e1', 'e2', 'e1', 'e2', 'e1', 'e2'],
-    telemetryRefs: ['t1'], suppliedReferenceCount: 23
+    evidenceRefs: ['e1', 'e2'], telemetryRefs: ['t1'], suppliedReferenceCount: 5
   });
   const serialized = JSON.stringify(diagnostics);
   for (const forbidden of ['PRIVATE PROVIDER RESPONSE', 'e999', 'e1-secret', 't999',
@@ -1194,7 +1207,7 @@ test('gives Claude explicit validator-sensitive Section 4 and Further Readings i
     'No securities are configured in My Stocks.',
     'No securities are configured in Watchlist.',
     'Section 4 evidenceRefs, telemetryRefs, and uncertainties must all be empty arrays',
-    'Section 8 must be exactly {"name":"FURTHER READINGS","content":null,"evidenceRefs":[],"telemetryRefs":[],"uncertainties":[]}',
+    'In sectionsById, the FURTHER READINGS payload must be exactly {"content":null,"evidenceRefs":[],"telemetryRefs":[],"uncertainties":[]}',
     'MarketBrief resolves and renders Further Readings separately',
     "evidenceRef values from each market package's evidenceContext.furtherReadings",
     'If none are supplied, top-level furtherReadings must be []',
@@ -1435,14 +1448,17 @@ test('gives Claude plain-language and locked movement presentation instructions'
   }
 });
 
-test('provider schema is derived without weakening authoritative runtime validation', () => {
-  assert.deepEqual(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.required, CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.required);
+test('provider schema uses an exact keyed section transport without weakening runtime validation', () => {
+  assert.deepEqual(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.required, [
+    'status', 'reportContext', 'sectionsById', 'evidenceReferences', 'furtherReadings', 'evidenceGaps'
+  ]);
   assert.equal(Object.hasOwn(
     CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.evidenceGaps.items, 'minLength'
   ), false);
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.evidenceGaps.items.minLength, 1);
-  assert.equal(Object.hasOwn(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sections, 'minItems'), false);
-  assert.equal(Object.hasOwn(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sections, 'maxItems'), false);
+  assert.equal(Object.hasOwn(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties, 'sections'), false);
+  assert.equal(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sectionsById.additionalProperties, false);
+  assert.deepEqual(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sectionsById.required, REPORT_SECTION_NAMES);
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.minItems, 8);
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.maxItems, 8);
 });
@@ -1655,19 +1671,76 @@ test('classifies malformed or contract-invalid structured reports as CONTRACT_FA
 
   const missing = normalOutput(input);
   missing.sections.pop();
-  const extra = normalOutput(input);
-  extra.sections.push({...extra.sections[7]});
   const renamed = normalOutput(input);
   renamed.sections[0].name = 'RENAMED SECTION';
-  const reordered = normalOutput(input);
-  [reordered.sections[0], reordered.sections[1]] = [reordered.sections[1], reordered.sections[0]];
 
-  for (const output of [missing, extra, renamed, reordered]) {
+  for (const output of [missing, renamed]) {
     const invalid = await invokeClaudeAnalysis({
       input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
     });
     assert.equal(invalid.type, 'CONTRACT_FAILURE');
   }
+});
+
+test('converts keyed provider sections in canonical order and ignores Section 8 transport content', async () => {
+  const input = canonicalInput();
+  const raw = providerTransport(normalOutput(input));
+  raw.sectionsById = Object.fromEntries(Object.entries(raw.sectionsById).reverse());
+  raw.sectionsById[REPORT_SECTION_NAMES[0]] = Object.fromEntries(
+    Object.entries(raw.sectionsById[REPORT_SECTION_NAMES[0]]).reverse()
+  );
+  raw.sectionsById[REPORT_SECTION_NAMES[7]] = {unexpected: 'provider placeholder'};
+  raw.evidenceReferences = ['e999', 'e1'];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.sections.map(section => section.name), REPORT_SECTION_NAMES);
+  assert.deepEqual(result.output.sections[7], {
+    name: REPORT_SECTION_NAMES[7], content: null, evidenceRefs: [], telemetryRefs: [], uncertainties: []
+  });
+  assert.deepEqual(result.output.evidenceReferences, ['e1']);
+});
+
+test('hard-fails missing, unknown, and malformed keyed provider section transport with safe diagnostics', async () => {
+  const input = canonicalInput();
+  const cases = [];
+  const missing = providerTransport(normalOutput(input));
+  delete missing.sectionsById[REPORT_SECTION_NAMES[0]];
+  cases.push(missing);
+  const unknown = providerTransport(normalOutput(input));
+  unknown.sectionsById.UNRELATED = {...unknown.sectionsById[REPORT_SECTION_NAMES[0]]};
+  cases.push(unknown);
+  const malformedPayload = providerTransport(normalOutput(input));
+  malformedPayload.sectionsById[REPORT_SECTION_NAMES[1]] = {content: 'Malformed'};
+  cases.push(malformedPayload);
+  for (const raw of cases) {
+    const diagnostics = [];
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    assert.equal(result.type, 'CONTRACT_FAILURE');
+    const event = diagnostics.find(value => value.stage === 'claudeAnalysisStructureNormalization');
+    assert.ok(event);
+    assert.equal(JSON.stringify(event).includes('Supported analysis.'), false);
+  }
+});
+
+test('normalizes supported FAILED output with sparse optional sections to DEGRADED', async () => {
+  const input = canonicalInput();
+  const raw = normalOutput(input, {status: 'FAILED', evidenceGaps: []});
+  raw.sections[5] = {
+    name: REPORT_SECTION_NAMES[5], content: null, evidenceRefs: [], telemetryRefs: [], uncertainties: []
+  };
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.equal(result.output.sections[0].content !== null, true);
+  assert.deepEqual(result.output.sections[5].evidenceRefs, []);
+  assert.equal(result.output.evidenceGaps.length, 1);
 });
 
 test('rejects model-supplied URLs, provenance and unknown references', async () => {

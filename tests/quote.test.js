@@ -132,6 +132,17 @@ function claudeAnalysisOutput(input) {
   };
 }
 
+function claudeProviderTransport(output) {
+  const {sections, ...rest} = output;
+  return {
+    ...rest,
+    sectionsById: Object.fromEntries(sections.map(section => {
+      const {name, ...payload} = section;
+      return [name, payload];
+    }))
+  };
+}
+
 function analysisPackageRequest() {
   return {
     benchmarkAnchors: [{market: 'US', symbol: '^RUT'}],
@@ -406,7 +417,7 @@ test('structured Claude route returns validated analysis with one server-owned r
       ok: true,
       status: 200,
       async json() {
-        return {content: [{type: 'text', text: JSON.stringify(output)}]};
+        return {content: [{type: 'text', text: JSON.stringify(claudeProviderTransport(output))}]};
       }
     };
   };
@@ -423,9 +434,10 @@ test('structured Claude route returns validated analysis with one server-owned r
     assert.deepEqual(res.body, {result: output});
     assert.equal(JSON.stringify(requestBody).includes('generationId'), false);
     assert.equal(JSON.stringify(res.body).includes('generationId'), false);
-    assert.equal(logs.length, 3);
+    assert.equal(logs.length, 4);
     assert.deepEqual(logs.map(([, value]) => JSON.parse(value).stage || 'invocation'), [
-      'claudeAnalysisPreNormalization', 'claudeAnalysisPreNormalization', 'invocation'
+      'claudeAnalysisStructureNormalization', 'claudeAnalysisPreNormalization',
+      'claudeAnalysisPreNormalization', 'invocation'
     ]);
     for (const [prefix, value] of logs) {
       assert.equal(prefix, '[claude-analysis.invocation]');
@@ -449,7 +461,7 @@ test('structured Claude diagnostics omit absent or invalid generation IDs', asyn
   global.fetch = async (url, options) => {
     assert.equal(JSON.parse(options.body).messages[0].content.includes('generationId'), false);
     return {ok: true, status: 200,
-      async json() { return {content: [{type: 'text', text: JSON.stringify(output)}]}; }};
+      async json() { return {content: [{type: 'text', text: JSON.stringify(claudeProviderTransport(output))}]}; }};
   };
   try {
     for (const generationId of [undefined, ['123e4567-e89b-42d3-a456-426614174000'],
@@ -459,7 +471,7 @@ test('structured Claude diagnostics omit absent or invalid generation IDs', asyn
       assert.equal(res.statusCode, 200);
       assert.equal(JSON.stringify(res.body).includes('generationId'), false);
     }
-    assert.equal(logs.length, 15);
+    assert.equal(logs.length, 20);
     for (const [prefix, value] of logs) {
       assert.equal(prefix, '[claude-analysis.invocation]');
       assert.equal(Object.hasOwn(JSON.parse(value), 'generationId'), false);
@@ -497,7 +509,7 @@ test('structured Claude route separates input, contract and upstream failures', 
         const input = claudeAnalysisInput();
         const output = claudeAnalysisOutput(input);
         output.sections[0].evidenceRefs = ['e2'];
-        return {content: [{type: 'text', text: JSON.stringify(output)}]};
+        return {content: [{type: 'text', text: JSON.stringify(claudeProviderTransport(output))}]};
       }
     });
     const contract = mockRes();

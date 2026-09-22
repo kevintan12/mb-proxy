@@ -19,11 +19,24 @@ const {
   supportedOutput
 } = require('./fixtures/us-market-brief-quality');
 
+function providerTransport(output) {
+  if (!output || typeof output !== 'object' || Array.isArray(output)
+      || !Array.isArray(output.sections)) return output;
+  const {sections, ...rest} = output;
+  return {
+    ...rest,
+    sectionsById: Object.fromEntries(sections.map(section => {
+      const {name, ...payload} = section;
+      return [name, payload];
+    }))
+  };
+}
+
 function finalResponse(output) {
   return {
     ok: true,
     status: 200,
-    async json() { return {content: [{type: 'text', text: JSON.stringify(output)}]}; }
+    async json() { return {content: [{type: 'text', text: JSON.stringify(providerTransport(output))}]}; }
   };
 }
 
@@ -312,7 +325,7 @@ test('rich and thin fixtures survive the complete final invocation boundary with
         status: 200,
         headers: {get: () => null},
         async json() {
-          return {content: [{type: 'text', text: JSON.stringify(output)}]};
+          return {content: [{type: 'text', text: JSON.stringify(providerTransport(output))}]};
         }
       })
     });
