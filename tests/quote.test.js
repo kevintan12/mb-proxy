@@ -133,12 +133,16 @@ function claudeAnalysisOutput(input) {
 }
 
 function claudeProviderTransport(output) {
+  const encode = values => values.join('|');
   return {
     status: output.status,
     evidenceGaps: output.evidenceGaps,
-    ...Object.fromEntries(output.sections.map((section, index) => [`s${index + 1}`, [
-      section.content, section.evidenceRefs, section.telemetryRefs, section.uncertainties
-    ]]))
+    ...Object.fromEntries(output.sections.map((section, index) => [`s${index + 1}`, index === 7 ? {} : {
+      content: section.content,
+      evidenceRefs: encode(section.evidenceRefs),
+      telemetryRefs: encode(section.telemetryRefs),
+      uncertainties: encode(section.uncertainties)
+    }]))
   };
 }
 

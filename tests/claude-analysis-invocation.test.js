@@ -235,12 +235,16 @@ function activeOutputWithoutCurrentCitation(input) {
 }
 
 function providerTransport(output) {
+  const encode = values => values.join('|');
   return {
     status: output.status,
     evidenceGaps: output.evidenceGaps,
-    ...Object.fromEntries(output.sections.map((section, index) => [`s${index + 1}`, [
-      section.content, section.evidenceRefs, section.telemetryRefs, section.uncertainties
-    ]]))
+    ...Object.fromEntries(output.sections.map((section, index) => [`s${index + 1}`, index === 7 ? {} : {
+      content: section.content,
+      evidenceRefs: encode(section.evidenceRefs),
+      telemetryRefs: encode(section.telemetryRefs),
+      uncertainties: encode(section.uncertainties)
+    }]))
   };
 }
 
@@ -1203,7 +1207,7 @@ test('gives Claude explicit validator-sensitive Section 4 and Further Readings i
     'No securities are configured in My Stocks.',
     'No securities are configured in Watchlist.',
     'Section 4 evidenceRefs, telemetryRefs, and uncertainties must all be empty arrays',
-    'Section slot s8 FURTHER READINGS must be exactly [null,[],[],[]]',
+    'Section slot s8 FURTHER READINGS must be exactly {}',
     'MarketBrief resolves and renders Further Readings separately',
     'MarketBrief derives top-level Further Readings and evidenceReferences from the validated sections'
   ]) {
@@ -1440,7 +1444,16 @@ test('gives Claude plain-language and locked movement presentation instructions'
   }
 });
 
-test('provider schema uses direct fixed section slots without nested JSON or report section grammar', () => {
+test('provider schema uses compact named string fields without nested section arrays or report section grammar', () => {
+  const sectionPayload = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['content', 'evidenceRefs', 'telemetryRefs', 'uncertainties'],
+    properties: {
+      content: {type: ['string', 'null']},
+      evidenceRefs: {type: 'string'}, telemetryRefs: {type: 'string'}, uncertainties: {type: 'string'}
+    }
+  };
   assert.deepEqual(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA, {
     type: 'object',
     additionalProperties: false,
@@ -1448,14 +1461,15 @@ test('provider schema uses direct fixed section slots without nested JSON or rep
     properties: {
       status: {type: 'string'},
       evidenceGaps: {type: 'array'},
-      s1: {type: 'array'}, s2: {type: 'array'}, s3: {type: 'array'}, s4: {type: 'array'},
-      s5: {type: 'array'}, s6: {type: 'array'}, s7: {type: 'array'}, s8: {type: 'array'}
+      s1: sectionPayload, s2: sectionPayload, s3: sectionPayload, s4: sectionPayload,
+      s5: sectionPayload, s6: sectionPayload, s7: sectionPayload,
+      s8: {type: 'object', additionalProperties: false, properties: {}}
     }
   });
   assert.equal(JSON.stringify(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA).includes('reportJson'), false);
   assert.ok(
-    Buffer.byteLength(JSON.stringify(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA), 'utf8') < 600,
-    'provider direct transport schema should remain minimal'
+    Buffer.byteLength(JSON.stringify(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA), 'utf8') < 3000,
+    'provider direct transport schema should remain compact'
   );
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.minItems, 8);
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.maxItems, 8);
@@ -1646,17 +1660,20 @@ test('derives top-level evidenceReferences from section first-use order', async 
 });
 
 test('still rejects missing, extra or invalid section-level evidenceRefs', async () => {
-  const missing = normalOutput(canonicalInput());
-  delete missing.sections[0].evidenceRefs;
-  const extra = normalOutput(canonicalInput());
-  extra.sections[0].evidenceRefs = ['e1', 'e2'];
-  const invalid = normalOutput(canonicalInput());
-  invalid.sections[0].evidenceRefs = 'e1';
+  const missing = providerTransport(normalOutput(canonicalInput()));
+  delete missing.s1.evidenceRefs;
+  const extra = providerTransport(normalOutput(canonicalInput()));
+  extra.s1.evidenceRefs = 'e1|e2';
+  const invalid = providerTransport(normalOutput(canonicalInput()));
+  invalid.s1.evidenceRefs = [];
 
   for (const output of [missing, extra, invalid]) {
     const result = await invokeClaudeAnalysis({
       input: canonicalInput(), apiKey: 'test-key',
-      fetchImpl: async () => anthropicResponse(output)
+      fetchImpl: async () => ({
+        ok: true, status: 200,
+        async json() { return {content: [{type: 'text', text: JSON.stringify(output)}]}; }
+      })
     });
     assert.equal(result.type, 'CONTRACT_FAILURE');
   }
@@ -1708,24 +1725,69 @@ test('reconstructs a complete direct transport and preserves the canonical Secti
   assert.deepEqual(result.output.evidenceReferences, ['e1']);
 });
 
+test('parses zero, one, and multiple delimiter-encoded compact section fields deterministically', async () => {
+  const input = canonicalInput({includeSecondEvidence: true});
+  const output = normalOutput(input, {
+    status: 'DEGRADED', evidenceGaps: ['Section 6 has no supported opportunity.']
+  });
+  output.sections[0].evidenceRefs = ['e1', 'e2'];
+  output.sections[0].telemetryRefs = ['t1'];
+  output.sections[0].uncertainties = ['First uncertainty.', 'Second uncertainty.'];
+  output.sections[5] = {
+    name: REPORT_SECTION_NAMES[5], content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['No grounded opportunity is available.']
+  };
+  const raw = providerTransport(output);
+  assert.equal(raw.s1.evidenceRefs, 'e1|e2');
+  assert.equal(raw.s1.telemetryRefs, 't1');
+  assert.equal(raw.s6.evidenceRefs, '');
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => ({
+      ok: true, status: 200,
+      async json() { return {content: [{type: 'text', text: JSON.stringify(raw)}]}; }
+    })
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.sections[0].content !== null, true);
+  assert.deepEqual(result.output.sections[0].evidenceRefs, ['e1', 'e2']);
+  assert.deepEqual(result.output.sections[0].telemetryRefs, ['t1']);
+  assert.deepEqual(result.output.sections[0].uncertainties, ['First uncertainty.', 'Second uncertainty.']);
+  assert.equal(result.output.sections[5].content, null);
+  assert.deepEqual(result.output.sections[5].evidenceRefs, []);
+});
+
+test('rejects malformed or unknown delimiter-encoded compact references without repair', async () => {
+  const input = canonicalInput();
+  const malformed = providerTransport(normalOutput(input));
+  malformed.s1.evidenceRefs = 'e1||e2';
+  const unknown = providerTransport(normalOutput(input));
+  unknown.s1.evidenceRefs = 'e1|e999';
+  for (const raw of [malformed, unknown]) {
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => ({
+        ok: true, status: 200,
+        async json() { return {content: [{type: 'text', text: JSON.stringify(raw)}]}; }
+      })
+    });
+    assert.equal(result.type, 'CONTRACT_FAILURE');
+  }
+});
+
 test('hard-fails malformed direct transport and preserves internal structural and value validation', async () => {
   const input = canonicalInput();
   const missingSection = normalOutput(input);
   missingSection.sections.pop();
-  const malformedPayload = normalOutput(input);
-  malformedPayload.sections[1] = {name: REPORT_SECTION_NAMES[1], content: 'Malformed'};
-  const wrongValueType = normalOutput(input);
-  wrongValueType.sections[1].evidenceRefs = 'e1';
   const missingSlot = providerTransport(normalOutput(input));
   delete missingSlot.s1;
   const unknownTopLevel = providerTransport(normalOutput(input));
   unknownTopLevel.unrelated = true;
   const malformedSlot = providerTransport(normalOutput(input));
-  malformedSlot.s2 = ['Malformed'];
+  malformedSlot.s2 = {content: 'Malformed'};
+  const wrongValueType = providerTransport(normalOutput(input));
+  wrongValueType.s2.evidenceRefs = [];
   const cases = [
     {raw: providerTransport(missingSection)},
-    {raw: providerTransport(malformedPayload)},
-    {raw: providerTransport(wrongValueType)},
+    {raw: wrongValueType},
     {raw: missingSlot},
     {raw: unknownTopLevel},
     {raw: malformedSlot}
@@ -1752,11 +1814,16 @@ test('hard-fails malformed direct transport and preserves internal structural an
 test('logs sanitized malformed compact section slot diagnostics without changing validation', async () => {
   const input = canonicalInput();
   const cases = [
-    {mutate: raw => { raw.s1 = ['content']; }, slotLength: 1, valueTypes: ['STRING']},
-    {mutate: raw => { raw.s1[0] = []; }, valueTypes: ['ARRAY', 'ARRAY', 'ARRAY', 'ARRAY']},
-    {mutate: raw => { raw.s1[1] = 'e1'; }, valueTypes: ['STRING', 'STRING', 'ARRAY', 'ARRAY']},
-    {mutate: raw => { raw.s1[2] = 't1'; }, valueTypes: ['STRING', 'ARRAY', 'STRING', 'ARRAY']},
-    {mutate: raw => { raw.s1[3] = 'uncertainty'; }, valueTypes: ['STRING', 'ARRAY', 'ARRAY', 'STRING']}
+    {mutate: raw => { raw.s1 = {content: 'content'}; }, suppliedFieldCount: 1,
+      fieldTypes: {content: 'STRING', evidenceRefs: 'MISSING', telemetryRefs: 'MISSING', uncertainties: 'MISSING'}},
+    {mutate: raw => { raw.s1.content = []; },
+      fieldTypes: {content: 'ARRAY', evidenceRefs: 'STRING', telemetryRefs: 'STRING', uncertainties: 'STRING'}},
+    {mutate: raw => { raw.s1.evidenceRefs = []; },
+      fieldTypes: {content: 'STRING', evidenceRefs: 'ARRAY', telemetryRefs: 'STRING', uncertainties: 'STRING'}},
+    {mutate: raw => { raw.s1.telemetryRefs = []; },
+      fieldTypes: {content: 'STRING', evidenceRefs: 'STRING', telemetryRefs: 'ARRAY', uncertainties: 'STRING'}},
+    {mutate: raw => { raw.s1.uncertainties = []; },
+      fieldTypes: {content: 'STRING', evidenceRefs: 'STRING', telemetryRefs: 'STRING', uncertainties: 'ARRAY'}}
   ];
   for (const testCase of cases) {
     const raw = providerTransport(normalOutput(input));
@@ -1776,9 +1843,9 @@ test('logs sanitized malformed compact section slot diagnostics without changing
     const event = diagnostics.find(value => value.stage === 'claudeAnalysisMalformedSectionSlot');
     assert.ok(event);
     assert.equal(event.sectionSlot, 's1');
-    assert.equal(event.isArray, true);
-    if (Object.prototype.hasOwnProperty.call(testCase, 'slotLength')) assert.equal(event.slotLength, testCase.slotLength);
-    assert.deepEqual(event.valueTypes, testCase.valueTypes);
+    assert.equal(event.isObject, true);
+    if (Object.prototype.hasOwnProperty.call(testCase, 'suppliedFieldCount')) assert.equal(event.suppliedFieldCount, testCase.suppliedFieldCount);
+    assert.deepEqual(event.fieldTypes, testCase.fieldTypes);
     const serialized = JSON.stringify(event);
     assert.equal(serialized.includes('Supported analysis.'), false);
     assert.equal(serialized.includes('uncertainty'), false);
