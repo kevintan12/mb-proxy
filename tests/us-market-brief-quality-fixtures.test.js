@@ -2,7 +2,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   validateClaudeAnalysisInput,
-  validateClaudeAnalysisOutput
+  validateClaudeAnalysisOutput,
+  normalizePlainEnglishText,
+  hasAnalystDeskJargon
 } = require('../lib/claude-analysis-contract');
 const {
   buildClaudeAnalysisRequest,
@@ -747,14 +749,40 @@ test('preserves the deterministic empty initiating-list statement', async () => 
   assert.deepEqual(result.output.sections[3], output.sections[3]);
 });
 
-test('plain-English fixtures characterize the prompt-owned quality boundary without runtime jargon rejection', () => {
+test('plain-English style is deterministic: raw analyst jargon is rejected and known phrases normalize safely', async () => {
   const input = richCompletedUsWeekInput();
   const good = supportedOutput(input, {plainEnglish: true});
   const bad = supportedOutput(input, {plainEnglish: false});
   assert.equal(validateClaudeAnalysisOutput(good, input).valid, true);
-  assert.equal(validateClaudeAnalysisOutput(bad, input).valid, true);
+  const rawValidation = validateClaudeAnalysisOutput(bad, input);
+  assert.equal(rawValidation.valid, false);
+  assert.equal(rawValidation.errors.some(error =>
+    error.includes('analyst jargon requires plain-language wording')), true);
+  const normalized = await invokeFixture(input, bad);
+  assert.equal(normalized.type, 'SUCCESS', normalized.message);
+  const rendered = normalized.output.sections.map(section => section.content).filter(Boolean).join(' ');
+  assert.doesNotMatch(rendered, /equity positioning|rate-path expectations|reallocation momentum/i);
+  assert.match(rendered, /how investors are already invested in stocks/i);
   const system = buildClaudeAnalysisRequest(input).system;
   assert.match(system, /clear, normal spoken English/);
-  assert.match(system, /Avoid institutional or analyst-desk jargon/);
+  assert.match(system, /cyclical participants, risk appetite, asymmetric risk-reward/);
   assert.match(system, /Preserve analytical depth: simplify wording, not reasoning/);
+});
+
+test('plain-English normalization covers the active-session analyst phrases without changing reasoning', () => {
+  const jargon = [
+    'cyclical participants',
+    'risk appetite',
+    'asymmetric risk-reward',
+    'consolidation thesis',
+    'selective sentiment / positioning',
+    'positioning'
+  ];
+  for (const phrase of jargon) {
+    const raw = `The market discussion used ${phrase}.`;
+    const normalized = normalizePlainEnglishText(raw);
+    assert.equal(hasAnalystDeskJargon(raw), true, phrase);
+    assert.equal(hasAnalystDeskJargon(normalized), false, normalized);
+    assert.notEqual(normalized, raw, phrase);
+  }
 });
