@@ -20,16 +20,7 @@ const {
 } = require('./fixtures/us-market-brief-quality');
 
 function providerTransport(output) {
-  if (!output || typeof output !== 'object' || Array.isArray(output)
-      || !Array.isArray(output.sections)) return output;
-  const {sections, ...rest} = output;
-  return {
-    ...rest,
-    sectionsById: Object.fromEntries(sections.map(section => {
-      const {name, ...payload} = section;
-      return [name, payload];
-    }))
-  };
+  return {reportJson: JSON.stringify(output)};
 }
 
 function finalResponse(output) {

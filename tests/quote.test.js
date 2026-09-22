@@ -133,14 +133,7 @@ function claudeAnalysisOutput(input) {
 }
 
 function claudeProviderTransport(output) {
-  const {sections, ...rest} = output;
-  return {
-    ...rest,
-    sectionsById: Object.fromEntries(sections.map(section => {
-      const {name, ...payload} = section;
-      return [name, payload];
-    }))
-  };
+  return {reportJson: JSON.stringify(output)};
 }
 
 function analysisPackageRequest() {
