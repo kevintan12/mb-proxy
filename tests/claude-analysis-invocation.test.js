@@ -33,6 +33,10 @@ const {
 } = require('../lib/claude-analysis-invocation');
 const {projectClaudeAnalysisInput} = require('../lib/claude-model-input-projection');
 const {
+  richCompletedUsWeekInput,
+  supportedOutput: supportedCompletedUsOutput
+} = require('./fixtures/us-market-brief-quality');
+const {
   createUsActiveSessionAnchor,
   serializeUsActiveSessionAnchor
 } = require('../lib/us-active-session-evidence');
@@ -109,7 +113,8 @@ function activeUsInput({
   includeOverlay = true,
   materialEvents = ['e1', 'e2'],
   principalCatalysts = ['e1', 'e2'],
-  supportingEvidence = ['e2']
+  supportingEvidence = ['e2'],
+  broadMarketFocus = [{evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]}]
 } = {}) {
   const activeSessionAnchor = serializeUsActiveSessionAnchor(createUsActiveSessionAnchor({
     marketState,
@@ -168,9 +173,7 @@ function activeUsInput({
         materialEvents, authoritativeFacts: [],
         principalCatalysts, supportingEvidence,
         conflictingEvidence: [], subsequentDevelopments: [], sessionAssociations: [],
-        broadMarketFocus: [{
-          evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]
-        }],
+        broadMarketFocus,
         unresolvedGaps: [], furtherReadings: []
       }
     }],
@@ -524,9 +527,7 @@ test('active citation repair rejects ambiguous or invalid generated attribution'
     onDiagnostics: event => invalidDiagnostics.push(event)
   });
   assert.equal(invalidResult.type, 'CONTRACT_FAILURE');
-  const invalidEvent = invalidDiagnostics.find(event => event.stage === 'activeSessionOutput');
-  assert.equal(invalidEvent.deterministicCitationRepairApplied, false);
-  assert.equal(invalidEvent.repairedCurrentSessionRefCount, 0);
+  assert.equal(invalidDiagnostics.some(event => event.stage === 'activeSessionOutput'), false);
 });
 
 test('PRE, REGULAR and POST preserve strict ambiguity when multiple current refs exist', async () => {
@@ -583,17 +584,14 @@ test('active FAILED is rejected when usable current evidence exists', async () =
   assert.equal(result.type, 'CONTRACT_FAILURE');
 });
 
-test('active optional unknown references localize while an unknown Section 1 ref remains a hard failure', async () => {
+test('unknown references in active optional sections and Section 1 remain hard failures', async () => {
   const input = activeUsInput();
   const optional = normalOutput(input, {furtherReadings: []});
   optional.sections[4].evidenceRefs = ['e999'];
-  const localized = await invokeClaudeAnalysis({
+  const rejectedOptional = await invokeClaudeAnalysis({
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(optional)
   });
-  assert.equal(localized.type, 'SUCCESS', localized.message);
-  assert.equal(localized.output.status, 'DEGRADED');
-  assert.equal(localized.output.sections[4].content, null);
-  assert.deepEqual(localized.output.sections[4].evidenceRefs, []);
+  assert.equal(rejectedOptional.type, 'CONTRACT_FAILURE');
 
   const summary = normalOutput(input, {furtherReadings: []});
   summary.sections[0].evidenceRefs = ['e999'];
@@ -649,6 +647,201 @@ test('active Section 2 localizes missing current driver or current principal-cat
   });
   assert.equal(noCurrentCatalystResult.type, 'SUCCESS', noCurrentCatalystResult.message);
   assert.equal(noCurrentCatalystResult.output.sections[1].content, null);
+});
+
+test('PRE, REGULAR and POST retain a cautious Section 1 with one LOW current article', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt, sessionPhrase] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z',
+      '2026-09-08T11:30:00.000Z', 'on September 8'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z',
+      '2026-09-08T14:30:00.000Z', 'on 2026-09-08'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z',
+      '2026-09-08T20:30:00.000Z', 'on 9/8/2026']
+  ]) {
+    const input = structuredClone(activeUsInput({
+      marketState, generatedAt, overlayAsOf, currentPublishedAt,
+      materialEvents: [], principalCatalysts: [], supportingEvidence: ['e1'],
+      broadMarketFocus: []
+    }));
+    const output = normalOutput(input);
+    output.sections[0].content = `Stocks rose ${sessionPhrase} in the current session as Microsoft news was reported. `
+      + 'The previous close is comparison only.';
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+    });
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(result.output.status, 'DEGRADED');
+    assert.equal(result.output.sections[0].content, output.sections[0].content);
+    assert.deepEqual(result.output.sections[0].evidenceRefs, ['e1']);
+    assert.equal(result.output.sections[1].content, null);
+    assert.equal(result.output.sections[2].content, null);
+  }
+});
+
+test('active optional section defects localize together without retaining unsupported prose', async () => {
+  const input = activeUsInput({
+    materialEvents: ['e1', 'e2'], principalCatalysts: ['e2'], supportingEvidence: ['e1']
+  });
+  const output = normalOutput(input);
+  output.sections[1].content = 'Current news sent stocks higher.';
+  output.sections[2].content = 'Generic broad-market mover commentary.';
+  output.sections[3].content = 'Unsupported initiating-list movement.';
+  output.sections[5].content = 'A bullish opportunity may exist.';
+  output.sections[6].content = 'An unsupported future catalyst is certain.';
+  output.sections[6].evidenceRefs = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  for (const index of [1, 2, 5, 6]) {
+    assert.equal(result.output.sections[index].content, null, `section ${index + 1}`);
+    assert.deepEqual(result.output.sections[index].evidenceRefs, []);
+    assert.deepEqual(result.output.sections[index].telemetryRefs, []);
+    assert.equal(result.output.sections[index].uncertainties.length > 0, true);
+  }
+  assert.equal(result.output.sections[3].content, EMPTY_INITIATING_LIST_CONTENT.myStocks);
+  assert.deepEqual(result.output.sections[3].evidenceRefs, []);
+});
+
+test('active Section 4 with a nonempty initiating list localizes cross-list support', async () => {
+  const input = structuredClone(activeUsInput());
+  input.portfolioContext.myStocks = [{
+    market: 'US', symbol: 'MSFT', telemetryRefs: [], evidenceRefs: ['e1'], upcomingEvents: []
+  }];
+  input.portfolioContext.watchlist = [{
+    market: 'US', symbol: 'AAPL', telemetryRefs: [], evidenceRefs: ['e2'], upcomingEvents: []
+  }];
+  const output = normalOutput(input);
+  output.sections[3].content = 'Apple watchlist movement was material.';
+  output.sections[3].evidenceRefs = ['e2'];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.equal(result.output.sections[3].content, null);
+  assert.deepEqual(result.output.sections[3].evidenceRefs, []);
+});
+
+test('active optional formatting and whole-report word overflow localize without changing Section 1', async () => {
+  const input = activeUsInput();
+  for (const [mutate, expectedStatus, localized] of [
+    [output => { output.sections[4].uncertainties = ['Repeated.', 'Repeated.']; }, 'NORMAL', false],
+    [output => { output.sections[4].content = 'context '.repeat(2550).trim(); }, 'DEGRADED', true]
+  ]) {
+    const output = normalOutput(input);
+    mutate(output);
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+    });
+    assert.equal(result.type, 'SUCCESS', result.message);
+    assert.equal(result.output.status, expectedStatus);
+    assert.notEqual(result.output.sections[0].content, null);
+    if (localized) {
+      assert.equal(result.output.sections[4].content, null);
+      assert.deepEqual(result.output.sections[4].evidenceRefs, []);
+    } else {
+      assert.deepEqual(result.output.sections[4].uncertainties, ['Repeated.']);
+    }
+  }
+});
+
+test('active Section 3 lacking cited focus or an exact focus subject localizes', async () => {
+  const input = activeUsInput();
+  for (const evidenceRefs of [['e2'], ['e1']]) {
+    const output = normalOutput(input);
+    output.sections[2].content = 'Generic stocks and sectors discussion.';
+    output.sections[2].evidenceRefs = evidenceRefs;
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+    });
+    assert.equal(result.type, 'SUCCESS', result.message);
+    assert.equal(result.output.sections[2].content, null);
+    assert.equal(result.output.status, 'DEGRADED');
+  }
+});
+
+test('active supported Section 1 overrides model FAILED but strong and prior-session causality still fail', async () => {
+  const input = activeUsInput({
+    materialEvents: [], principalCatalysts: [], supportingEvidence: ['e1'],
+    broadMarketFocus: []
+  });
+  const failed = normalOutput(input, {status: 'FAILED', evidenceGaps: []});
+  const normalized = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(failed)
+  });
+  assert.equal(normalized.type, 'SUCCESS', normalized.message);
+  assert.equal(normalized.output.status, 'DEGRADED');
+  assert.notEqual(normalized.output.sections[0].content, null);
+
+  for (const content of [
+    'Microsoft news sent stocks higher in the current session.',
+    "Microsoft news sent stocks higher at Friday's close."
+  ]) {
+    const strong = normalOutput(input);
+    strong.sections[0].content = content;
+    const rejected = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(strong)
+    });
+    assert.equal(rejected.type, 'CONTRACT_FAILURE');
+  }
+});
+
+test('active report status follows surviving content and material evidence gaps', async () => {
+  const input = activeUsInput();
+  for (const [status, evidenceGaps, expectedStatus] of [
+    ['NORMAL', ['A current market driver remains unresolved.'], 'DEGRADED'],
+    ['DEGRADED', [], 'NORMAL']
+  ]) {
+    const output = normalOutput(input, {status, evidenceGaps});
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+    });
+    assert.equal(result.type, 'SUCCESS', result.message);
+    assert.equal(result.output.status, expectedStatus);
+    assert.notEqual(result.output.sections[0].content, null);
+  }
+});
+
+test('active transport metadata is canonicalized without changing grounded analysis', async () => {
+  const input = activeUsInput();
+  const output = normalOutput(input, {status: 'unexpected', evidenceGaps: [null, ' ', ' Gap. ', 'Gap.']});
+  output.sections[0].telemetryRefs = ['t1', 't1'];
+  output.sections[0].uncertainties = [' Current coverage is limited. ', '', 'Current coverage is limited.'];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.deepEqual(result.output.evidenceGaps, ['Gap.']);
+  assert.deepEqual(result.output.sections[0].telemetryRefs, ['t1']);
+  assert.deepEqual(result.output.sections[0].uncertainties, ['Current coverage is limited.']);
+});
+
+test('CLOSED, WEEKEND and HOLIDAY retain the completed US validation boundary', async () => {
+  for (const [marketState, generatedAt] of [
+    ['CLOSED', '2026-09-04T22:00:00.000Z'],
+    ['WEEKEND', '2026-09-06T10:00:00.000Z'],
+    ['HOLIDAY', '2026-09-07T16:00:00.000Z']
+  ]) {
+    const input = structuredClone(richCompletedUsWeekInput());
+    input.analysisRequest.generatedAt = generatedAt;
+    input.marketPackages[0].marketContext.marketState = marketState;
+    for (const snapshot of input.marketPackages[0].telemetry.benchmarkSnapshots.concat(
+      input.marketPackages[0].telemetry.stockSnapshots)) snapshot.snapshot.marketState = marketState;
+    const valid = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key',
+      fetchImpl: async () => anthropicResponse(supportedCompletedUsOutput(input))
+    });
+    assert.equal(valid.type, 'SUCCESS', `${marketState}: ${valid.message}`);
+    const invalid = supportedCompletedUsOutput(input);
+    invalid.sections[2].content = 'Generic index commentary.';
+    const rejected = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(invalid)
+    });
+    assert.equal(rejected.type, 'CONTRACT_FAILURE', marketState);
+  }
 });
 
 test('PRE, REGULAR and POST with zero current refs return an explicit eight-section degraded report without a provider call', async () => {
