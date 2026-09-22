@@ -1462,7 +1462,7 @@ test('provider schema uses an exact keyed section transport without weakening ru
   for (const sectionName of REPORT_SECTION_NAMES) {
     assert.deepEqual(
       CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA.properties.sectionsById.properties[sectionName],
-      {type: 'object'}
+      {type: 'object', additionalProperties: false}
     );
   }
   assert.ok(
@@ -1471,6 +1471,21 @@ test('provider schema uses an exact keyed section transport without weakening ru
   );
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.minItems, 8);
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.maxItems, 8);
+});
+
+test('every provider schema object explicitly rejects additional properties', () => {
+  const visit = (node, path = 'schema') => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach((child, index) => visit(child, `${path}[${index}]`));
+      return;
+    }
+    if (node.type === 'object') {
+      assert.equal(node.additionalProperties, false, path);
+    }
+    Object.entries(node).forEach(([key, child]) => visit(child, `${path}.${key}`));
+  };
+  visit(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA);
 });
 
 test('accepts valid NORMAL, DEGRADED and FAILED structured reports with one request each', async () => {
