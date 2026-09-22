@@ -235,7 +235,13 @@ function activeOutputWithoutCurrentCitation(input) {
 }
 
 function providerTransport(output) {
-  return {reportJson: JSON.stringify(output)};
+  return {
+    status: output.status,
+    evidenceGaps: output.evidenceGaps,
+    ...Object.fromEntries(output.sections.map((section, index) => [`s${index + 1}`, [
+      section.content, section.evidenceRefs, section.telemetryRefs, section.uncertainties
+    ]]))
+  };
 }
 
 function anthropicResponse(output, overrides = {}) {
@@ -1197,13 +1203,9 @@ test('gives Claude explicit validator-sensitive Section 4 and Further Readings i
     'No securities are configured in My Stocks.',
     'No securities are configured in Watchlist.',
     'Section 4 evidenceRefs, telemetryRefs, and uncertainties must all be empty arrays',
-    'In reportJson, the FURTHER READINGS payload must be exactly {"name":"FURTHER READINGS","content":null,"evidenceRefs":[],"telemetryRefs":[],"uncertainties":[]}',
+    'Section slot s8 FURTHER READINGS must be exactly [null,[],[],[]]',
     'MarketBrief resolves and renders Further Readings separately',
-    "evidenceRef values from each market package's evidenceContext.furtherReadings",
-    'If none are supplied, top-level furtherReadings must be []',
-    'scanning sections in report order',
-    "each section's evidenceRefs in listed order",
-    'adding each evidence reference only once at its first appearance'
+    'MarketBrief derives top-level Further Readings and evidenceReferences from the validated sections'
   ]) {
     assert.equal(system.includes(requirement), true, requirement);
   }
@@ -1438,17 +1440,22 @@ test('gives Claude plain-language and locked movement presentation instructions'
   }
 });
 
-test('provider schema uses a closed reportJson wrapper without report section grammar', () => {
+test('provider schema uses direct fixed section slots without nested JSON or report section grammar', () => {
   assert.deepEqual(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA, {
     type: 'object',
     additionalProperties: false,
-    required: ['reportJson'],
-    properties: {reportJson: {type: 'string'}}
+    required: ['status', 'evidenceGaps', 's1', 's2', 's3', 's4', 's5', 's6', 's7', 's8'],
+    properties: {
+      status: {type: 'string'},
+      evidenceGaps: {type: 'array'},
+      s1: {type: 'array'}, s2: {type: 'array'}, s3: {type: 'array'}, s4: {type: 'array'},
+      s5: {type: 'array'}, s6: {type: 'array'}, s7: {type: 'array'}, s8: {type: 'array'}
+    }
   });
-  assert.equal(JSON.stringify(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA).includes('sections'), false);
+  assert.equal(JSON.stringify(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA).includes('reportJson'), false);
   assert.ok(
-    Buffer.byteLength(JSON.stringify(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA), 'utf8') < 200,
-    'provider wrapper schema should remain minimal'
+    Buffer.byteLength(JSON.stringify(CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA), 'utf8') < 600,
+    'provider direct transport schema should remain minimal'
   );
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.minItems, 8);
   assert.equal(CLAUDE_ANALYSIS_OUTPUT_JSON_SCHEMA.properties.sections.maxItems, 8);
@@ -1677,10 +1684,8 @@ test('classifies malformed or contract-invalid structured reports as CONTRACT_FA
 
   const missing = normalOutput(input);
   missing.sections.pop();
-  const renamed = normalOutput(input);
-  renamed.sections[0].name = 'RENAMED SECTION';
 
-  for (const output of [missing, renamed]) {
+  for (const output of [missing]) {
     const invalid = await invokeClaudeAnalysis({
       input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
     });
@@ -1688,7 +1693,7 @@ test('classifies malformed or contract-invalid structured reports as CONTRACT_FA
   }
 });
 
-test('parses a complete reportJson and preserves the canonical Section 8 placeholder', async () => {
+test('reconstructs a complete direct transport and preserves the canonical Section 8 placeholder', async () => {
   const input = canonicalInput();
   const raw = normalOutput(input);
   raw.evidenceReferences = ['e999', 'e1'];
@@ -1703,26 +1708,27 @@ test('parses a complete reportJson and preserves the canonical Section 8 placeho
   assert.deepEqual(result.output.evidenceReferences, ['e1']);
 });
 
-test('hard-fails malformed reportJson wrappers and preserves internal structural and value validation', async () => {
+test('hard-fails malformed direct transport and preserves internal structural and value validation', async () => {
   const input = canonicalInput();
   const missingSection = normalOutput(input);
   missingSection.sections.pop();
-  const unknownSection = normalOutput(input);
-  unknownSection.sections[0].name = 'UNRELATED';
   const malformedPayload = normalOutput(input);
   malformedPayload.sections[1] = {name: REPORT_SECTION_NAMES[1], content: 'Malformed'};
-  const extraPayload = normalOutput(input);
-  extraPayload.sections[1].unexpected = true;
   const wrongValueType = normalOutput(input);
   wrongValueType.sections[1].evidenceRefs = 'e1';
+  const missingSlot = providerTransport(normalOutput(input));
+  delete missingSlot.s1;
+  const unknownTopLevel = providerTransport(normalOutput(input));
+  unknownTopLevel.unrelated = true;
+  const malformedSlot = providerTransport(normalOutput(input));
+  malformedSlot.s2 = ['Malformed'];
   const cases = [
-    {raw: {reportJson: JSON.stringify(missingSection)}},
-    {raw: {reportJson: JSON.stringify(unknownSection)}},
-    {raw: {reportJson: JSON.stringify(malformedPayload)}},
-    {raw: {reportJson: JSON.stringify(extraPayload)}},
-    {raw: {reportJson: JSON.stringify(wrongValueType)}},
-    {raw: {}},
-    {raw: {reportJson: '{'}}
+    {raw: providerTransport(missingSection)},
+    {raw: providerTransport(malformedPayload)},
+    {raw: providerTransport(wrongValueType)},
+    {raw: missingSlot},
+    {raw: unknownTopLevel},
+    {raw: malformedSlot}
   ];
   for (const {raw} of cases) {
     const diagnostics = [];
@@ -1759,10 +1765,9 @@ test('normalizes supported FAILED output with sparse optional sections to DEGRAD
   assert.equal(result.output.evidenceGaps.length, 1);
 });
 
-test('rejects model-supplied URLs, provenance and unknown references', async () => {
+test('rejects unknown references that survive the direct transport', async () => {
   const input = canonicalInput();
   const outputs = [
-    {...normalOutput(input), canonicalUrl: 'https://example.com/'},
     normalOutput(input, {sections: REPORT_SECTION_NAMES.map((name, index) => ({
       name, content: index === 7 ? null : 'Finding.',
       evidenceRefs: index === 7 ? [] : ['e2'], telemetryRefs: index === 7 ? [] : ['t1'],

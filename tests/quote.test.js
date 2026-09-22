@@ -133,7 +133,13 @@ function claudeAnalysisOutput(input) {
 }
 
 function claudeProviderTransport(output) {
-  return {reportJson: JSON.stringify(output)};
+  return {
+    status: output.status,
+    evidenceGaps: output.evidenceGaps,
+    ...Object.fromEntries(output.sections.map((section, index) => [`s${index + 1}`, [
+      section.content, section.evidenceRefs, section.telemetryRefs, section.uncertainties
+    ]]))
+  };
 }
 
 function analysisPackageRequest() {
