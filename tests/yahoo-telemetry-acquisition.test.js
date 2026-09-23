@@ -54,6 +54,18 @@ function normalRows(timeSuffix = 'T01:00:00Z') {
   ];
 }
 
+function preRowsWithSep22NullClose() {
+  const dates = ['2026-09-22', '2026-09-21', '2026-09-18', '2026-09-17', '2026-09-16',
+    '2026-09-15', '2026-09-14', '2026-09-11', '2026-09-10', '2026-09-09'];
+  return dates.map((date, index) => {
+    const close = 100 - index;
+    return row(date, index === 0 ? null : close, {
+      time: `${date}T13:30:00Z`,
+      ...(index === 0 ? {open: 101, high: 104, low: 99, volume: 1000} : {})
+    });
+  });
+}
+
 function serviceFor({market = 'SG', instant = '2026-09-04T10:00:00Z', rows = normalRows(), meta = {}} = {}) {
   const calls = [];
   const service = createYahooTelemetryAcquisitionService({
@@ -130,6 +142,78 @@ test('skips full-day weekends and holidays when deriving expected sessions', asy
   ]);
   assert.equal(snapshot.completedSessions[4].previousClose, 102);
   assert.equal(snapshot.completeness, 'COMPLETE');
+});
+
+test('US PRE accepts the expected completed bar close from corroborating Yahoo metadata', async () => {
+  for (const symbol of ['^DJI', '^GSPC', '^IXIC']) {
+    const {service} = serviceFor({
+      market: 'US',
+      instant: '2026-09-23T12:00:00Z',
+      rows: preRowsWithSep22NullClose(),
+      meta: {
+        currency: 'USD',
+        regularMarketPrice: 103,
+        regularMarketTime: epoch('2026-09-22T20:00:00Z')
+      }
+    });
+    const snapshot = await service.acquireSnapshot({market: 'US', symbol});
+    assert.equal(snapshot.marketState, 'PRE');
+    assert.equal(snapshot.primaryCompletedSessionDate, '2026-09-22');
+    assert.equal(snapshot.completedSessions.at(-1).sessionDate, '2026-09-22');
+    assert.equal(snapshot.completedSessions.at(-1).close, 103);
+    assert.equal(validateFiveSessionSnapshot(snapshot).valid, true);
+  }
+});
+
+test('US completed-close fallback rejects mismatched, early, future and out-of-range metadata', async () => {
+  const rejectedMetadata = [
+    {regularMarketPrice: 103, regularMarketTime: epoch('2026-09-21T20:00:00Z')},
+    {regularMarketPrice: 103, regularMarketTime: epoch('2026-09-22T19:59:59Z')},
+    {
+      instant: '2026-09-22T20:30:00Z',
+      regularMarketPrice: 103,
+      regularMarketTime: epoch('2026-09-22T20:30:01Z')
+    },
+    {regularMarketPrice: 105, regularMarketTime: epoch('2026-09-22T20:00:00Z')}
+  ];
+  for (const metadata of rejectedMetadata) {
+    const {service} = serviceFor({
+      market: 'US',
+      instant: metadata.instant || '2026-09-23T12:00:00Z',
+      rows: preRowsWithSep22NullClose(),
+      meta: {currency: 'USD', ...metadata}
+    });
+    const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+    assert.equal(snapshot.completedSessions.at(-1).sessionDate, '2026-09-21');
+  }
+});
+
+test('non-null chart close stays authoritative and S.tz does not affect US fallback dates', async () => {
+  const rows = preRowsWithSep22NullClose();
+  rows[0] = row('2026-09-22', 102, {
+    time: '2026-09-22T13:30:00Z', open: 101, high: 104, low: 99, volume: 1000
+  });
+  const oldS = global.S;
+  global.S = {tz: 'Pacific/Honolulu'};
+  try {
+    const {service} = serviceFor({
+      market: 'US',
+      instant: '2026-09-23T12:00:00Z',
+      rows,
+      meta: {
+        currency: 'USD',
+        regularMarketPrice: 103,
+        regularMarketTime: epoch('2026-09-22T20:00:00Z')
+      }
+    });
+    const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+    assert.equal(snapshot.primaryCompletedSessionDate, '2026-09-22');
+    assert.equal(snapshot.completedSessions.at(-1).close, 102);
+    assert.equal(snapshot.exchangeTimezone, ZONES.US);
+  } finally {
+    if (oldS === undefined) delete global.S;
+    else global.S = oldS;
+  }
 });
 
 test('derives close instants independently of Yahoo daily-row timestamps and ignores provider timezone metadata', async () => {
