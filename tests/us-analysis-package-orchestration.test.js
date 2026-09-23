@@ -3904,6 +3904,65 @@ test('fails closed for required telemetry, persistence and Yahoo evidence failur
   await assert.rejects(yahoo.assemble(request()), /Yahoo failed/);
 });
 
+test('logs sanitized snapshot persistence and readback validation failure subtypes', async () => {
+  const persistenceSubtypes = [
+    'SNAPSHOT_READ_INVALID',
+    'SNAPSHOT_CALENDAR_UNSUPPORTED',
+    'SNAPSHOT_CONTINUITY_INVALID',
+    'SNAPSHOT_READ_MISMATCH',
+    'SNAPSHOT_PERSISTENCE_FAILED'
+  ];
+
+  for (const failureSubtype of persistenceSubtypes) {
+    const diagnostics = [];
+    const failure = Object.assign(new Error('secret persisted row and provider payload'), {
+      code: failureSubtype,
+      persistedRows: [{close: 123.45}],
+      providerPayload: {secret: 'must-not-leak'}
+    });
+    const instance = harness({
+      snapshotPersistence: {async persistSnapshot() { throw failure; }},
+      onDiagnostics(value) { diagnostics.push(value); }
+    });
+
+    await assert.rejects(instance.service.assemble(request()), error => error === failure);
+    assert.deepEqual(
+      diagnostics.find(value => value.stage === 'snapshotPersistenceReadbackFailure'),
+      {
+        stage: 'snapshotPersistenceReadbackFailure',
+        symbol: '^RUT',
+        boundary: 'PERSISTENCE',
+        failureSubtype
+      }
+    );
+    assert.deepEqual(instance.calls.yahoo, []);
+    const serialized = JSON.stringify(diagnostics);
+    assert.equal(serialized.includes('secret persisted row'), false);
+    assert.equal(serialized.includes('must-not-leak'), false);
+    assert.equal(serialized.includes('123.45'), false);
+  }
+
+  const diagnostics = [];
+  const invalidReadback = harness({
+    snapshotPersistence: {async persistSnapshot() { return snapshot('WRONG'); }},
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  await assert.rejects(
+    invalidReadback.service.assemble(request()),
+    /Invalid canonical US snapshot for \^RUT/
+  );
+  assert.deepEqual(
+    diagnostics.find(value => value.stage === 'snapshotPersistenceReadbackFailure'),
+    {
+      stage: 'snapshotPersistenceReadbackFailure',
+      symbol: '^RUT',
+      boundary: 'POST_READBACK_VALIDATION',
+      failureSubtype: 'INVALID_PERSISTED_SNAPSHOT'
+    }
+  );
+  assert.deepEqual(invalidReadback.calls.yahoo, []);
+});
+
 test('rejects inconsistent persisted reconstruction and malformed provider material', async () => {
   const wrongPersistence = harness({
     snapshotPersistence: {async persistSnapshot() { return snapshot('WRONG'); }}
