@@ -114,7 +114,8 @@ function activeUsInput({
   materialEvents = ['e1', 'e2'],
   principalCatalysts = ['e1', 'e2'],
   supportingEvidence = ['e2'],
-  broadMarketFocus = [{evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]}]
+  broadMarketFocus = [{evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]}],
+  portfolioContext = {myStocks: [], watchlist: []}
 } = {}) {
   const activeSessionAnchor = serializeUsActiveSessionAnchor(createUsActiveSessionAnchor({
     marketState,
@@ -177,7 +178,7 @@ function activeUsInput({
         unresolvedGaps: [], furtherReadings: []
       }
     }],
-    portfolioContext: {myStocks: [], watchlist: []}
+    portfolioContext
   });
 }
 
@@ -234,6 +235,21 @@ function activeOutputWithoutCurrentCitation(input) {
     uncertainties: ['No broad-market focus analysis was generated.']
   };
   output.evidenceReferences = ['e2'];
+  return output;
+}
+
+function activeOutputWithOnlySection(input, index) {
+  const output = normalOutput(input, {
+    status: 'DEGRADED',
+    evidenceGaps: ['Other analytical sections were not supported by the supplied evidence.']
+  });
+  for (let sectionIndex = 0; sectionIndex < REPORT_SECTION_NAMES.length - 1; sectionIndex++) {
+    if (sectionIndex === index) continue;
+    output.sections[sectionIndex] = {...output.sections[sectionIndex], content: null,
+      evidenceRefs: [], telemetryRefs: [],
+      uncertainties: ['The supplied evidence did not support this analytical section.']};
+  }
+  output.evidenceReferences = output.sections[index].evidenceRefs.slice();
   return output;
 }
 
@@ -357,7 +373,7 @@ test('active synthesis receives exact CURRENT_SESSION refs and state-aware secti
   for (const instruction of [
     'current in-progress session as the primary analytical focus',
     'previous completed session only as historical comparison or baseline',
-    'Section 1 must begin its first sentence with the current state',
+    'Use CURRENT_SESSION evidence in whichever analytical section it genuinely supports',
     'Section 2 must explain current-session drivers',
     'must never be presented as causing the earlier completed-session move',
     'must not list every Most Active security',
@@ -377,7 +393,7 @@ test('active synthesis receives exact CURRENT_SESSION refs and state-aware secti
   assert.equal(Object.hasOwn(input, 'currentSessionContext'), false);
 });
 
-test('PRE summary must cite current evidence and lead with it, while prior close remains context', async () => {
+test('PRE permits grounded prior-session context in Section 1 without requiring it to carry current evidence', async () => {
   const input = activeUsInput({
     marketState: 'PRE', generatedAt: '2026-09-08T12:00:00.000Z',
     overlayAsOf: '2026-09-08T11:55:00.000Z',
@@ -385,24 +401,12 @@ test('PRE summary must cite current evidence and lead with it, while prior close
   });
   const current = normalOutput(input, {furtherReadings: ['e1']});
   assert.equal(validateClaudeAnalysisOutput(current, input).valid, true);
-  const fridayFirst = structuredClone(current);
-  fridayFirst.sections[0].content = 'Friday\'s completed-session move dominated the week. '
-    + 'In the pre-market, current Microsoft news provided later context.';
-  assert.ok(validateClaudeAnalysisOutput(fridayFirst, input).errors.some(error =>
-    error.includes('active summary must lead with the current session')));
-  const rejectedDiagnostics = [];
-  const rejected = await invokeClaudeAnalysis({
-    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(fridayFirst),
-    onDiagnostics: event => rejectedDiagnostics.push(event)
-  });
-  assert.equal(rejected.type, 'CONTRACT_FAILURE');
-  assert.equal(rejectedDiagnostics.find(event => event.stage === 'activeSessionOutput')
-    .sectionOneCurrentFirst, false);
-  const noSummaryCitation = structuredClone(current);
-  noSummaryCitation.sections[0].evidenceRefs = ['e2'];
-  noSummaryCitation.evidenceReferences = ['e2', 'e1'];
-  assert.ok(validateClaudeAnalysisOutput(noSummaryCitation, input).errors.some(error =>
-    error.includes('active summary requires a CURRENT_SESSION evidence reference')));
+  const priorFirst = structuredClone(current);
+  priorFirst.sections[0].content = 'Friday\'s completed-session move remains useful context. '
+    + 'The current pre-market picture is covered where the evidence supports it.';
+  priorFirst.sections[0].evidenceRefs = ['e2'];
+  priorFirst.evidenceReferences = ['e2', 'e1'];
+  assert.equal(validateClaudeAnalysisOutput(priorFirst, input).valid, true);
 
   const diagnostics = [];
   const result = await invokeClaudeAnalysis({
@@ -428,7 +432,7 @@ test('PRE summary must cite current evidence and lead with it, while prior close
   assert.equal(JSON.stringify(diagnostics).includes('Microsoft raised its outlook'), false);
 });
 
-test('PRE, REGULAR and POST reject an indirect prior-session recap at the start of Section 1', () => {
+test('PRE, REGULAR and POST do not require Section 1 to lead with current-session analysis', () => {
   for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
     ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z',
       '2026-09-08T11:30:00.000Z'],
@@ -444,14 +448,11 @@ test('PRE, REGULAR and POST reject an indirect prior-session recap at the start 
     priorFirst.sections[0].content = 'The S&P 500 finished Friday higher after a mixed session. '
       + 'Current developments are discussed only afterward.';
     const validation = validateClaudeAnalysisOutput(priorFirst, input);
-    assert.equal(validation.valid, false, marketState);
-    assert.equal(validation.errors.includes(
-      'sections[0]: active summary must lead with the current session'
-    ), true, marketState);
+    assert.equal(validation.valid, true, marketState);
   }
 });
 
-test('PRE, REGULAR and POST repair one omitted current citation only when attribution is unique', async () => {
+test('PRE, REGULAR and POST retain grounded output without synthesizing a Section 1 current citation', async () => {
   for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
     ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z',
       '2026-09-08T11:30:00.000Z'],
@@ -462,21 +463,20 @@ test('PRE, REGULAR and POST repair one omitted current citation only when attrib
   ]) {
     const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
     const raw = activeOutputWithoutCurrentCitation(input);
-    assert.equal(validateClaudeAnalysisOutput(raw, input).valid, false);
     const diagnostics = [];
     const result = await invokeClaudeAnalysis({
       input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw),
       onDiagnostics: event => diagnostics.push(event)
     });
     assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
-    assert.deepEqual(result.output.sections[0].evidenceRefs, ['e1', 'e2']);
-    assert.deepEqual(result.output.furtherReadings, ['e1']);
+    assert.deepEqual(result.output.sections[0].evidenceRefs, ['e2']);
+    assert.deepEqual(result.output.furtherReadings, []);
     assert.deepEqual(diagnostics.find(event => event.stage === 'activeSessionOutput'), {
       stage: 'activeSessionOutput', projectedCurrentSessionRefCount: 1,
-      citedCurrentSessionRefCount: 1, returnedCurrentSessionRefCount: 0,
-      deterministicCitationRepairApplied: true, repairedCurrentSessionRefCount: 1,
-      sectionOneCurrentRefFirst: true, sectionOneCurrentFirst: true,
-      activeFurtherReadingsEligibleCount: 1, activeFurtherReadingsSelectedCount: 1
+      citedCurrentSessionRefCount: 0, returnedCurrentSessionRefCount: 0,
+      deterministicCitationRepairApplied: false, repairedCurrentSessionRefCount: 0,
+      sectionOneCurrentRefFirst: false, sectionOneCurrentFirst: true,
+      activeFurtherReadingsEligibleCount: 1, activeFurtherReadingsSelectedCount: 0
     });
   }
 });
@@ -505,29 +505,25 @@ test('PRE, REGULAR and POST accept natural current-first wording, later current 
   }
 });
 
-test('active Sections 5 and 7 localize rather than lead with earlier-session-only support', async () => {
+test('active Sections 5 and 7 may retain grounded earlier-session context', async () => {
   const input = activeUsInput();
   const output = normalOutput(input, {furtherReadings: ['e1']});
   output.sections[4].content = 'The market is broadening, but the earlier session remains context.';
   output.sections[4].evidenceRefs = ['e2'];
   output.sections[6].content = 'Watch for the next development after the earlier session.';
   output.sections[6].evidenceRefs = ['e2'];
-  const validation = validateClaudeAnalysisOutput(output, input);
-  for (const index of [4, 6]) assert.equal(validation.errors.includes(
-    `sections[${index}]: active section requires CURRENT_SESSION evidence first`
-  ), true, `section ${index + 1}`);
   const result = await invokeClaudeAnalysis({
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
   });
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.equal(result.output.status, 'DEGRADED');
+  assert.equal(result.output.status, 'NORMAL');
   for (const index of [4, 6]) {
-    assert.equal(result.output.sections[index].content, null);
-    assert.deepEqual(result.output.sections[index].evidenceRefs, []);
+    assert.notEqual(result.output.sections[index].content, null);
+    assert.deepEqual(result.output.sections[index].evidenceRefs, ['e2']);
   }
 });
 
-test('active citation repair rejects ambiguous or invalid generated attribution', async () => {
+test('active output does not require deterministic current citation repair, while unknown refs still fail', async () => {
   const secondCurrent = createEvidenceItem({
     sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
     title: 'Apple current-session update', summary: 'Apple moved in the regular session.',
@@ -541,7 +537,7 @@ test('active citation repair rejects ambiguous or invalid generated attribution'
     fetchImpl: async () => anthropicResponse(activeOutputWithoutCurrentCitation(ambiguousInput)),
     onDiagnostics: event => ambiguousDiagnostics.push(event)
   });
-  assert.equal(ambiguous.type, 'CONTRACT_FAILURE');
+  assert.equal(ambiguous.type, 'SUCCESS', ambiguous.message);
   const ambiguousEvent = ambiguousDiagnostics.find(event => event.stage === 'activeSessionOutput');
   assert.equal(ambiguousEvent.projectedCurrentSessionRefCount, 2);
   assert.equal(ambiguousEvent.returnedCurrentSessionRefCount, 0);
@@ -560,7 +556,7 @@ test('active citation repair rejects ambiguous or invalid generated attribution'
   assert.equal(invalidDiagnostics.some(event => event.stage === 'activeSessionOutput'), false);
 });
 
-test('PRE, REGULAR and POST preserve strict ambiguity when multiple current refs exist', async () => {
+test('PRE, REGULAR and POST permit uncited current evidence when it supports no surviving section', async () => {
   for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
     ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z',
       '2026-09-08T11:30:00.000Z'],
@@ -583,11 +579,11 @@ test('PRE, REGULAR and POST preserve strict ambiguity when multiple current refs
     const result = await invokeClaudeAnalysis({
       input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
     });
-    assert.equal(result.type, 'CONTRACT_FAILURE', marketState);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
   }
 });
 
-test('single-current citation repair also applies when the sole current ref was cited outside Section 1', async () => {
+test('current evidence may be cited outside Section 1 without a synthetic Section 1 citation', async () => {
   const input = activeUsInput();
   const raw = activeOutputWithoutCurrentCitation(input);
   raw.sections[4].evidenceRefs = ['e1'];
@@ -596,22 +592,85 @@ test('single-current citation repair also applies when the sole current ref was 
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
   });
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.deepEqual(result.output.sections[0].evidenceRefs, ['e1', 'e2']);
+  assert.deepEqual(result.output.sections[0].evidenceRefs, ['e2']);
+  assert.deepEqual(result.output.sections[4].evidenceRefs, ['e1']);
 });
 
-test('active FAILED is rejected when usable current evidence exists', async () => {
+test('active FAILED remains valid when zero analytical sections survive', async () => {
   const input = activeUsInput();
   const failed = {
     status: 'FAILED', reportContext: reportContext(input), sections: sections(null),
     evidenceReferences: [], furtherReadings: [], evidenceGaps: ['Coverage is sparse.']
   };
-  assert.ok(validateClaudeAnalysisOutput(failed, input).errors.includes(
-    'active analysis with CURRENT_SESSION evidence cannot use FAILED status'
-  ));
+  assert.equal(validateClaudeAnalysisOutput(failed, input).valid, true);
   const result = await invokeClaudeAnalysis({
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(failed)
   });
-  assert.equal(result.type, 'CONTRACT_FAILURE');
+  assert.equal(result.type, 'SUCCESS', result.message);
+});
+
+test('active analysis survives when any one independently grounded section remains', async () => {
+  for (const index of [0, 2, 5, 6]) {
+    const input = activeUsInput();
+    const raw = activeOutputWithOnlySection(input, index);
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+    });
+    assert.equal(result.type, 'SUCCESS', `section ${index + 1}: ${result.message}`);
+    assert.equal(result.output.status, 'DEGRADED');
+    assert.notEqual(result.output.sections[index].content, null);
+    for (let other = 0; other < 7; other++) {
+      if (other !== index && other !== 3) assert.equal(result.output.sections[other].content, null);
+    }
+  }
+
+  const sectionFourInput = activeUsInput({portfolioContext: {
+    myStocks: [{market: 'US', symbol: 'MSFT', telemetryRefs: [], evidenceRefs: ['e1'], upcomingEvents: []}],
+    watchlist: []
+  }});
+  const sectionFour = activeOutputWithOnlySection(sectionFourInput, 3);
+  sectionFour.sections[3] = {...sectionFour.sections[3],
+    content: 'Microsoft moved during current trading.', evidenceRefs: ['e1'], telemetryRefs: []};
+  sectionFour.evidenceReferences = ['e1'];
+  const sectionFourResult = await invokeClaudeAnalysis({
+    input: sectionFourInput, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(sectionFour)
+  });
+  assert.equal(sectionFourResult.type, 'SUCCESS', sectionFourResult.message);
+  assert.notEqual(sectionFourResult.output.sections[3].content, null);
+});
+
+test('active Section 1 may localize while a current-supported Section 3 survives', async () => {
+  const input = activeUsInput();
+  const raw = activeOutputWithOnlySection(input, 2);
+  raw.sections[0] = {...raw.sections[0],
+    content: 'Microsoft news sent stocks higher at Friday\'s close.', evidenceRefs: ['e1'], telemetryRefs: ['t1'],
+    uncertainties: []};
+  raw.evidenceReferences = ['e1'];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.equal(result.output.sections[0].content, null);
+  assert.notEqual(result.output.sections[2].content, null);
+  assert.deepEqual(result.output.furtherReadings, ['e1']);
+});
+
+test('active zero surviving sections normalize to the deterministic FAILED outcome', async () => {
+  const input = activeUsInput();
+  const raw = activeOutputWithOnlySection(input, 0);
+  raw.sections[0] = {...raw.sections[0],
+    content: 'Microsoft news sent stocks higher at Friday\'s close.', evidenceRefs: ['e1'], telemetryRefs: ['t1'],
+    uncertainties: []};
+  raw.evidenceReferences = ['e1'];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'FAILED');
+  assert.equal(result.output.sections.slice(0, 7).every((section, index) =>
+    index === 3 || section.content === null), true);
+  assert.deepEqual(result.output.furtherReadings, []);
 });
 
 test('unknown references in active optional sections and Section 1 remain hard failures', async () => {
@@ -631,7 +690,7 @@ test('unknown references in active optional sections and Section 1 remain hard f
   assert.equal(rejected.type, 'CONTRACT_FAILURE');
 });
 
-test('active causal safety hard-fails Section 1 and localizes unsupported Sections 5-7', async () => {
+test('active causal safety localizes unsupported sections independently', async () => {
   const input = activeUsInput({
     materialEvents: ['e1', 'e2'], principalCatalysts: ['e2'], supportingEvidence: ['e1']
   });
@@ -640,7 +699,8 @@ test('active causal safety hard-fails Section 1 and localizes unsupported Sectio
   const summaryResult = await invokeClaudeAnalysis({
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(summary)
   });
-  assert.equal(summaryResult.type, 'CONTRACT_FAILURE');
+  assert.equal(summaryResult.type, 'SUCCESS', summaryResult.message);
+  assert.equal(summaryResult.output.sections[0].content, null);
 
   for (const index of [4, 5, 6]) {
     const output = normalOutput(input, {furtherReadings: []});
@@ -792,7 +852,7 @@ test('active Section 3 lacking cited focus or an exact focus subject localizes',
   }
 });
 
-test('active supported Section 1 overrides model FAILED but strong and prior-session causality still fail', async () => {
+test('active supported analysis overrides model FAILED while strong causality localizes only its section', async () => {
   const input = activeUsInput({
     materialEvents: [], principalCatalysts: [], supportingEvidence: ['e1'],
     broadMarketFocus: []
@@ -811,10 +871,11 @@ test('active supported Section 1 overrides model FAILED but strong and prior-ses
   ]) {
     const strong = normalOutput(input);
     strong.sections[0].content = content;
-    const rejected = await invokeClaudeAnalysis({
+    const localized = await invokeClaudeAnalysis({
       input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(strong)
     });
-    assert.equal(rejected.type, 'CONTRACT_FAILURE');
+    assert.equal(localized.type, 'SUCCESS', localized.message);
+    assert.equal(localized.output.sections[0].content, null);
   }
 });
 
@@ -1012,7 +1073,7 @@ test('active Further Readings resolve only cited current Yahoo evidence in citat
   assert.equal(MAX_ACTIVE_FURTHER_READINGS, 5);
 });
 
-test('active Further Readings resolve empty without citations before single-ref repair', async () => {
+test('active Further Readings resolve empty when no current Yahoo evidence is cited', async () => {
   const input = activeUsInput();
   const raw = normalOutput(input, {
     status: 'DEGRADED', furtherReadings: ['e1'],
@@ -1030,7 +1091,7 @@ test('active Further Readings resolve empty without citations before single-ref 
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
   });
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.deepEqual(result.output.furtherReadings, ['e1']);
+  assert.deepEqual(result.output.furtherReadings, []);
 });
 
 test('active Further Readings permit an empty cited-result set and apply PRE, REGULAR, and POST semantics', () => {
