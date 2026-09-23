@@ -97,7 +97,15 @@ test('never persists the runtime overlay and reattaches it only against the stor
   const databaseAhead = repositoryDouble({listed: input.completedSessions});
   await assert.rejects(
     createRuntimeFiveSessionSnapshotRepository({repository: databaseAhead}).persistSnapshot(partial),
-    error => error.code === 'SNAPSHOT_READ_MISMATCH'
+    error => {
+      assert.equal(error.code, 'SNAPSHOT_READ_MISMATCH');
+      assert.deepEqual(error.diagnosticDetails, {
+        mismatchReason: 'NEWEST_SESSION_DATE',
+        acquiredNewestSessionDate: '2026-09-03',
+        persistedNewestSessionDate: '2026-09-04'
+      });
+      return true;
+    }
   );
 });
 
@@ -106,7 +114,36 @@ test('rejects missing, altered and non-contiguous persisted history', async () =
   const missing = repositoryDouble({listed: input.completedSessions.slice(0, 2)});
   await assert.rejects(
     createRuntimeFiveSessionSnapshotRepository({repository: missing}).persistSnapshot(input),
-    error => error.code === 'SNAPSHOT_READ_MISMATCH'
+    error => {
+      assert.equal(error.code, 'SNAPSHOT_READ_MISMATCH');
+      assert.deepEqual(error.diagnosticDetails, {
+        mismatchReason: 'NEWEST_SESSION_DATE',
+        acquiredNewestSessionDate: '2026-09-04',
+        persistedNewestSessionDate: '2026-09-03'
+      });
+      return true;
+    }
+  );
+
+  const missingMiddle = repositoryDouble({
+    listed: [input.completedSessions[0], session('04', 104, 102)]
+  });
+  await assert.rejects(
+    createRuntimeFiveSessionSnapshotRepository({
+      repository: missingMiddle,
+      getSessionContext: ({exchangeDate}) => ({
+        calendarSupported: true,
+        tradingDay: exchangeDate === '2026-09-02'
+      })
+    }).persistSnapshot(input),
+    error => {
+      assert.equal(error.code, 'SNAPSHOT_READ_MISMATCH');
+      assert.deepEqual(error.diagnosticDetails, {
+        mismatchReason: 'MISSING_ACQUIRED_SESSION',
+        missingSessionDate: '2026-09-03'
+      });
+      return true;
+    }
   );
 
   const altered = JSON.parse(JSON.stringify(input.completedSessions));
@@ -114,7 +151,16 @@ test('rejects missing, altered and non-contiguous persisted history', async () =
   const alteredRepository = repositoryDouble({listed: altered});
   await assert.rejects(
     createRuntimeFiveSessionSnapshotRepository({repository: alteredRepository}).persistSnapshot(input),
-    error => error.code === 'SNAPSHOT_READ_MISMATCH'
+    error => {
+      assert.equal(error.code, 'SNAPSHOT_READ_MISMATCH');
+      assert.deepEqual(error.diagnosticDetails, {
+        mismatchReason: 'CANONICAL_SESSION_VALUES',
+        sessionDate: '2026-09-04',
+        differingFields: ['close']
+      });
+      assert.equal(JSON.stringify(error.diagnosticDetails).includes('999'), false);
+      return true;
+    }
   );
 
   const gapSessions = [session('02', 102, 101), session('04', 104, 102)];

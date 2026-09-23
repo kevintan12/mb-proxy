@@ -3963,6 +3963,74 @@ test('logs sanitized snapshot persistence and readback validation failure subtyp
   assert.deepEqual(invalidReadback.calls.yahoo, []);
 });
 
+test('logs only allowlisted SNAPSHOT_READ_MISMATCH details', async () => {
+  const cases = [
+    {
+      diagnosticDetails: {
+        mismatchReason: 'NEWEST_SESSION_DATE',
+        acquiredNewestSessionDate: '2026-09-04',
+        persistedNewestSessionDate: '2026-09-07',
+        close: 999
+      },
+      expected: {
+        mismatchReason: 'NEWEST_SESSION_DATE',
+        acquiredNewestSessionDate: '2026-09-04',
+        persistedNewestSessionDate: '2026-09-07'
+      }
+    },
+    {
+      diagnosticDetails: {
+        mismatchReason: 'MISSING_ACQUIRED_SESSION',
+        missingSessionDate: '2026-09-03',
+        row: {secret: true}
+      },
+      expected: {mismatchReason: 'MISSING_ACQUIRED_SESSION', missingSessionDate: '2026-09-03'}
+    },
+    {
+      diagnosticDetails: {
+        mismatchReason: 'CANONICAL_SESSION_VALUES',
+        sessionDate: '2026-09-04',
+        differingFields: ['close', 'providerSecret', 'volume'],
+        values: [100, 101]
+      },
+      expected: {
+        mismatchReason: 'CANONICAL_SESSION_VALUES',
+        sessionDate: '2026-09-04',
+        differingFields: ['close', 'volume']
+      }
+    }
+  ];
+
+  for (const testCase of cases) {
+    const diagnostics = [];
+    const failure = Object.assign(new Error('raw database content'), {
+      code: 'SNAPSHOT_READ_MISMATCH',
+      diagnosticDetails: testCase.diagnosticDetails
+    });
+    const instance = harness({
+      snapshotPersistence: {async persistSnapshot() { throw failure; }},
+      onDiagnostics(value) { diagnostics.push(value); }
+    });
+    await assert.rejects(instance.service.assemble(request()), error => error === failure);
+    assert.deepEqual(
+      diagnostics.find(value => value.stage === 'snapshotPersistenceReadbackFailure'),
+      {
+        stage: 'snapshotPersistenceReadbackFailure',
+        symbol: '^RUT',
+        boundary: 'PERSISTENCE',
+        failureSubtype: 'SNAPSHOT_READ_MISMATCH',
+        ...testCase.expected
+      }
+    );
+    assert.deepEqual(instance.calls.yahoo, []);
+    const serialized = JSON.stringify(diagnostics);
+    assert.equal(serialized.includes('raw database content'), false);
+    assert.equal(serialized.includes('providerSecret'), false);
+    assert.equal(serialized.includes('"values"'), false);
+    assert.equal(serialized.includes('"close":999'), false);
+  }
+});
+
 test('rejects inconsistent persisted reconstruction and malformed provider material', async () => {
   const wrongPersistence = harness({
     snapshotPersistence: {async persistSnapshot() { return snapshot('WRONG'); }}
