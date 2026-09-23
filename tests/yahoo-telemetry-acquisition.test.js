@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {createYahooTelemetryAcquisitionService} = require('../lib/yahoo-telemetry-acquisition');
 const {validateFiveSessionSnapshot} = require('../lib/five-session-snapshot');
+const {getSessionContext} = require('../lib/market-session-calendar');
 
 const ZONES = Object.freeze({US: 'America/New_York', SG: 'Asia/Singapore', HK: 'Asia/Hong_Kong'});
 
@@ -40,7 +41,13 @@ function responseFor(rows, meta = {}) {
       volume: rows.map(item => item.volume)
     }]}
   };
-  return {ok: true, status: 200, json: async () => ({chart: {result: [result], error: null}})};
+  const body = {chart: {result: [result], error: null}};
+  return {
+    ok: true,
+    status: 200,
+    json: async () => body,
+    text: async () => JSON.stringify(body)
+  };
 }
 
 function normalRows(timeSuffix = 'T01:00:00Z') {
@@ -66,12 +73,49 @@ function preRowsWithSep22NullClose() {
   });
 }
 
-function serviceFor({market = 'SG', instant = '2026-09-04T10:00:00Z', rows = normalRows(), meta = {}} = {}) {
+function preRowsWithSep22NullOhlcv() {
+  return preRowsWithSep22NullClose().map((item, index) => index === 0
+    ? {...item, open: null, high: null, low: null, volume: null}
+    : item);
+}
+
+function intradayResponseFor(date = '2026-09-22', {
+  missingFinal = false,
+  mutateBar,
+  malformed = false,
+  oversized = false
+} = {}) {
+  const context = getSessionContext({market: 'US', exchangeDate: date});
+  const open = Date.parse(context.regularOpenTime) / 1000;
+  const close = Date.parse(context.regularCloseTime) / 1000;
+  const timestamps = [];
+  const quote = {open: [], high: [], low: [], close: [], volume: []};
+  const count = (close - open) / 60 - (missingFinal ? 1 : 0);
+  for (let index = 0; index < count; index++) {
+    const bar = {open: 101, high: 104, low: 99, close: 103, volume: 10};
+    if (mutateBar) mutateBar(bar, index, count);
+    timestamps.push(open + index * 60);
+    for (const field of Object.keys(quote)) quote[field].push(bar[field]);
+  }
+  if (malformed) return {ok: true, status: 200, text: async () => '{not-json'};
+  if (oversized) return {ok: true, status: 200, text: async () => 'x'.repeat(128 * 1024 + 1)};
+  const body = {chart: {result: [{timestamp: timestamps, indicators: {quote: [quote]}}], error: null}};
+  return {ok: true, status: 200, text: async () => JSON.stringify(body)};
+}
+
+function serviceFor({
+  market = 'SG', instant = '2026-09-04T10:00:00Z', rows = normalRows(), meta = {},
+  intradayResponse, intradayFailure = false
+} = {}) {
   const calls = [];
   const service = createYahooTelemetryAcquisitionService({
     now: () => new Date(instant),
     fetchImpl: async (...args) => {
       calls.push(args);
+      if (String(args[0]).includes('interval=1m')) {
+        if (intradayFailure) throw new Error('synthetic intraday network failure');
+        return intradayResponse || {ok: false, status: 502, text: async () => ''};
+      }
       return responseFor(rows, meta);
     }
   });
@@ -144,48 +188,104 @@ test('skips full-day weekends and holidays when deriving expected sessions', asy
   assert.equal(snapshot.completeness, 'COMPLETE');
 });
 
-test('US PRE accepts the expected completed bar close from corroborating Yahoo metadata', async () => {
+test('US PRE reconstructs the expected date from a complete bounded intraday session when daily OHLCV is null', async () => {
   for (const symbol of ['^DJI', '^GSPC', '^IXIC']) {
-    const {service} = serviceFor({
+    const {service, calls} = serviceFor({
       market: 'US',
       instant: '2026-09-23T12:00:00Z',
-      rows: preRowsWithSep22NullClose(),
+      rows: preRowsWithSep22NullOhlcv(),
       meta: {
         currency: 'USD',
-        regularMarketPrice: 103,
-        regularMarketTime: epoch('2026-09-22T20:00:00Z')
-      }
+        regularMarketPrice: 999999,
+        regularMarketTime: epoch('2026-09-23T12:00:00Z')
+      },
+      intradayResponse: intradayResponseFor()
     });
     const snapshot = await service.acquireSnapshot({market: 'US', symbol});
+    assert.equal(calls.length, 2);
+    assert.match(calls[1][0], /period1=1790083800&period2=1790107200&interval=1m$/);
     assert.equal(snapshot.marketState, 'PRE');
     assert.equal(snapshot.primaryCompletedSessionDate, '2026-09-22');
     assert.equal(snapshot.completedSessions.at(-1).sessionDate, '2026-09-22');
-    assert.equal(snapshot.completedSessions.at(-1).close, 103);
+    assert.deepEqual({
+      open: snapshot.completedSessions.at(-1).open,
+      high: snapshot.completedSessions.at(-1).high,
+      low: snapshot.completedSessions.at(-1).low,
+      close: snapshot.completedSessions.at(-1).close,
+      volume: snapshot.completedSessions.at(-1).volume
+    }, {open: 101, high: 104, low: 99, close: 103, volume: null});
     assert.equal(validateFiveSessionSnapshot(snapshot).valid, true);
   }
 });
 
-test('US completed-close fallback rejects mismatched, early, future and out-of-range metadata', async () => {
-  const rejectedMetadata = [
-    {regularMarketPrice: 103, regularMarketTime: epoch('2026-09-21T20:00:00Z')},
-    {regularMarketPrice: 103, regularMarketTime: epoch('2026-09-22T19:59:59Z')},
-    {
-      instant: '2026-09-22T20:30:00Z',
-      regularMarketPrice: 103,
-      regularMarketTime: epoch('2026-09-22T20:30:01Z')
-    },
-    {regularMarketPrice: 105, regularMarketTime: epoch('2026-09-22T20:00:00Z')}
-  ];
-  for (const metadata of rejectedMetadata) {
+test('non-null daily close stays authoritative and does not trigger an intraday request', async () => {
+  for (const symbol of ['^DJI', '^GSPC', '^IXIC']) {
     const {service} = serviceFor({
       market: 'US',
-      instant: metadata.instant || '2026-09-23T12:00:00Z',
-      rows: preRowsWithSep22NullClose(),
-      meta: {currency: 'USD', ...metadata}
+      instant: '2026-09-23T12:00:00Z',
+      rows: preRowsWithSep22NullClose().map((item, index) => index === 0
+        ? {...item, close: 102} : item),
+      meta: {
+        currency: 'USD',
+        regularMarketPrice: 999999,
+        regularMarketTime: epoch('2026-09-23T12:00:00Z')
+      },
+      intradayResponse: intradayResponseFor()
+    });
+    const snapshot = await service.acquireSnapshot({market: 'US', symbol});
+    assert.equal(snapshot.primaryCompletedSessionDate, '2026-09-22');
+    assert.equal(snapshot.completedSessions.at(-1).sessionDate, '2026-09-22');
+    assert.equal(snapshot.completedSessions.at(-1).close, 102);
+    assert.equal(validateFiveSessionSnapshot(snapshot).valid, true);
+  }
+});
+
+test('intraday fallback rejects wrong-date, missing-final and invalid OHLC observations', async () => {
+  const invalidResponses = [
+    intradayResponseFor('2026-09-21'),
+    intradayResponseFor('2026-09-22', {missingFinal: true}),
+    intradayResponseFor('2026-09-22', {mutateBar: (bar, index, count) => {
+      if (index === count - 1) bar.close = 0;
+    }}),
+    intradayResponseFor('2026-09-22', {mutateBar: (bar, index, count) => {
+      if (index === count - 1) bar.high = 102;
+    }}),
+    intradayResponseFor('2026-09-22', {mutateBar: (bar, index) => {
+      if (index === 10) bar.low = 0;
+    }})
+  ];
+  for (const intradayResponse of invalidResponses) {
+    const {service, calls} = serviceFor({
+      market: 'US', instant: '2026-09-23T12:00:00Z', rows: preRowsWithSep22NullOhlcv(),
+      intradayResponse
     });
     const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+    assert.equal(calls.length, 2);
     assert.equal(snapshot.completedSessions.at(-1).sessionDate, '2026-09-21');
   }
+});
+
+test('malformed, oversized and failed intraday responses preserve the existing missing-session behavior', async () => {
+  for (const intradayResponse of [
+    intradayResponseFor('2026-09-22', {malformed: true}),
+    intradayResponseFor('2026-09-22', {oversized: true}),
+    {ok: false, status: 502, text: async () => ''}
+  ]) {
+    const {service, calls} = serviceFor({
+      market: 'US', instant: '2026-09-23T12:00:00Z', rows: preRowsWithSep22NullOhlcv(),
+      intradayResponse
+    });
+    const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+    assert.equal(calls.length, 2);
+    assert.equal(snapshot.completedSessions.at(-1).sessionDate, '2026-09-21');
+  }
+  const {service, calls} = serviceFor({
+    market: 'US', instant: '2026-09-23T12:00:00Z', rows: preRowsWithSep22NullOhlcv(),
+    intradayFailure: true
+  });
+  const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  assert.equal(calls.length, 2);
+  assert.equal(snapshot.completedSessions.at(-1).sessionDate, '2026-09-21');
 });
 
 test('non-null chart close stays authoritative and S.tz does not affect US fallback dates', async () => {
@@ -196,7 +296,7 @@ test('non-null chart close stays authoritative and S.tz does not affect US fallb
   const oldS = global.S;
   global.S = {tz: 'Pacific/Honolulu'};
   try {
-    const {service} = serviceFor({
+    const {service, calls} = serviceFor({
       market: 'US',
       instant: '2026-09-23T12:00:00Z',
       rows,
@@ -209,11 +309,32 @@ test('non-null chart close stays authoritative and S.tz does not affect US fallb
     const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
     assert.equal(snapshot.primaryCompletedSessionDate, '2026-09-22');
     assert.equal(snapshot.completedSessions.at(-1).close, 102);
+    assert.equal(calls.length, 1);
     assert.equal(snapshot.exchangeTimezone, ZONES.US);
   } finally {
     if (oldS === undefined) delete global.S;
     else global.S = oldS;
   }
+});
+
+test('intraday fallback uses exchange-calendar open and close instants across DST', async () => {
+  const rows = [
+    row('2026-11-02', null, {time: '2026-11-02T14:30:00Z', open: null, high: null, low: null, volume: null}),
+    row('2026-10-30', 99, {time: '2026-10-30T13:30:00Z'}),
+    row('2026-10-29', 98, {time: '2026-10-29T13:30:00Z'}),
+    row('2026-10-28', 97, {time: '2026-10-28T13:30:00Z'}),
+    row('2026-10-27', 96, {time: '2026-10-27T13:30:00Z'}),
+    row('2026-10-26', 95, {time: '2026-10-26T13:30:00Z'})
+  ];
+  const {service, calls} = serviceFor({
+    market: 'US', instant: '2026-11-03T13:00:00Z', rows,
+    intradayResponse: intradayResponseFor('2026-11-02')
+  });
+  const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  assert.equal(snapshot.primaryCompletedSessionDate, '2026-11-02');
+  assert.equal(snapshot.completedSessions.at(-1).close, 103);
+  assert.match(calls[1][0], /period1=1793629800&period2=1793653200&interval=1m$/);
+  assert.equal(snapshot.exchangeTimezone, ZONES.US);
 });
 
 test('derives close instants independently of Yahoo daily-row timestamps and ignores provider timezone metadata', async () => {
