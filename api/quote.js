@@ -363,18 +363,23 @@ module.exports = async function handler(req, res) {
 
     const isLive = meta.marketState === 'REGULAR';
     let price, prev, priceSource;
+    let chartDerivedPreviousClose = null;
 
     if (isLive) {
       price = meta.regularMarketPrice;
       priceSource = 'regularMarketPrice';
-      prev  = validCloses.length >= 1
-        ? validCloses[validCloses.length - 1]
-        : meta.regularMarketPreviousClose || meta.chartPreviousClose;
+      if (validCloses.length >= 1) {
+        chartDerivedPreviousClose = validCloses[validCloses.length - 1];
+        prev = chartDerivedPreviousClose;
+      } else {
+        prev = meta.regularMarketPreviousClose || meta.chartPreviousClose;
+      }
     } else {
       if (validCloses.length >= 2) {
         price = validCloses[validCloses.length - 1];
         priceSource = 'latestDailyClose';
-        prev  = validCloses[validCloses.length - 2];
+        chartDerivedPreviousClose = validCloses[validCloses.length - 2];
+        prev = chartDerivedPreviousClose;
       } else {
         price = meta.regularMarketPrice;
         priceSource = 'regularMarketPrice';
@@ -408,6 +413,12 @@ module.exports = async function handler(req, res) {
         marketState: meta.marketState ?? null,
         regularMarketPrice: meta.regularMarketPrice ?? null,
         regularMarketPreviousClose: meta.regularMarketPreviousClose ?? null,
+        // Chart-derived fallback has already been validated against the
+        // completed daily observation date above. The frontend may use it
+        // only when Yahoo omits regularMarketPreviousClose.
+        chartDerivedPreviousClose: !hasValidRegularMarketPreviousClose
+          && Number.isFinite(chartDerivedPreviousClose) && chartDerivedPreviousClose > 0
+          ? chartDerivedPreviousClose : null,
         regularMarketTime: meta.regularMarketTime ?? null,
         regularMarketDayHigh: meta.regularMarketDayHigh ?? null,
         regularMarketDayLow: meta.regularMarketDayLow ?? null,
