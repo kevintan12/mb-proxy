@@ -104,6 +104,8 @@ test('never persists the runtime overlay and reattaches it only against the stor
         acquiredNewestSessionDate: '2026-09-03',
         persistedNewestSessionDate: '2026-09-04'
       });
+      assert.equal(error.persistedSnapshot.primaryCompletedSessionDate, '2026-09-04');
+      assert.equal(validateFiveSessionSnapshot(error.persistedSnapshot).valid, true);
       return true;
     }
   );

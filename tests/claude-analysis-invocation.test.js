@@ -910,7 +910,7 @@ test('active transport metadata is canonicalized without changing grounded analy
   assert.deepEqual(result.output.sections[0].uncertainties, ['Current coverage is limited.']);
 });
 
-test('CLOSED, WEEKEND and HOLIDAY retain the completed US validation boundary', async () => {
+test('CLOSED, WEEKEND and HOLIDAY keep valid completed analysis while isolating one invalid section', async () => {
   for (const [marketState, generatedAt] of [
     ['CLOSED', '2026-09-04T22:00:00.000Z'],
     ['WEEKEND', '2026-09-06T10:00:00.000Z'],
@@ -930,14 +930,58 @@ test('CLOSED, WEEKEND and HOLIDAY retain the completed US validation boundary', 
     assert.equal(valid.type, 'SUCCESS', `${marketState}: ${valid.message}`);
     const invalid = supportedCompletedUsOutput(input);
     invalid.sections[2].content = 'Generic index commentary.';
-    const rejected = await invokeClaudeAnalysis({
+    const localized = await invokeClaudeAnalysis({
       input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(invalid)
     });
-    assert.equal(rejected.type, 'CONTRACT_FAILURE', marketState);
+    assert.equal(localized.type, 'SUCCESS', marketState);
+    assert.equal(localized.output.status, 'DEGRADED');
+    assert.equal(localized.output.sections[2].content, null);
+    assert.deepEqual(localized.output.sections[2].evidenceRefs, []);
+    assert.equal(localized.output.sections[0].content, invalid.sections[0].content);
   }
 });
 
-test('PRE, REGULAR and POST with zero current refs return an explicit eight-section degraded report without a provider call', async () => {
+test('completed US report survives on one grounded non-summary section and fails with none', async () => {
+  const input = richCompletedUsWeekInput();
+  const oneSection = supportedCompletedUsOutput(input);
+  oneSection.status = 'DEGRADED';
+  oneSection.evidenceGaps = ['Other analytical sections could not be supported.'];
+  for (let index = 0; index < 7; index++) {
+    if (index === 2) continue;
+    oneSection.sections[index] = {
+      ...oneSection.sections[index], content: null, evidenceRefs: [], telemetryRefs: [],
+      uncertainties: ['This section could not be supported.']
+    };
+  }
+  const surviving = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(oneSection)
+  });
+  assert.equal(surviving.type, 'SUCCESS', surviving.message);
+  assert.equal(surviving.output.status, 'DEGRADED');
+  assert.equal(surviving.output.sections[0].content, null);
+  assert.equal(surviving.output.sections[2].content, oneSection.sections[2].content);
+
+  const modelFailed = structuredClone(oneSection);
+  modelFailed.status = 'FAILED';
+  modelFailed.evidenceGaps = [];
+  const recovered = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(modelFailed)
+  });
+  assert.equal(recovered.type, 'SUCCESS', recovered.message);
+  assert.equal(recovered.output.status, 'DEGRADED');
+  assert.ok(recovered.output.evidenceGaps.length > 0);
+
+  const none = structuredClone(oneSection);
+  none.sections[2] = {...none.sections[2], content: null, evidenceRefs: [],
+    telemetryRefs: [], uncertainties: ['This section could not be supported.']};
+  const failed = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(none)
+  });
+  assert.equal(failed.type, 'SUCCESS', failed.message);
+  assert.equal(failed.output.status, 'FAILED');
+});
+
+test('PRE, REGULAR and POST can synthesize a grounded section when current news is unavailable', async () => {
   for (const [marketState, generatedAt, overlayAsOf] of [
     ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z'],
     ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z'],
@@ -947,28 +991,38 @@ test('PRE, REGULAR and POST with zero current refs return an explicit eight-sect
       marketState, generatedAt, overlayAsOf,
       currentPublishedAt: '2026-09-04T19:00:00.000Z'
     });
-    assert.ok(noCurrentSessionEvidenceOutput(input));
-    assert.equal(validateClaudeAnalysisOutput(normalOutput(input), input).valid, false);
+    assert.equal(noCurrentSessionEvidenceOutput(input), null);
+    assert.match(buildClaudeAnalysisRequest(input).system,
+      /no validated CURRENT_SESSION Yahoo article references/);
+    const output = activeOutputWithOnlySection(input, 4);
+    output.sections[4].content = 'Earlier validated evidence remains useful context while current news is unavailable.';
     let calls = 0;
     const diagnostics = [];
     const result = await invokeClaudeAnalysis({
-      input, apiKey: 'test-key', fetchImpl: async () => { calls++; throw new Error('not expected'); },
+      input, apiKey: 'test-key', fetchImpl: async () => { calls++; return anthropicResponse(output); },
       onDiagnostics: event => diagnostics.push(event)
     });
-    assert.equal(calls, 0);
+    assert.equal(calls, 1);
     assert.equal(result.type, 'SUCCESS', result.message);
     assert.equal(result.output.status, 'DEGRADED');
     assert.equal(result.output.sections.length, 8);
-    assert.equal(result.output.sections[0].content, NO_CURRENT_SESSION_SUMMARY);
-    assert.equal(result.output.sections.slice(1).every(section => section.content === null), true);
-    assert.deepEqual(result.output.evidenceReferences, []);
+    assert.equal(result.output.sections[4].content, output.sections[4].content);
+    assert.deepEqual(result.output.sections[4].evidenceRefs, ['e1']);
     assert.deepEqual(result.output.furtherReadings, []);
-    assert.deepEqual(result.output.evidenceGaps, [NO_CURRENT_SESSION_EVIDENCE_GAP]);
     assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
     assert.equal(diagnostics.find(event => event.stage === 'activeSessionProjection')
       .projectedCurrentSessionRefCount, 0);
     assert.equal(diagnostics.find(event => event.stage === 'activeSessionOutput')
       .citedCurrentSessionRefCount, 0);
+    const unsupportedCause = structuredClone(output);
+    unsupportedCause.sections[4].content =
+      'Earlier news sent stocks higher in the current session.';
+    const causalResult = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(unsupportedCause)
+    });
+    assert.equal(causalResult.type, 'SUCCESS', causalResult.message);
+    assert.equal(causalResult.output.status, 'FAILED');
+    assert.equal(causalResult.output.sections[4].content, null);
   }
 });
 

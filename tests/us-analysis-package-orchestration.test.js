@@ -26,10 +26,11 @@ const {
 const {
   REPORT_HEADER,
   REPORT_SECTION_NAMES,
+  EMPTY_INITIATING_LIST_CONTENT,
   validateClaudeAnalysisInput,
   validateClaudeAnalysisOutput
 } = require('../lib/claude-analysis-contract');
-const {buildClaudeAnalysisRequest} = require('../lib/claude-analysis-invocation');
+const {buildClaudeAnalysisRequest, invokeClaudeAnalysis} = require('../lib/claude-analysis-invocation');
 const {parseUsActiveSessionAnchor} = require('../lib/us-active-session-evidence');
 const {
   buildClaudeEvidenceRoleClassificationRequest,
@@ -917,6 +918,8 @@ test('active Yahoo stops at eight attempts even when the ninth candidate would b
     && item.outcome === 'SKIPPED_ZERO_CURRENT_SESSION_EVIDENCE'));
   assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
     entry.item.evidenceCategory === 'news'), false);
+  assert.ok(output.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('Validated current-session Yahoo Finance news was unavailable')));
 });
 
 test('ambiguous common-word tickers do not reorder unrelated Yahoo headlines', async () => {
@@ -1452,7 +1455,7 @@ test('classifies package-owned ordered evidence refs once and derives both role 
     'https://www.cnbc.com/2026/09/04/item-2.html');
 });
 
-test('fails package assembly when required evidence-role classification fails or is invalid', async () => {
+test('classifier failure or invented classification ref keeps only validated unclassified evidence', async () => {
   const cases = [
     {
       evidenceRoleClassification: {
@@ -1482,7 +1485,12 @@ test('fails package assembly when required evidence-role classification fails or
       ...evidenceRoleClassification,
       onDiagnostics(value) { diagnostics.push(value); }
     });
-    await assert.rejects(service.assemble(request()), /Evidence-role classification|references/);
+    const output = await service.assemble(request());
+    assert.equal(validateClaudeAnalysisInput(output), true);
+    assert.deepEqual(output.marketPackages[0].evidenceContext.materialEvents, []);
+    assert.deepEqual(output.marketPackages[0].evidenceContext.principalCatalysts, []);
+    assert.ok(output.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+      gap.includes('Evidence-role classification was unavailable')));
     if (index === 0) {
       assert.deepEqual(diagnostics.find(value => value.stage === 'evidenceRoleClassificationFailure'), {
         stage: 'evidenceRoleClassificationFailure',
@@ -1493,14 +1501,30 @@ test('fails package assembly when required evidence-role classification fails or
     } else {
       assert.equal(diagnostics.some(value => value.stage === 'evidenceRoleClassificationFailure'), false);
     }
-    assert.deepEqual(diagnostics.find(value => value.stage === 'analysisPackageAssemblyFailure'), {
-      stage: 'analysisPackageAssemblyFailure',
-      failureStage: 'EVIDENCE_ROLE_CLASSIFICATION'
-    });
+    assert.equal(diagnostics.some(value => value.stage === 'analysisPackageAssemblyFailure'), false);
+    assert.equal(diagnostics.some(value => value.stage === 'evidenceRoleClassificationFallback'), true);
   }
 });
 
-test('fails closed when classifier assigns a subsequent development as principal catalyst', async () => {
+test('completed-session partial classifier coverage preserves valid roles and defaults omitted refs', async () => {
+  const instance = harness({
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        const result = roleClassificationSuccess(input, {e1: ['MATERIAL_EVENT']});
+        result.output.classifications.pop();
+        return result;
+      }
+    }
+  });
+  const output = await instance.service.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(output), true);
+  assert.ok(output.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('classifications were omitted')));
+  assert.equal(output.marketPackages[0].evidenceContext.materialEvents.includes('e1'), true);
+  assert.equal(output.marketPackages[0].evidenceContext.principalCatalysts.includes('e3'), false);
+});
+
+test('invalid subsequent-development catalyst is never retained as a principal catalyst', async () => {
   const {service} = harness({
     cnbcNewsResearch: {
       async researchNews({horizons}) {
@@ -1515,10 +1539,10 @@ test('fails closed when classifier assigns a subsequent development as principal
       }
     }
   });
-  await assert.rejects(
-    service.assemble(request()),
-    /subsequent development cannot be a principal catalyst/
-  );
+  const output = await service.assemble(request());
+  assert.deepEqual(output.marketPackages[0].evidenceContext.principalCatalysts, []);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.canonicalUrl.endsWith('/item-1.html')), false);
 });
 
 test('reports sanitized non-negative timings for existing package stages', async () => {
@@ -3833,20 +3857,30 @@ test('continues with one deterministic unresolved gap when Federal Reserve acqui
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
-test('fails closed for future-dated Yahoo or Federal Reserve evidence', async () => {
+test('omits future-dated Yahoo or Federal Reserve evidence without losing valid peers', async () => {
   const future = '2026-09-07T10:00:00Z';
   const yahoo = harness({
     yahooEvidenceAcquisition: {async acquireEvidence({symbol}) { return yahooEvidence(symbol, future); }}
   }).service;
-  await assert.rejects(yahoo.assemble(request()), /Future-dated evidence/);
+  const yahooOutput = await yahoo.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(yahooOutput), true);
+  assert.equal(yahooOutput.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.publishedAt === future), false);
+  assert.equal(yahooOutput.marketPackages[0].evidenceContext.evidence[0].reference, 'e1');
+  assert.ok(yahooOutput.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('Future-dated evidence was omitted')));
 
   const fed = harness({
     federalReserveEvidenceAcquisition: {async acquireEvidence() { return fedEvidence(future); }}
   }).service;
-  await assert.rejects(fed.assemble(request()), /Future-dated evidence/);
+  const fedOutput = await fed.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(fedOutput), true);
+  assert.equal(fedOutput.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.publishedAt === future), false);
+  assert.deepEqual(fedOutput.marketPackages[0].evidenceContext.authoritativeFacts, ['e1', 'e2']);
 });
 
-test('uses acquisition start for research and final assembly time for strict future-evidence validation', async () => {
+test('uses final assembly time to retain newly published evidence and omit future evidence', async () => {
   const acquisitionStartedAt = '2026-09-06T10:00:00.000Z';
   const evidencePublishedAt = '2026-09-06T10:00:01.000Z';
   const finalGeneratedAt = '2026-09-06T10:00:02.000Z';
@@ -3880,28 +3914,157 @@ test('uses acquisition start for research and final assembly time for strict fut
     },
     onDiagnostics(value) { diagnostics.push(value); }
   });
-  await assert.rejects(future.service.assemble(request()), /Future-dated evidence/);
-  assert.deepEqual(diagnostics.find(value => value.stage === 'analysisPackageAssemblyFailure'), {
-    stage: 'analysisPackageAssemblyFailure',
-    failureStage: 'FUTURE_DATED_EVIDENCE_VALIDATION'
+  const futureOutput = await future.service.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(futureOutput), true);
+  assert.equal(futureOutput.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.publishedAt === '2026-09-06T10:00:03.000Z'), false);
+  assert.deepEqual(diagnostics.find(value => value.stage === 'futureEvidenceOmission'), {
+    stage: 'futureEvidenceOmission', omittedReferenceCount: 1,
+    causalClassificationDiscarded: true
   });
 });
 
-test('fails closed for required telemetry, persistence and Yahoo evidence failures', async () => {
+test('zero telemetry fails but persistence and Yahoo evidence failures preserve other material', async () => {
   const telemetry = harness({
     createTelemetryAcquisition: () => ({async acquireSnapshot() { throw new Error('telemetry failed'); }})
   }).service;
-  await assert.rejects(telemetry.assemble(request()), /telemetry failed/);
+  await assert.rejects(telemetry.assemble(request()), /No validated US telemetry/);
 
   const persistence = harness({
     snapshotPersistence: {async persistSnapshot() { throw new Error('persistence failed'); }}
   }).service;
-  await assert.rejects(persistence.assemble(request()), /persistence failed/);
+  const persistedFallback = await persistence.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(persistedFallback), true);
+  assert.ok(persistedFallback.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('Snapshot persistence or readback failed')));
 
   const yahoo = harness({
     yahooEvidenceAcquisition: {async acquireEvidence() { throw new Error('Yahoo failed'); }}
   }).service;
-  await assert.rejects(yahoo.assemble(request()), /Yahoo failed/);
+  const yahooFallback = await yahoo.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(yahooFallback), true);
+  assert.ok(yahooFallback.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('Yahoo Finance market-data evidence was unavailable')));
+});
+
+test('one failed symbol or evidence item leaves unrelated telemetry and references canonical', async () => {
+  const diagnostics = [];
+  const instance = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        if (symbol === 'AAPL') throw new Error('raw provider failure');
+        return snapshot(symbol);
+      }
+    }),
+    yahooEvidenceAcquisition: {
+      async acquireEvidence({symbol}) {
+        if (symbol === 'MSFT') throw new Error('raw evidence failure');
+        return yahooEvidence(symbol);
+      }
+    },
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  const output = await instance.service.assemble(request('US', {
+    myStocks: [{market: 'US', symbol: 'MSFT'}, {market: 'US', symbol: 'AAPL'}],
+    watchlist: [{market: 'US', symbol: 'NVDA'}]
+  }));
+  assert.equal(validateClaudeAnalysisInput(output), true);
+  assert.deepEqual(output.marketPackages[0].telemetry.stockSnapshots.map(entry => entry.snapshot.symbol),
+    ['MSFT', 'NVDA']);
+  assert.deepEqual(output.portfolioContext.myStocks.map(entry =>
+    [entry.symbol, entry.telemetryRefs, entry.evidenceRefs]), [
+    ['MSFT', ['t2'], []], ['AAPL', [], []]
+  ]);
+  assert.deepEqual(output.portfolioContext.watchlist[0].telemetryRefs, ['t3']);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.symbols.includes('AAPL') || entry.item.symbols.includes('MSFT')), false);
+  assert.equal(diagnostics.filter(entry => entry.stage === 'analysisMaterialOmission').length, 2);
+  assert.equal(JSON.stringify(diagnostics).includes('raw provider failure'), false);
+});
+
+test('partial completed-session history remains valid without fabricating missing sessions', async () => {
+  const instance = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        const complete = snapshot(symbol);
+        return createFiveSessionSnapshot({
+          market: 'US', symbol, instrumentName: complete.instrumentName,
+          instrumentType: complete.instrumentType, currency: complete.currency,
+          marketState: complete.marketState,
+          completedSessions: complete.completedSessions.slice(-1), currentOverlay: null
+        });
+      }
+    })
+  });
+  const output = await instance.service.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(output), true);
+  assert.equal(output.marketPackages[0].telemetry.benchmarkSnapshots[0].snapshot.completeness,
+    'PARTIAL');
+  assert.equal(output.marketPackages[0].telemetry.benchmarkSnapshots[0].snapshot.completedSessions.length,
+    1);
+});
+
+test('a failed benchmark does not block a valid portfolio symbol or trusted evidence', async () => {
+  const instance = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        if (symbol === '^RUT') throw new Error('benchmark unavailable');
+        return snapshot(symbol);
+      }
+    })
+  });
+  const output = await instance.service.assemble(request('US', {
+    myStocks: [{market: 'US', symbol: 'MSFT'}]
+  }));
+  assert.equal(validateClaudeAnalysisInput(output), true);
+  assert.deepEqual(output.marketPackages[0].telemetry.benchmarkSnapshots, []);
+  assert.deepEqual(output.marketPackages[0].telemetry.stockSnapshots.map(entry => entry.snapshot.symbol),
+    ['MSFT']);
+  assert.deepEqual(output.portfolioContext.myStocks[0].telemetryRefs, ['t1']);
+  assert.deepEqual(output.portfolioContext.myStocks[0].evidenceRefs, ['e1']);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.principalCatalysts, []);
+});
+
+test('multiple recoverable upstream failures still reach final synthesis with one grounded section', async () => {
+  const instance = harness({
+    snapshotPersistence: {async persistSnapshot() { throw new Error('database unavailable'); }},
+    federalReserveEvidenceAcquisition: {async acquireEvidence() { throw new Error('Fed unavailable'); }},
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles() { return {ok: false, type: 'UPSTREAM_FAILURE'}; }
+    }
+  });
+  const input = await instance.service.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(input), true);
+  assert.deepEqual(input.marketPackages[0].evidenceContext.principalCatalysts, []);
+  const sections = REPORT_SECTION_NAMES.map((name, index) => ({
+    name,
+    content: index === 0
+      ? 'Yahoo Finance supplied a regular-market quote for the Russell 2000.'
+      : index === 3 ? EMPTY_INITIATING_LIST_CONTENT.myStocks : null,
+    evidenceRefs: index === 0 ? ['e1'] : [],
+    telemetryRefs: index === 0 ? ['t1'] : [],
+    uncertainties: index === 0 || index === 3 ? [] : ['This section lacked enough evidence.']
+  }));
+  const transport = {
+    status: 'DEGRADED', evidenceGaps: ['Several data sources were unavailable.'],
+    ...Object.fromEntries(sections.map((section, index) => [`s${index + 1}`,
+      index === 7 ? {} : {
+        content: section.content,
+        evidenceRefs: section.evidenceRefs.join('|'),
+        telemetryRefs: section.telemetryRefs.join('|'),
+        uncertainties: section.uncertainties.join('|')
+      }]))
+  };
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => ({
+      ok: true, status: 200,
+      async json() { return {content: [{type: 'text', text: JSON.stringify(transport)}]}; }
+    })
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.equal(result.output.sections[0].content, sections[0].content);
+  assert.deepEqual(result.output.sections[0].evidenceRefs, ['e1']);
 });
 
 test('logs sanitized snapshot persistence and readback validation failure subtypes', async () => {
@@ -3925,7 +4088,8 @@ test('logs sanitized snapshot persistence and readback validation failure subtyp
       onDiagnostics(value) { diagnostics.push(value); }
     });
 
-    await assert.rejects(instance.service.assemble(request()), error => error === failure);
+    const output = await instance.service.assemble(request());
+    assert.equal(validateClaudeAnalysisInput(output), true);
     assert.deepEqual(
       diagnostics.find(value => value.stage === 'snapshotPersistenceReadbackFailure'),
       {
@@ -3935,7 +4099,7 @@ test('logs sanitized snapshot persistence and readback validation failure subtyp
         failureSubtype
       }
     );
-    assert.deepEqual(instance.calls.yahoo, []);
+    assert.deepEqual(instance.calls.yahoo, ['^RUT']);
     const serialized = JSON.stringify(diagnostics);
     assert.equal(serialized.includes('secret persisted row'), false);
     assert.equal(serialized.includes('must-not-leak'), false);
@@ -3947,10 +4111,8 @@ test('logs sanitized snapshot persistence and readback validation failure subtyp
     snapshotPersistence: {async persistSnapshot() { return snapshot('WRONG'); }},
     onDiagnostics(value) { diagnostics.push(value); }
   });
-  await assert.rejects(
-    invalidReadback.service.assemble(request()),
-    /Invalid canonical US snapshot for \^RUT/
-  );
+  const recoveredReadback = await invalidReadback.service.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(recoveredReadback), true);
   assert.deepEqual(
     diagnostics.find(value => value.stage === 'snapshotPersistenceReadbackFailure'),
     {
@@ -3960,7 +4122,7 @@ test('logs sanitized snapshot persistence and readback validation failure subtyp
       failureSubtype: 'INVALID_PERSISTED_SNAPSHOT'
     }
   );
-  assert.deepEqual(invalidReadback.calls.yahoo, []);
+  assert.deepEqual(invalidReadback.calls.yahoo, ['^RUT']);
 });
 
 test('logs only allowlisted SNAPSHOT_READ_MISMATCH details', async () => {
@@ -4011,7 +4173,12 @@ test('logs only allowlisted SNAPSHOT_READ_MISMATCH details', async () => {
       snapshotPersistence: {async persistSnapshot() { throw failure; }},
       onDiagnostics(value) { diagnostics.push(value); }
     });
-    await assert.rejects(instance.service.assemble(request()), error => error === failure);
+    if (testCase.expected.mismatchReason === 'CANONICAL_SESSION_VALUES') {
+      await assert.rejects(instance.service.assemble(request()), /No validated US telemetry/);
+    } else {
+      const output = await instance.service.assemble(request());
+      assert.equal(validateClaudeAnalysisInput(output), true);
+    }
     assert.deepEqual(
       diagnostics.find(value => value.stage === 'snapshotPersistenceReadbackFailure'),
       {
@@ -4022,7 +4189,8 @@ test('logs only allowlisted SNAPSHOT_READ_MISMATCH details', async () => {
         ...testCase.expected
       }
     );
-    assert.deepEqual(instance.calls.yahoo, []);
+    assert.deepEqual(instance.calls.yahoo,
+      testCase.expected.mismatchReason === 'CANONICAL_SESSION_VALUES' ? [] : ['^RUT']);
     const serialized = JSON.stringify(diagnostics);
     assert.equal(serialized.includes('raw database content'), false);
     assert.equal(serialized.includes('providerSecret'), false);
@@ -4031,11 +4199,12 @@ test('logs only allowlisted SNAPSHOT_READ_MISMATCH details', async () => {
   }
 });
 
-test('rejects inconsistent persisted reconstruction and malformed provider material', async () => {
+test('isolates inconsistent persisted reconstruction and malformed optional provider material', async () => {
   const wrongPersistence = harness({
     snapshotPersistence: {async persistSnapshot() { return snapshot('WRONG'); }}
   }).service;
-  await assert.rejects(wrongPersistence.assemble(request()), /Invalid canonical US snapshot/);
+  const readbackFallback = await wrongPersistence.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(readbackFallback), true);
 
   const malformedFed = harness({
     federalReserveEvidenceAcquisition: {async acquireEvidence() { return null; }}
