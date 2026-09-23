@@ -772,6 +772,8 @@ test('plain-English style is deterministic: raw analyst jargon is rejected and k
 test('plain-English normalization covers the active-session analyst phrases without changing reasoning', () => {
   const jargon = [
     'cyclical participants',
+    'risk-taking appetite',
+    'high-beta names',
     'risk appetite',
     'asymmetric risk-reward',
     'consolidation thesis',
@@ -784,5 +786,11 @@ test('plain-English normalization covers the active-session analyst phrases with
     assert.equal(hasAnalystDeskJargon(raw), true, phrase);
     assert.equal(hasAnalystDeskJargon(normalized), false, normalized);
     assert.notEqual(normalized, raw, phrase);
+    if (phrase === 'risk-taking appetite') {
+      assert.match(normalized, /investors' willingness to take risks/);
+    }
+    if (phrase === 'high-beta names') {
+      assert.match(normalized, /stocks that often move more sharply than the broader market/);
+    }
   }
 });

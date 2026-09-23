@@ -19,7 +19,8 @@ const {
   NO_CURRENT_SESSION_EVIDENCE_GAP,
   NO_CURRENT_SESSION_SUMMARY,
   noCurrentSessionEvidenceOutput,
-  resolveActiveFurtherReadings
+  resolveActiveFurtherReadings,
+  eligibleActiveFurtherReadingReferences
 } = require('../lib/claude-analysis-contract');
 const {
   CLAUDE_ANALYSIS_MODEL,
@@ -372,6 +373,9 @@ test('active synthesis receives exact CURRENT_SESSION refs and state-aware secti
   }]);
   for (const instruction of [
     'current in-progress session as the primary analytical focus',
+    'inspect each listed reference together with its title and summary',
+    'citation is optional when the evidence is immaterial',
+    'Do not force a citation or attach a reference automatically',
     'previous completed session only as historical comparison or baseline',
     'Use CURRENT_SESSION evidence in whichever analytical section it genuinely supports',
     'Section 2 must explain current-session drivers',
@@ -1070,13 +1074,13 @@ test('active Further Readings resolve only cited current Yahoo evidence in citat
   const secondYahoo = createEvidenceItem({
     sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
     title: 'Apple gains during the active session', summary: 'Apple shares gained in current trading.',
-    canonicalUrl: 'https://finance.yahoo.com/news/apple-gains-active-session.html',
+    canonicalUrl: 'https://finance.yahoo.com/markets/stocks/articles/apple-gains-active-session.html',
     publishedAt: '2026-09-08T14:40:00.000Z', symbols: ['AAPL'], publisher: 'Yahoo Finance'
   });
   const duplicateYahooUrl = createEvidenceItem({
     sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
     title: 'Duplicate Apple citation', summary: 'The same article has another evidence reference.',
-    canonicalUrl: 'https://finance.yahoo.com/news/apple-gains-active-session.html',
+    canonicalUrl: 'https://finance.yahoo.com/markets/stocks/articles/apple-gains-active-session.html',
     publishedAt: '2026-09-08T14:41:00.000Z', symbols: ['AAPL'], publisher: 'Yahoo Finance'
   });
   const cnbcCurrent = createEvidenceItem({
@@ -1096,6 +1100,12 @@ test('active Further Readings resolve only cited current Yahoo evidence in citat
     canonicalUrl: 'https://finance.yahoo.com/news/uncited-current-yahoo.html',
     publishedAt: '2026-09-08T14:45:00.000Z', symbols: [], publisher: 'Yahoo Finance'
   });
+  const unapprovedYahoo = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Yahoo topic page, not an article', summary: 'Landing page must not qualify.',
+    canonicalUrl: 'https://finance.yahoo.com/topic/latestnews/',
+    publishedAt: '2026-09-08T14:45:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
   const additionalCurrentYahoo = Array.from({length: 4}, (_, index) => createEvidenceItem({
     sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
     title: `Current Yahoo article ${index + 1}`, summary: 'Validated current-session Yahoo coverage.',
@@ -1103,8 +1113,12 @@ test('active Further Readings resolve only cited current Yahoo evidence in citat
     publishedAt: `2026-09-08T14:4${index + 6}:00.000Z`, symbols: [], publisher: 'Yahoo Finance'
   }));
   const input = activeUsInput({
-    additionalItems: [secondYahoo, duplicateYahooUrl, cnbcCurrent, staleYahoo, uncitedYahoo, ...additionalCurrentYahoo]
+    additionalItems: [secondYahoo, duplicateYahooUrl, cnbcCurrent, staleYahoo, uncitedYahoo,
+      ...additionalCurrentYahoo]
   });
+  assert.equal(eligibleActiveFurtherReadingReferences(input).has('e3'), true);
+  const invalidUrlInput = activeUsInput({additionalItems: [unapprovedYahoo]});
+  assert.equal(eligibleActiveFurtherReadingReferences(invalidUrlInput).has('e3'), false);
   const raw = normalOutput(input, {furtherReadings: ['e2', 'e4', 'e5']});
   raw.sections[0].evidenceRefs = ['e3', 'e4', 'e1', 'e8', 'e9', 'e10', 'e11'];
   raw.sections[1].evidenceRefs = ['e3', 'e1'];
