@@ -39,6 +39,7 @@ const {
 const {
   BENCHMARK_ANCHOR_KEYS,
   BROAD_MARKET_EVIDENCE_UNAVAILABLE_GAP,
+  STALE_COMPLETED_SESSION_TELEMETRY_GAP,
   CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
   CNBC_RECAP_UNAVAILABLE_GAP,
   EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP,
@@ -50,6 +51,7 @@ const {
   ANALYSIS_MODES,
   ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS,
   analysisModeForMarketState,
+  expectedLatestCompletedUsSessionDate,
   broadMarketNewsReferences,
   createUsAnalysisPackageOrchestrationService,
   validateUsAnalysisOrchestrationRequest
@@ -98,6 +100,47 @@ function snapshot(symbol) {
   });
 }
 
+function snapshotForLatestDate(symbol, latestDate, marketState = 'CLOSED') {
+  const dates = [];
+  let candidate = latestDate;
+  while (dates.length < 5) {
+    const weekday = new Date(`${candidate}T00:00:00Z`).getUTCDay();
+    if (weekday !== 0 && weekday !== 6 && candidate !== '2026-09-07') dates.unshift(candidate);
+    const [year, month, day] = candidate.split('-').map(Number);
+    const previous = new Date(0);
+    previous.setUTCHours(0, 0, 0, 0);
+    previous.setUTCFullYear(year, month - 1, day - 1);
+    candidate = previous.toISOString().slice(0, 10);
+  }
+  const sessions = dates.map((sessionDate, index) => {
+    const close = 101 + index;
+    return createCompletedRegularSession({
+      market: 'US', sessionDate, open: close - 1, high: close + 5, low: close - 5,
+      close, previousClose: close - 1, volume: 1000 + index,
+      asOf: `${sessionDate}T16:00:00-04:00`, sourceId: 'us.yahoo-finance',
+      validationState: 'VALIDATED'
+    });
+  });
+  return createFiveSessionSnapshot({
+    market: 'US', symbol, instrumentName: `${symbol} instrument`,
+    instrumentType: symbol.startsWith('^') ? 'INDEX' : 'EQUITY', currency: 'USD',
+    marketState, completedSessions: sessions, currentOverlay: null
+  });
+}
+
+function previousFixtureTradingDate(sessionDate) {
+  let candidate = sessionDate;
+  while (true) {
+    const [year, month, day] = candidate.split('-').map(Number);
+    const previous = new Date(0);
+    previous.setUTCHours(0, 0, 0, 0);
+    previous.setUTCFullYear(year, month - 1, day - 1);
+    candidate = previous.toISOString().slice(0, 10);
+    const weekday = new Date(`${candidate}T00:00:00Z`).getUTCDay();
+    if (weekday !== 0 && weekday !== 6 && candidate !== '2026-09-07') return candidate;
+  }
+}
+
 function snapshotWithoutCompletedSessions(symbol) {
   return createFiveSessionSnapshot({
     market: 'US',
@@ -116,7 +159,10 @@ function snapshotWithState(symbol, marketState, {
   overlayAsOf = '2026-09-08T11:30:00.000Z',
   hasOverlay = true
 } = {}) {
-  const base = snapshot(symbol);
+  const base = ['PRE', 'REGULAR', 'POST'].includes(marketState)
+    ? snapshotForLatestDate(symbol,
+      marketState === 'POST' ? sessionDate : previousFixtureTradingDate(sessionDate), marketState)
+    : snapshot(symbol);
   const currentOverlay = hasOverlay && ['PRE', 'REGULAR', 'POST'].includes(marketState)
     ? createCurrentSessionOverlay({
         market: 'US', marketState, sessionDate,
@@ -451,6 +497,121 @@ function harness(overrides = {}) {
   };
   return {service: createUsAnalysisPackageOrchestrationService(dependencies), calls};
 }
+
+test('derives latest completed dates from the exchange calendar for every US session state', () => {
+  const cases = [
+    ['PRE', '2026-09-23T12:00:00.000Z', '2026-09-22'],
+    ['REGULAR', '2026-09-23T15:00:00.000Z', '2026-09-22'],
+    ['POST', '2026-09-23T21:00:00.000Z', '2026-09-23'],
+    ['CLOSED', '2026-09-24T01:09:00.000Z', '2026-09-23'],
+    ['WEEKEND', '2026-09-27T12:00:00.000Z', '2026-09-25'],
+    ['HOLIDAY', '2026-09-07T16:00:00.000Z', '2026-09-04']
+  ];
+  for (const [state, instant, expected] of cases) {
+    assert.equal(expectedLatestCompletedUsSessionDate(instant), expected, state);
+  }
+});
+
+test('omits a canonical stale CLOSED snapshot when Sep 23 is calendar-expected', async () => {
+  const stale = snapshotForLatestDate('^RUT', '2026-09-22');
+  const diagnostics = [];
+  const instance = harness({
+    now: () => new Date('2026-09-24T01:09:00.000Z'),
+    createTelemetryAcquisition: () => ({async acquireSnapshot() { return stale; }}),
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  await assert.rejects(instance.service.assemble(request()), /No validated US telemetry is available/);
+  assert.deepEqual(diagnostics.find(value => value.failureType === 'COMPLETED_SESSION_DATE_MISMATCH'), {
+    stage: 'analysisMaterialOmission', symbol: '^RUT', source: 'US_COMPLETED_SESSION_FRESHNESS',
+    failureType: 'COMPLETED_SESSION_DATE_MISMATCH', expectedSessionDate: '2026-09-23',
+    acquiredSessionDate: '2026-09-22', selectedSessionDate: '2026-09-22'
+  });
+  assert.deepEqual(instance.calls.yahoo, []);
+});
+
+test('accepts a Sep 23 CLOSED snapshot and PRE/REGULAR prior-session or POST same-day snapshots', async () => {
+  const cases = [
+    ['PRE', '2026-09-23T12:00:00.000Z', '2026-09-22'],
+    ['REGULAR', '2026-09-23T15:00:00.000Z', '2026-09-22'],
+    ['POST', '2026-09-23T21:00:00.000Z', '2026-09-23'],
+    ['CLOSED', '2026-09-24T01:09:00.000Z', '2026-09-23']
+  ];
+  for (const [state, instant, expected] of cases) {
+    const expectedSnapshot = snapshotForLatestDate('^RUT', expected, state);
+    const instance = harness({
+      now: () => new Date(instant),
+      createTelemetryAcquisition: () => ({async acquireSnapshot() { return expectedSnapshot; }})
+    });
+    const output = await instance.service.assemble(request());
+    assert.equal(output.marketPackages[0].marketContext.primaryCompletedSessionDate, expected, state);
+  }
+});
+
+test('rejects stale acquired and persisted snapshots but accepts fresh persisted authority', async () => {
+  const stale = snapshotForLatestDate('^RUT', '2026-09-22');
+  const diagnostics = [];
+  const staleBoth = harness({
+    now: () => new Date('2026-09-24T01:09:00.000Z'),
+    createTelemetryAcquisition: () => ({async acquireSnapshot() { return stale; }}),
+    snapshotPersistence: {async persistSnapshot() { return stale; }},
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  await assert.rejects(staleBoth.service.assemble(request()), /No validated US telemetry is available/);
+  assert.equal(diagnostics.some(value => value.failureType === 'COMPLETED_SESSION_DATE_MISMATCH'
+    && value.expectedSessionDate === '2026-09-23'
+    && value.acquiredSessionDate === '2026-09-22'
+    && value.selectedSessionDate === '2026-09-22'), true);
+
+  const fresh = snapshotForLatestDate('^RUT', '2026-09-23');
+  const mismatch = Object.assign(new Error('stale acquisition, fresh stored history'), {
+    code: 'SNAPSHOT_READ_MISMATCH',
+    diagnosticDetails: {
+      mismatchReason: 'NEWEST_SESSION_DATE',
+      acquiredNewestSessionDate: '2026-09-22',
+      persistedNewestSessionDate: '2026-09-23'
+    },
+    persistedSnapshot: fresh
+  });
+  const freshPersisted = harness({
+    now: () => new Date('2026-09-24T01:09:00.000Z'),
+    createTelemetryAcquisition: () => ({async acquireSnapshot() { return stale; }}),
+    snapshotPersistence: {async persistSnapshot() { throw mismatch; }}
+  });
+  const output = await freshPersisted.service.assemble(request());
+  assert.equal(output.marketPackages[0].marketContext.primaryCompletedSessionDate, '2026-09-23');
+  assert.equal(output.marketPackages[0].telemetry.benchmarkSnapshots[0].snapshot.primaryCompletedSessionDate,
+    '2026-09-23');
+});
+
+test('a stale portfolio symbol is omitted while fresh benchmarks define the completed date', async () => {
+  const snapshots = {
+    '^RUT': snapshotForLatestDate('^RUT', '2026-09-23'),
+    '^DJI': snapshotForLatestDate('^DJI', '2026-09-23'),
+    VEEV: snapshotForLatestDate('VEEV', '2026-09-21')
+  };
+  const diagnostics = [];
+  const instance = harness({
+    now: () => new Date('2026-09-24T01:09:00.000Z'),
+    createTelemetryAcquisition: () => ({async acquireSnapshot({symbol}) { return snapshots[symbol]; }}),
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  const output = await instance.service.assemble(request('US', {
+    benchmarkAnchors: [{market: 'US', symbol: '^RUT'}, {market: 'US', symbol: '^DJI'}],
+    myStocks: [{market: 'US', symbol: 'VEEV'}]
+  }));
+  const marketPackage = output.marketPackages[0];
+  assert.equal(marketPackage.marketContext.primaryCompletedSessionDate, '2026-09-23');
+  assert.deepEqual(marketPackage.telemetry.benchmarkSnapshots.map(entry =>
+    entry.snapshot.primaryCompletedSessionDate), ['2026-09-23', '2026-09-23']);
+  assert.deepEqual(marketPackage.telemetry.stockSnapshots, []);
+  assert.equal(marketPackage.evidenceContext.unresolvedGaps.includes(
+    STALE_COMPLETED_SESSION_TELEMETRY_GAP), true);
+  assert.equal(diagnostics.some(value => value.symbol === 'VEEV'
+    && value.failureType === 'COMPLETED_SESSION_DATE_MISMATCH'
+    && value.expectedSessionDate === '2026-09-23'
+    && value.selectedSessionDate === '2026-09-21'), true);
+  assert.equal(instance.calls.yahoo.includes('VEEV'), false);
+});
 
 function roleClassificationSuccess(
   input,
@@ -2420,7 +2581,7 @@ test('keeps thrown Yahoo recap failures sanitized in integration diagnostics', a
   ]) assert.equal(serialized.includes(forbidden), false, forbidden);
 });
 
-test('skips Yahoo recap research when the canonical primary session date is null', async () => {
+test('rejects telemetry without a calendar-expected completed session before recap research', async () => {
   let researchCalls = 0;
   const {service, calls} = harness({
     createTelemetryAcquisition: () => ({
@@ -2430,24 +2591,9 @@ test('skips Yahoo recap research when the canonical primary session date is null
       async discoverAndValidateRecap() { researchCalls++; throw new Error('not expected'); }
     }
   });
-  const output = await service.assemble(request());
-  assert.equal(output.marketPackages[0].marketContext.primaryCompletedSessionDate, null);
+  await assert.rejects(service.assemble(request()), /No validated US telemetry is available/);
   assert.equal(researchCalls, 0);
-  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(
-    record => record.item.evidenceCategory === 'news' && record.item.sourceId === 'us.yahoo-finance'
-  ), false);
-  assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
-    YAHOO_RECAP_UNAVAILABLE_GAP,
-    CNBC_RECAP_UNAVAILABLE_GAP,
-    CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
-    EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP
-  ]);
-  assert.deepEqual(output.marketPackages[0].evidenceContext.materialEvents, []);
-  assert.deepEqual(output.marketPackages[0].evidenceContext.principalCatalysts, []);
   assert.equal(calls.evidenceRoleClassification.length, 0);
-  assert.equal(output.marketPackages[0].evidenceContext.unresolvedGaps.filter(
-    gap => gap === EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP
-  ).length, 1);
 });
 
 test('does not reuse a previous successful Yahoo recap when the current discovery is absent', async () => {
@@ -3799,7 +3945,8 @@ test('unavailable or inconsistent canonical benchmark boundaries degrade CNBC on
   const oneSession = createFiveSessionSnapshot({
     market: 'US', symbol: '^RUT', instrumentName: 'benchmark', instrumentType: 'INDEX',
     currency: 'USD', marketState: 'CLOSED',
-    completedSessions: [snapshot('^RUT').completedSessions[1]], currentOverlay: null
+    completedSessions: [snapshotForLatestDate('^RUT', '2026-09-04').completedSessions[4]],
+    currentOverlay: null
   });
   let researchCalls = 0;
   const diagnostics = [];
