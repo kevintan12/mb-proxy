@@ -115,6 +115,7 @@ function activeUsInput({
   materialEvents = ['e1', 'e2'],
   principalCatalysts = ['e1', 'e2'],
   supportingEvidence = ['e2'],
+  subsequentDevelopments = [],
   broadMarketFocus = [{evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]}],
   portfolioContext = {myStocks: [], watchlist: []}
 } = {}) {
@@ -174,7 +175,7 @@ function activeUsInput({
       evidenceContext: {
         materialEvents, authoritativeFacts: [],
         principalCatalysts, supportingEvidence,
-        conflictingEvidence: [], subsequentDevelopments: [], sessionAssociations: [],
+        conflictingEvidence: [], subsequentDevelopments, sessionAssociations: [],
         broadMarketFocus,
         unresolvedGaps: [], furtherReadings: []
       }
@@ -1504,6 +1505,139 @@ test('pre-normalization diagnostics mark a raw null Section 6 without changing d
     rawContentIsNull: true, evidenceRefs: [], telemetryRefs: [], suppliedReferenceCount: 0,
     hasCitedFocus: false, hasExactCitedSubject: false
   });
+});
+
+test('active coverage diagnostics expose Section 3 refs, focus roles and localization without prose', async () => {
+  const input = activeUsInput();
+  const output = normalOutput(input);
+  output.sections[2] = {...output.sections[2], content: null, evidenceRefs: [],
+    telemetryRefs: [], uncertainties: ['No focus content was generated.']};
+  output.status = 'DEGRADED';
+  output.evidenceGaps = ['No focus content was generated.'];
+  const diagnostics = [];
+  const withDiagnostics = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const withoutDiagnostics = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+  });
+  assert.equal(withDiagnostics.type, 'SUCCESS', withDiagnostics.message);
+  assert.equal(JSON.stringify(withDiagnostics.output), JSON.stringify(withoutDiagnostics.output));
+  const section3 = diagnostics.find(value => value.stage === 'claudeAnalysisPreNormalization'
+    && value.sectionIndex === 2);
+  assert.deepEqual(section3, {
+    stage: 'claudeAnalysisPreNormalization', sectionIndex: 2,
+    rawContentIsNull: true, evidenceRefs: [], telemetryRefs: [], suppliedReferenceCount: 0,
+    suppliedEvidenceRefCount: 0, suppliedTelemetryRefCount: 0, broadMarketFocusRefCount: 1,
+    broadMarketFocus: [{evidenceRef: 'e1', classificationRoles: [
+      'MATERIAL_EVENT', 'PRINCIPAL_CATALYST'
+    ], materialityTier: 'HIGH_OR_MEDIUM', confidence: null, specificSubjectCount: 1}]
+  });
+
+  const populated = normalOutput(input);
+  populated.sections[2] = {...populated.sections[2], evidenceRefs: ['e2']};
+  populated.evidenceReferences = ['e1', 'e2'];
+  const localizedDiagnostics = [];
+  const localized = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(populated),
+    onDiagnostics: value => localizedDiagnostics.push(value)
+  });
+  const localizedWithoutDiagnostics = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(populated)
+  });
+  assert.equal(localized.type, 'SUCCESS', localized.message);
+  assert.equal(JSON.stringify(localized.output), JSON.stringify(localizedWithoutDiagnostics.output));
+  assert.equal(localized.output.sections[2].content, null);
+  assert.deepEqual(localizedDiagnostics.find(value => value.stage === 'claudeAnalysisPreNormalization'
+    && value.sectionIndex === 2).violationCategories,
+  ['MISSING_BROAD_MARKET_FOCUS', 'NON_FOCUS_EVIDENCE']);
+  assert.ok(localizedDiagnostics.some(value => value.stage === 'claudeAnalysisSectionNormalization'
+    && value.sectionIndex === 2 && value.violationCategory === 'NON_FOCUS_EVIDENCE'));
+  const serialized = JSON.stringify(localizedDiagnostics);
+  assert.equal(serialized.includes(populated.sections[2].content), false);
+  assert.equal(serialized.includes('Microsoft'), false);
+
+  const subjectMismatch = normalOutput(input);
+  subjectMismatch.sections[2].content = 'Broad-market conditions remain mixed.';
+  const subjectDiagnostics = [];
+  const subjectResult = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(subjectMismatch),
+    onDiagnostics: value => subjectDiagnostics.push(value)
+  });
+  assert.equal(subjectResult.type, 'SUCCESS', subjectResult.message);
+  assert.equal(subjectResult.output.sections[2].content, null);
+  assert.ok(subjectDiagnostics.some(value => value.stage === 'claudeAnalysisSectionNormalization'
+    && value.sectionIndex === 2
+    && value.validationViolationCategories?.includes('MISSING_VALIDATED_FOCUS_SUBJECT')));
+});
+
+test('active coverage diagnostics distinguish Section 6 subject match and mismatch safely', async () => {
+  const input = activeUsInput();
+  for (const [content, expectedMatch, expectedViolation] of [
+    ['Microsoft has a supported constructive opportunity.', true, null],
+    ['An unnamed company has a constructive opportunity.', false, 'UNGROUNDED_OPPORTUNITY_SUBJECT']
+  ]) {
+    const output = normalOutput(input);
+    output.sections[5].content = content;
+    const diagnostics = [];
+    const withDiagnostics = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const withoutDiagnostics = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+    });
+    assert.equal(withDiagnostics.type, 'SUCCESS', withDiagnostics.message);
+    assert.equal(JSON.stringify(withDiagnostics.output), JSON.stringify(withoutDiagnostics.output));
+    const section6 = diagnostics.find(value => value.stage === 'claudeAnalysisPreNormalization'
+      && value.sectionIndex === 5);
+    assert.equal(section6.rawContentIsNull, false);
+    assert.deepEqual(section6.citedFocus, [{evidenceRef: 'e1', inBroadMarketFocus: true,
+      normalizedSubjectTokens: ['microsoft']}]);
+    assert.equal(section6.opportunityClaimDetected, true);
+    assert.equal(section6.hasExactCitedSubject, expectedMatch);
+    assert.equal(section6.violationCategory ?? null, expectedViolation);
+    assert.equal(JSON.stringify(diagnostics).includes(content), false);
+  }
+});
+
+test('active Section 7 diagnostics distinguish no forward support from omitted available support', async () => {
+  const forwardEvidence = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Upcoming Federal Reserve decision',
+    canonicalUrl: 'https://finance.yahoo.com/news/upcoming-fed-decision.html',
+    publishedAt: '2026-09-08T14:00:00.000Z', publisher: 'Yahoo Finance', symbols: []
+  });
+  for (const [subsequentDevelopments, additionalItems, expectedRefs] of [
+    [[], [], []],
+    [['e3'], [forwardEvidence], ['e3']]
+  ]) {
+    const input = activeUsInput({subsequentDevelopments, additionalItems});
+    const output = normalOutput(input);
+    output.status = 'DEGRADED';
+    output.sections[6] = {...output.sections[6], content: null, evidenceRefs: [],
+      telemetryRefs: [], uncertainties: ['No supported next development was generated.']};
+    output.evidenceGaps = ['No supported next development was generated.'];
+    const diagnostics = [];
+    const withDiagnostics = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const withoutDiagnostics = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
+    });
+    assert.equal(withDiagnostics.type, 'SUCCESS', withDiagnostics.message);
+    assert.equal(JSON.stringify(withDiagnostics.output), JSON.stringify(withoutDiagnostics.output));
+    const section7 = diagnostics.find(value => value.stage === 'claudeAnalysisPreNormalization'
+      && value.sectionIndex === 6);
+    assert.equal(section7.rawContentIsNull, true);
+    assert.equal(section7.eligibleForwardLookingEvidenceCount, expectedRefs.length);
+    assert.deepEqual(section7.eligibleForwardLookingEvidenceRefs, expectedRefs);
+    assert.equal(section7.citedEligibleForwardLookingRefCount, 0);
+    assert.equal(section7.upcomingEventCount, 0);
+    assert.equal(section7.unresolvedDevelopmentCount, expectedRefs.length);
+  }
 });
 
 test('pre-normalization refs are capped and exclude unknown or noncanonical values', async () => {

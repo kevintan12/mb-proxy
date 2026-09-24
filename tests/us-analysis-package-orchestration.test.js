@@ -1313,6 +1313,75 @@ test('active Yahoo news becomes CURRENT_SESSION evidence and can support current
   assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
 });
 
+test('active package coverage diagnostic exposes bounded classifier roles and refs only', async () => {
+  const diagnostics = [];
+  const generatedAt = '2026-09-08T15:00:00.000Z';
+  const {service} = harness({
+    createTelemetryAcquisition: () => ({async acquireSnapshot({symbol}) {
+      return snapshotWithState(symbol, 'REGULAR', {overlayAsOf: '2026-09-08T14:55:00.000Z'});
+    }}),
+    yahooMostActiveAcquisition: {async acquireMostActive() {
+      return {ok: true, type: 'SUCCESS', candidates: [{
+        symbol: 'MSFT', shortName: 'Microsoft', longName: 'Microsoft Corporation'
+      }]};
+    }},
+    yahooLatestNewsDiscovery: {async discoverLatestNews() {
+      return {ok: true, type: 'SUCCESS', candidates: [{
+        headline: 'Microsoft outlook lifts stocks',
+        url: 'https://finance.yahoo.com/news/microsoft-outlook-lifts-stocks.html',
+        uuid: null, publisher: 'Yahoo Finance'
+      }]};
+    }},
+    yahooCurrentNewsArticleContentAcquisition: {async acquireArticleContent(candidate) {
+      return {ok: true, type: 'SUCCESS', articleContent: {
+        sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+        headline: candidate.headline, publisher: 'Yahoo Finance',
+        publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+        articleText: 'PRIVATE article prose must not be logged.'
+      }};
+    }},
+    evidenceRoleClassification: {async classifyEvidenceRoles(input) {
+      return {ok: true, type: 'SUCCESS', output: {classifications: input.evidence.map(entry => ({
+        reference: entry.reference,
+        materiality: entry.horizon === 'CURRENT_SESSION' ? 'HIGH' : 'LOW',
+        roles: entry.horizon === 'CURRENT_SESSION'
+          ? ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'] : [],
+        subjects: entry.horizon === 'CURRENT_SESSION'
+          ? [{kind: 'COMPANY', name: 'Microsoft'}] : []
+      }))}};
+    }},
+    now: () => new Date(generatedAt),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const output = await service.assemble(request());
+  const focusRef = output.marketPackages[0].evidenceContext.broadMarketFocus[0].evidenceRef;
+  const packageDiagnostic = diagnostics.find(value =>
+    value.stage === 'activeSessionSectionCoveragePackage');
+  assert.ok(packageDiagnostic);
+  assert.equal(packageDiagnostic.broadMarketFocusRefCount, 1);
+  assert.deepEqual(packageDiagnostic.broadMarketFocusRefs, [focusRef]);
+  assert.deepEqual(packageDiagnostic.broadMarketFocusDetails, [{
+    evidenceRef: focusRef, classificationRoles: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'],
+    materialityTier: 'HIGH', confidence: null, specificSubjectCount: 1
+  }]);
+  assert.ok(packageDiagnostic.materialEventRefs.includes(focusRef));
+  assert.ok(packageDiagnostic.principalCatalystRefs.includes(focusRef));
+  assert.deepEqual(packageDiagnostic.conflictRefs, []);
+  assert.deepEqual(packageDiagnostic.upcomingEventRefs, []);
+  assert.equal(packageDiagnostic.upcomingEventCount, 0);
+  const serialized = JSON.stringify(diagnostics);
+  assert.equal(serialized.includes('PRIVATE article prose'), false);
+  assert.equal(serialized.includes('Microsoft'), false);
+  assert.equal(output.marketPackages[0].evidenceContext.broadMarketFocus[0].evidenceRef, focusRef);
+  assert.equal(diagnostics.some(value => value.stage === 'activeSessionSectionCoveragePackage'), true);
+
+  const completedDiagnostics = [];
+  const completed = harness({onDiagnostics: value => completedDiagnostics.push(value)});
+  await completed.service.assemble(request());
+  assert.equal(completedDiagnostics.some(value =>
+    value.stage === 'activeSessionSectionCoveragePackage'), false);
+});
+
 test('PRE, REGULAR and POST conservatively complete an omitted CURRENT_SESSION classification', async () => {
   for (const [marketState, generatedAt, overlayAsOf, publishedAt] of [
     ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z', '2026-09-08T11:45:00.000Z'],
