@@ -91,6 +91,20 @@ function closedRowsWithSep23NullOhlcv() {
   });
 }
 
+function regularRowsWithSep23ValidSep22Invalid() {
+  const dates = ['2026-09-23', '2026-09-22', '2026-09-21', '2026-09-18', '2026-09-17',
+    '2026-09-16', '2026-09-15', '2026-09-14', '2026-09-11', '2026-09-10'];
+  return dates.map((date, index) => {
+    if (date === '2026-09-23') {
+      return row(date, 110, {time: `${date}T13:30:00Z`, open: 109, high: 113, low: 107, volume: 1000});
+    }
+    if (date === '2026-09-22') {
+      return row(date, null, {time: `${date}T13:30:00Z`, open: 101, high: 104, low: 99, volume: 1000});
+    }
+    return row(date, 108 - index, {time: `${date}T13:30:00Z`});
+  });
+}
+
 function intradayResponseFor(date = '2026-09-22', {
   missingFinal = false,
   mutateBar,
@@ -258,7 +272,9 @@ test('completed-session recovery diagnostics report bounded expected and precedi
       precedingDailyCloseValid: true,
       precedingDailyOhlcValid: true,
       intradayRecoveryAttempted: true,
-      intradayRecoveryResult: 'SUCCESS'
+      intradayRecoveryResult: 'SUCCESS',
+      precedingIntradayRecoveryAttempted: false,
+      precedingIntradayRecoveryGuardReason: 'EXPECTED_ROW_NOT_VALID_OHLC'
     }]);
   }
 });
@@ -337,6 +353,97 @@ test('non-null daily close stays authoritative and does not trigger an intraday 
     assert.equal(snapshot.completedSessions.at(-1).close, 102);
     assert.equal(validateFiveSessionSnapshot(snapshot).valid, true);
   }
+});
+
+test('valid latest daily row recovers only its missing preceding close for benchmarks and US stocks', async () => {
+  for (const symbol of ['^DJI', '^GSPC', '^IXIC', '^RUT', 'AAPL']) {
+    const diagnostics = [];
+    const {service, calls} = serviceFor({
+      market: 'US',
+      instant: '2026-09-24T15:00:00Z',
+      rows: regularRowsWithSep23ValidSep22Invalid(),
+      meta: {currency: 'USD', instrumentType: symbol === 'AAPL' ? 'EQUITY' : 'INDEX'},
+      intradayResponse: intradayResponseFor('2026-09-22'),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const result = await service.acquireSnapshot({market: 'US', symbol});
+    assert.equal(calls.length, 2, `${symbol} should make one exact-date preceding-session request`);
+    assert.match(calls[1][0], /period1=1790083800&period2=1790107200&interval=1m$/);
+    assert.equal(result.primaryCompletedSessionDate, '2026-09-23');
+    assert.deepEqual(result.completedSessions.map(session => session.sessionDate), ['2026-09-23']);
+    assert.equal(result.completedSessions[0].close, 110);
+    assert.equal(result.completedSessions[0].previousClose, 103);
+    assert.equal(validateFiveSessionSnapshot(result).valid, true);
+    assert.deepEqual({
+      attempted: diagnostics[0].precedingIntradayRecoveryAttempted,
+      result: diagnostics[0].precedingIntradayRecoveryResult
+    }, {attempted: true, result: 'SUCCESS'});
+    assert.equal(diagnostics[0].precedingExpectedDate, '2026-09-22');
+  }
+});
+
+test('preceding-session recovery rejects wrong-date, incomplete, malformed and conflicting responses', async () => {
+  const cases = [
+    {intradayResponse: intradayResponseFor('2026-09-21'), rejection: 'OUTSIDE_EXPECTED_SESSION'},
+    {intradayResponse: intradayResponseFor('2026-09-22', {missingFinal: true}),
+      rejection: 'INCOMPLETE_SESSION_COVERAGE'},
+    {intradayResponse: intradayResponseFor('2026-09-22', {malformed: true}), rejection: 'MALFORMED_JSON'},
+    {intradayResponse: intradayResponseFor('2026-09-22', {oversized: true}),
+      rejection: 'RESPONSE_READ_OR_SIZE_FAILURE'},
+    {intradayFailure: true, rejection: 'NETWORK_FAILURE'},
+    {
+      rows: regularRowsWithSep23ValidSep22Invalid().map(item => item.date === '2026-09-22'
+        ? {...item, open: 100} : item),
+      intradayResponse: intradayResponseFor('2026-09-22'),
+      rejection: 'DAILY_INTRADAY_OHLC_CONFLICT'
+    },
+    {
+      rows: regularRowsWithSep23ValidSep22Invalid().map(item => item.date === '2026-09-22'
+        ? {...item, low: 0} : item),
+      intradayResponse: intradayResponseFor('2026-09-22'),
+      rejection: 'DAILY_INTRADAY_OHLC_CONFLICT'
+    },
+    {
+      rows: regularRowsWithSep23ValidSep22Invalid().map(item => item.date === '2026-09-22'
+        ? {...item, close: 0} : item),
+      intradayResponse: intradayResponseFor('2026-09-22'),
+      rejection: 'DAILY_INTRADAY_OHLC_CONFLICT'
+    }
+  ];
+  for (const item of cases) {
+    const diagnostics = [];
+    const {service, calls} = serviceFor({
+      market: 'US', instant: '2026-09-24T15:00:00Z',
+      rows: item.rows || regularRowsWithSep23ValidSep22Invalid(),
+      intradayResponse: item.intradayResponse,
+      intradayFailure: item.intradayFailure,
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const result = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+    assert.equal(calls.length, 2);
+    assert.equal(result.completedSessions.some(session => session.sessionDate === '2026-09-23'), false);
+    assert.equal(result.primaryCompletedSessionDate, '2026-09-21');
+    assert.equal(diagnostics[0].precedingIntradayRecoveryAttempted, true);
+    assert.equal(diagnostics[0].precedingIntradayRecoveryResult, 'FAILURE');
+    assert.equal(diagnostics[0].precedingIntradayRecoveryRejectionCategory, item.rejection);
+  }
+});
+
+test('valid preceding daily close remains authoritative and avoids preceding-session recovery', async () => {
+  const rows = regularRowsWithSep23ValidSep22Invalid().map(item => item.date === '2026-09-22'
+    ? row(item.date, 102, {time: '2026-09-22T13:30:00Z', open: 101, high: 104, low: 99, volume: 1000})
+    : item);
+  const diagnostics = [];
+  const {service, calls} = serviceFor({
+    market: 'US', instant: '2026-09-24T15:00:00Z', rows,
+    intradayResponse: intradayResponseFor('2026-09-22'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const result = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  assert.equal(calls.length, 1);
+  assert.equal(result.completedSessions.at(-1).previousClose, 102);
+  assert.equal(diagnostics[0].precedingIntradayRecoveryAttempted, false);
+  assert.equal(diagnostics[0].precedingIntradayRecoveryGuardReason, 'PRECEDING_CLOSE_PRESENT');
 });
 
 test('intraday fallback rejects wrong-date, missing-final and invalid OHLC observations', async () => {

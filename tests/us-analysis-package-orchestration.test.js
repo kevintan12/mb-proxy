@@ -1700,6 +1700,31 @@ test('completed-session package cannot bypass classification when only stock tel
     && value.failureStage === 'EVIDENCE_ROLE_CLASSIFICATION'));
 });
 
+test('a surviving fresh benchmark makes completed-session classifier preflight available', async () => {
+  let classifierCalls = 0;
+  const {service, calls} = harness({
+    now: () => new Date('2026-09-24T01:09:00.000Z'),
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotForLatestDate(symbol, '2026-09-23');
+      }
+    }),
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        classifierCalls++;
+        calls.evidenceRoleClassification.push(input);
+        return roleClassificationSuccess(input);
+      }
+    }
+  });
+  const output = await service.assemble(request());
+  assert.equal(classifierCalls, 1);
+  assert.equal(calls.evidenceRoleClassification.length, 1);
+  assert.deepEqual(output.marketPackages[0].telemetry.benchmarkSnapshots.map(entry => entry.snapshot.symbol),
+    ['^RUT']);
+  assert.equal(output.marketPackages[0].marketContext.primaryCompletedSessionDate, '2026-09-23');
+});
+
 test('active PRE retains conservative classifier failure fallback with current evidence', async () => {
   const diagnostics = [];
   const {service, calls} = harness({
