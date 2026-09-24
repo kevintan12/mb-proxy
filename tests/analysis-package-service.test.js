@@ -207,17 +207,28 @@ test('US future evidence omission compacts roles and portfolio refs without laun
   const acquired = async context => {
     const material = acquiredMaterial(context);
     const packageItem = material.marketPackages[0];
-    const valid = packageItem.evidenceCollection.items[0];
+    const valid = createEvidenceItem({
+      sourceId: 'us.reuters', market: 'US', evidenceCategory: 'news',
+      title: 'Broadcom leads semiconductor shares',
+      summary: 'Broadcom supplied validated company context.',
+      canonicalUrl: 'https://www.reuters.com/markets/broadcom-shares',
+      publishedAt: '2026-09-05T08:00:00Z'
+    });
     const future = createEvidenceItem({
       sourceId: 'us.reuters', market: 'US', evidenceCategory: 'news',
-      title: 'Future market report',
+      title: 'Future health-care market report',
       canonicalUrl: 'https://www.reuters.com/markets/future-report',
       publishedAt: '2026-09-07T08:00:00Z'
     });
     packageItem.evidenceCollection = createEvidenceCollection({market: 'US', items: [future, valid]});
     packageItem.evidenceContext.materialEvents = ['e1', 'e2'];
-    packageItem.evidenceContext.principalCatalysts = ['e1'];
+    packageItem.evidenceContext.principalCatalysts = ['e1', 'e2'];
+    packageItem.evidenceContext.conflictingEvidence = ['e1', 'e2'];
     packageItem.evidenceContext.supportingEvidence = ['e1', 'e2'];
+    packageItem.evidenceContext.broadMarketFocus = [
+      {evidenceRef: 'e1', subjects: [{kind: 'SECTOR', name: 'Health-care'}]},
+      {evidenceRef: 'e2', subjects: [{kind: 'COMPANY', name: 'Broadcom'}]}
+    ];
     material.portfolioContext.myStocks[0].evidenceRefs = ['e2'];
     return material;
   };
@@ -226,10 +237,15 @@ test('US future evidence omission compacts roles and portfolio refs without laun
   }));
   assert.equal(validateClaudeAnalysisInput(output), true);
   assert.deepEqual(output.marketPackages[0].evidenceContext.evidence.map(entry => entry.reference), ['e1']);
-  assert.deepEqual(output.marketPackages[0].evidenceContext.materialEvents, []);
-  assert.deepEqual(output.marketPackages[0].evidenceContext.principalCatalysts, []);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.materialEvents, ['e1']);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.principalCatalysts, ['e1']);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.conflictingEvidence, ['e1']);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.broadMarketFocus, [
+    {evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Broadcom'}]}
+  ]);
   assert.deepEqual(output.portfolioContext.myStocks[0].evidenceRefs, ['e1']);
-  assert.equal(output.marketPackages[0].evidenceContext.evidence[0].item.title, 'US market report');
+  assert.equal(output.marketPackages[0].evidenceContext.evidence[0].item.title,
+    'Broadcom leads semiconductor shares');
   await assert.rejects(service(async context => {
     const material = await acquired(context);
     material.marketPackages[0].evidenceContext.materialEvents.push('e999');

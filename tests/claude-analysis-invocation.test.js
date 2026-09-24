@@ -914,7 +914,7 @@ test('active transport metadata is canonicalized without changing grounded analy
   assert.deepEqual(result.output.sections[0].uncertainties, ['Current coverage is limited.']);
 });
 
-test('CLOSED, WEEKEND and HOLIDAY keep valid completed analysis while isolating one invalid section', async () => {
+test('CLOSED, WEEKEND and HOLIDAY retain completed sections and reject unsupported Section 3', async () => {
   for (const [marketState, generatedAt] of [
     ['CLOSED', '2026-09-04T22:00:00.000Z'],
     ['WEEKEND', '2026-09-06T10:00:00.000Z'],
@@ -932,20 +932,22 @@ test('CLOSED, WEEKEND and HOLIDAY keep valid completed analysis while isolating 
       fetchImpl: async () => anthropicResponse(completedFirst)
     });
     assert.equal(valid.type, 'SUCCESS', `${marketState}: ${valid.message}`);
+    for (const index of [1, 2, 5, 6]) {
+      assert.equal(valid.output.sections[index].content, completedFirst.sections[index].content);
+      assert.deepEqual(valid.output.sections[index].evidenceRefs,
+        completedFirst.sections[index].evidenceRefs);
+    }
     const invalid = supportedCompletedUsOutput(input);
     invalid.sections[2].content = 'Generic index commentary.';
-    const localized = await invokeClaudeAnalysis({
+    const rejected = await invokeClaudeAnalysis({
       input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(invalid)
     });
-    assert.equal(localized.type, 'SUCCESS', marketState);
-    assert.equal(localized.output.status, 'DEGRADED');
-    assert.equal(localized.output.sections[2].content, null);
-    assert.deepEqual(localized.output.sections[2].evidenceRefs, []);
-    assert.equal(localized.output.sections[0].content, invalid.sections[0].content);
+    assert.equal(rejected.type, 'CONTRACT_FAILURE', marketState);
+    assert.match(rejected.message, /stocks and sectors must mention a validated broad-market subject/);
   }
 });
 
-test('completed US report survives on one grounded non-summary section and fails with none', async () => {
+test('completed US report retains the pre-fail-soft executive-summary survival boundary', async () => {
   const input = richCompletedUsWeekInput();
   const oneSection = supportedCompletedUsOutput(input);
   oneSection.status = 'DEGRADED';
@@ -957,32 +959,27 @@ test('completed US report survives on one grounded non-summary section and fails
       uncertainties: ['This section could not be supported.']
     };
   }
-  const surviving = await invokeClaudeAnalysis({
+  const rejected = await invokeClaudeAnalysis({
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(oneSection)
   });
-  assert.equal(surviving.type, 'SUCCESS', surviving.message);
-  assert.equal(surviving.output.status, 'DEGRADED');
-  assert.equal(surviving.output.sections[0].content, null);
-  assert.equal(surviving.output.sections[2].content, oneSection.sections[2].content);
+  assert.equal(rejected.type, 'CONTRACT_FAILURE');
+  assert.match(rejected.message, /executive market summary requires supported content/);
 
   const modelFailed = structuredClone(oneSection);
   modelFailed.status = 'FAILED';
   modelFailed.evidenceGaps = [];
-  const recovered = await invokeClaudeAnalysis({
+  const failedStatus = await invokeClaudeAnalysis({
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(modelFailed)
   });
-  assert.equal(recovered.type, 'SUCCESS', recovered.message);
-  assert.equal(recovered.output.status, 'DEGRADED');
-  assert.ok(recovered.output.evidenceGaps.length > 0);
+  assert.equal(failedStatus.type, 'CONTRACT_FAILURE');
 
   const none = structuredClone(oneSection);
   none.sections[2] = {...none.sections[2], content: null, evidenceRefs: [],
     telemetryRefs: [], uncertainties: ['This section could not be supported.']};
-  const failed = await invokeClaudeAnalysis({
+  const noSupport = await invokeClaudeAnalysis({
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(none)
   });
-  assert.equal(failed.type, 'SUCCESS', failed.message);
-  assert.equal(failed.output.status, 'FAILED');
+  assert.equal(noSupport.type, 'CONTRACT_FAILURE');
 });
 
 test('PRE, REGULAR and POST can synthesize a grounded section when current news is unavailable', async () => {

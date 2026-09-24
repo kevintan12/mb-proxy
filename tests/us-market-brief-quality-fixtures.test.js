@@ -196,6 +196,37 @@ test('combined supported risk and opportunity pass the complete validator', () =
   assert.doesNotMatch(output.sections[5].content, /guarantee|certain return/i);
 });
 
+test('CLOSED, WEEKEND and HOLIDAY retain completed broad-market depth across Sections 2, 3, 6 and 7', async () => {
+  for (const [marketState, generatedAt] of [
+    ['CLOSED', '2026-09-04T22:00:00.000Z'],
+    ['WEEKEND', '2026-09-06T10:00:00.000Z'],
+    ['HOLIDAY', '2026-09-07T16:00:00.000Z']
+  ]) {
+    const input = structuredClone(richCompletedUsWeekInput());
+    input.analysisRequest.generatedAt = generatedAt;
+    input.marketPackages[0].marketContext.marketState = marketState;
+    for (const entry of input.marketPackages[0].telemetry.benchmarkSnapshots.concat(
+      input.marketPackages[0].telemetry.stockSnapshots)) entry.snapshot.marketState = marketState;
+    const expected = supportedOutput(input);
+    assert.equal(validateClaudeAnalysisOutput(expected, input).valid, true, marketState);
+    const result = await invokeFixture(input, expected);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(result.output.status, 'NORMAL');
+    for (const sectionIndex of [1, 2, 5, 6]) {
+      assert.equal(result.output.sections[sectionIndex].content,
+        expected.sections[sectionIndex].content);
+      assert.deepEqual(result.output.sections[sectionIndex].evidenceRefs,
+        expected.sections[sectionIndex].evidenceRefs);
+    }
+    assert.deepEqual(result.output.sections[2].evidenceRefs, ['e4', 'e5']);
+    assert.equal(result.output.sections[2].evidenceRefs.includes(
+      input.portfolioContext.myStocks[0].evidenceRefs[0]), false);
+    const portfolioOnly = structuredClone(expected);
+    portfolioOnly.sections[2].evidenceRefs = input.portfolioContext.myStocks[0].evidenceRefs.slice();
+    assert.equal(validateClaudeAnalysisOutput(portfolioOnly, input).valid, false);
+  }
+});
+
 test('Section 6 keeps risk-only output while localizing unsupported or generic opportunities', async () => {
   const input = JSON.parse(JSON.stringify(richCompletedUsWeekInput()));
   const focusEvidence = input.marketPackages[0].evidenceContext.evidence.find(entry =>
