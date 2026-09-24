@@ -79,6 +79,18 @@ function preRowsWithSep22NullOhlcv() {
     : item);
 }
 
+function closedRowsWithSep23NullOhlcv() {
+  const dates = ['2026-09-23', '2026-09-22', '2026-09-21', '2026-09-18', '2026-09-17',
+    '2026-09-16', '2026-09-15', '2026-09-14', '2026-09-11', '2026-09-10'];
+  return dates.map((date, index) => {
+    const close = 110 - index;
+    return row(date, index === 0 ? null : close, {
+      time: `${date}T13:30:00Z`,
+      ...(index === 0 ? {open: null, high: null, low: null, volume: null} : {})
+    });
+  });
+}
+
 function intradayResponseFor(date = '2026-09-22', {
   missingFinal = false,
   mutateBar,
@@ -105,11 +117,12 @@ function intradayResponseFor(date = '2026-09-22', {
 
 function serviceFor({
   market = 'SG', instant = '2026-09-04T10:00:00Z', rows = normalRows(), meta = {},
-  intradayResponse, intradayFailure = false
+  intradayResponse, intradayFailure = false, onDiagnostics
 } = {}) {
   const calls = [];
   const service = createYahooTelemetryAcquisitionService({
     now: () => new Date(instant),
+    onDiagnostics,
     fetchImpl: async (...args) => {
       calls.push(args);
       if (String(args[0]).includes('interval=1m')) {
@@ -215,6 +228,92 @@ test('US PRE reconstructs the expected date from a complete bounded intraday ses
       volume: snapshot.completedSessions.at(-1).volume
     }, {open: 101, high: 104, low: 99, close: 103, volume: null});
     assert.equal(validateFiveSessionSnapshot(snapshot).valid, true);
+  }
+});
+
+test('completed-session recovery diagnostics report bounded expected and preceding row state', async () => {
+  for (const symbol of ['^DJI', '^GSPC', '^IXIC', '^RUT', 'AAPL']) {
+    const diagnostics = [];
+    const {service, calls} = serviceFor({
+      market: 'US',
+      instant: '2026-09-24T01:09:00Z',
+      rows: closedRowsWithSep23NullOhlcv(),
+      meta: {currency: 'USD', instrumentType: symbol === 'AAPL' ? 'EQUITY' : 'INDEX'},
+      intradayResponse: intradayResponseFor('2026-09-23'),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const snapshot = await service.acquireSnapshot({market: 'US', symbol});
+    assert.equal(snapshot.primaryCompletedSessionDate, '2026-09-23');
+    assert.equal(calls.length, 2);
+    assert.deepEqual(diagnostics, [{
+      stage: 'yahooCompletedSessionRecovery',
+      symbol,
+      expectedCompletedDate: '2026-09-23',
+      expectedDailyRowExists: true,
+      expectedDailyRowDuplicateCount: 0,
+      expectedDailyCloseValid: false,
+      expectedDailyOhlcValid: false,
+      precedingExpectedDate: '2026-09-22',
+      precedingDailyRowExists: true,
+      precedingDailyCloseValid: true,
+      precedingDailyOhlcValid: true,
+      intradayRecoveryAttempted: true,
+      intradayRecoveryResult: 'SUCCESS'
+    }]);
+  }
+});
+
+test('completed-session recovery diagnostics identify missing and duplicate expected rows without fetching', async () => {
+  const missingDiagnostics = [];
+  const missingRows = closedRowsWithSep23NullOhlcv().filter(item => item.date !== '2026-09-23');
+  const missing = serviceFor({
+    market: 'US', instant: '2026-09-24T01:09:00Z', rows: missingRows,
+    onDiagnostics: value => missingDiagnostics.push(value)
+  });
+  await missing.service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  assert.equal(missing.calls.length, 1);
+  assert.equal(missingDiagnostics[0].expectedDailyRowExists, false);
+  assert.equal(missingDiagnostics[0].expectedDailyRowDuplicateCount, 0);
+  assert.equal(missingDiagnostics[0].intradayRecoveryAttempted, false);
+  assert.equal(missingDiagnostics[0].intradayRecoveryGuardReason, 'EXPECTED_ROW_MISSING');
+  assert.equal(missingDiagnostics[0].precedingExpectedDate, '2026-09-22');
+  assert.equal(missingDiagnostics[0].precedingDailyCloseValid, true);
+
+  const duplicateDiagnostics = [];
+  const duplicateRows = closedRowsWithSep23NullOhlcv();
+  duplicateRows.push({...duplicateRows[0]});
+  const duplicate = serviceFor({
+    market: 'US', instant: '2026-09-24T01:09:00Z', rows: duplicateRows,
+    onDiagnostics: value => duplicateDiagnostics.push(value)
+  });
+  await duplicate.service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  assert.equal(duplicate.calls.length, 1);
+  assert.equal(duplicateDiagnostics[0].expectedDailyRowExists, true);
+  assert.equal(duplicateDiagnostics[0].expectedDailyRowDuplicateCount, 1);
+  assert.equal(duplicateDiagnostics[0].intradayRecoveryAttempted, false);
+  assert.equal(duplicateDiagnostics[0].intradayRecoveryGuardReason, 'DUPLICATE_EXPECTED_ROW');
+});
+
+test('completed-session recovery diagnostics distinguish intraday rejection categories', async () => {
+  const cases = [
+    {intradayFailure: true, category: 'NETWORK_FAILURE'},
+    {intradayResponse: {ok: false, status: 502, text: async () => ''}, category: 'HTTP_FAILURE'},
+    {intradayResponse: intradayResponseFor('2026-09-22'), category: 'OUTSIDE_EXPECTED_SESSION'},
+    {intradayResponse: intradayResponseFor('2026-09-23', {missingFinal: true}),
+      category: 'INCOMPLETE_SESSION_COVERAGE'}
+  ];
+  for (const item of cases) {
+    const diagnostics = [];
+    const {service} = serviceFor({
+      market: 'US', instant: '2026-09-24T01:09:00Z', rows: closedRowsWithSep23NullOhlcv(),
+      ...item, onDiagnostics: value => diagnostics.push(value)
+    });
+    await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+    assert.equal(diagnostics[0].intradayRecoveryAttempted, true);
+    assert.equal(diagnostics[0].intradayRecoveryResult, 'FAILURE');
+    assert.equal(diagnostics[0].intradayRecoveryRejectionCategory, item.category);
+    assert.equal(JSON.stringify(diagnostics).includes('price'), false);
+    assert.equal(JSON.stringify(diagnostics).includes('Yahoo'), false);
   }
 });
 
