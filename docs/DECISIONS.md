@@ -4,7 +4,7 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 
 ## D-001 — Plain-English style is non-blocking (step 8)
 
-- **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost · **Status:** IMPLEMENTED, tests passing; not yet committed or live-validated
+- **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost · **Status:** COMMITTED (4127b19) on Preview; REGULAR live-validated; PRE and POST live runs pending
 - **Context:** 6b40f2b made context-dependent analyst jargon section-fatal. Words such as "hawkish", "positioning", "risk exposure" or "repriced" in a section's content or uncertainties caused the whole section to be removed, even when it was fully grounded. The same words in evidence gaps, or in a completed-session report, failed the entire report. On the 25 Sep PRE run, a healthy package produced empty Sections 1, 2, 3, 5, 6 and 7 and no Further Readings, because Further Readings derive only from surviving cited sections. Section 4 still carried jargon that the list did not cover.
 - **Intent:** a style issue must never delete otherwise grounded analysis. The plain-English goal is pursued through the prompt and meaning-preserving rewrites, not through deletion.
 - **Decision:**
@@ -28,5 +28,28 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
     - `tests/us-market-brief-quality-fixtures.test.js`: T4 (CLOSED, WEEKEND and HOLIDAY); T5 completed (a malformed splice still causes CONTRACT_FAILURE).
   - T10 and T11: the existing Yahoo acquisition tests (three-article stop, sixth article, eight-attempt ceiling) and the completed-session tests (39da041 freshness, 14534fc CLOSED/WEEKEND/HOLIDAY, c96a132 recovery) pass unchanged.
   - Discrimination check: all 8 new or updated tests fail against the unmodified 6b40f2b code.
-- **Pending:** a live Preview PRE/REGULAR/POST run to confirm the behavior, then Kevin's commit decision.
+- **Live validation:**
+  - 2026-09-26, REGULAR on Preview (generation be9d8e9f): passed. There were no `PLAIN_LANGUAGE_VALIDATION` events. `plainLanguageStyleResidue` fired for Section 7 without deleting anything. 3 Yahoo articles were admitted.
+  - The same run showed a separate, pre-existing Section 3 and number-accuracy issue, recorded as D-002. It is not a D-001 regression.
+- **Pending:** PRE and POST live runs on Preview, then Kevin's decision on promotion to `main`.
+- **Supersedes:** none.
+
+## D-002 — Section 3 blanking and unchecked numbers (record only)
+
+- **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost · **Status:** RECORDED, not fixed. Deferred to the Market Brief pipeline redesign.
+- **Context:**
+  - **Section 3 blanked:** in the 26 Sep REGULAR Preview run (generation be9d8e9f), the older `NON_BENCHMARK_TELEMETRY` rule blanked Section 3 because it cited portfolio stock telemetry (6 of 10 refs offending).
+  - **Further Readings lost:** blanking Section 3 also dropped 2 of 3 Further Readings links, because Further Readings derive only from surviving cited sections.
+  - **Wrong number:** Section 5 stated an index move incorrectly (NASDAQ 0.45% vs actual 0.53%), and no check caught it.
+  - **Not new:** both behaviors are pre-existing in Production and are not caused by D-001.
+- **Intent:** whole-section blanking throws away good content and links, and wrong numbers reach the user unchecked. Both undermine report quality.
+- **Decision:** record only; no code change now. Solve in the Market Brief pipeline redesign by fact-checking numbers against fetched data instead of blanking whole sections.
+- **Must not change (until the redesign is approved):** the existing Section 3 scope rules (`NON_BENCHMARK_TELEMETRY`, broad-market focus grounding) and the Further Readings citation rules stay as they are. No ad-hoc loosening or patching in the meantime.
+- **Rejected options (for now):**
+  - Loosening or removing `NON_BENCHMARK_TELEMETRY`: that would weaken Section 3 grounding without a replacement check.
+  - Patching the Section 5 wording or adding one-off number checks outside the redesign: that is piecemeal and inconsistent with a single fact-checking design.
+- **Open questions (for the redesign):**
+  - How should numbers be fact-checked against fetched telemetry, and with what tolerance?
+  - What happens on a mismatch (correct, drop the sentence, or flag) instead of blanking the section?
+  - How can Further Readings survive when only part of a section is rejected?
 - **Supersedes:** none.
