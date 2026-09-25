@@ -1966,6 +1966,140 @@ test('active broken replacement prose localizes its section while preserving oth
   assert.notEqual(result.output.sections[0].content, null);
 });
 
+const STYLE_ONLY_SENTENCE =
+  'Fed commentary sounded hawkish, positioning stayed cautious and risk exposure was debated.';
+const STYLE_ONLY_UNCERTAINTY = 'It is unclear whether hawkish commentary will persist.';
+const MALFORMED_SPLICE =
+  'Defensive healthcare how investors are already invested in UNH has provided relative shelter.';
+const ACTIVE_STATES = [
+  ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z', '2026-09-08T11:30:00.000Z'],
+  ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+  ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
+];
+
+function styledActiveOutput(input) {
+  const output = normalOutput(input, {
+    status: 'DEGRADED',
+    evidenceGaps: ['Market exposure to later rate news remains unresolved.']
+  });
+  output.sections[5].content = 'Microsoft offers an opportunity if its raised outlook holds.';
+  for (const index of [1, 2, 4, 5, 6]) {
+    output.sections[index].content = `${output.sections[index].content} ${STYLE_ONLY_SENTENCE}`;
+    output.sections[index].uncertainties = [STYLE_ONLY_UNCERTAINTY];
+  }
+  return output;
+}
+
+test('T1-T3 T8 T9 PRE, REGULAR and POST grounded sections survive style-only jargon with citations and Further Readings', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of ACTIVE_STATES) {
+    const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
+    const raw = styledActiveOutput(input);
+    assert.equal(validateClaudeAnalysisOutput(raw, input).errors.some(error =>
+      /plain-language/.test(error)), false, marketState);
+    const diagnostics = [];
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(result.output.status, 'DEGRADED');
+    for (const index of [0, 1, 2, 4, 5, 6]) {
+      assert.equal(result.output.sections[index].content, raw.sections[index].content,
+        `${marketState} section ${index + 1}`);
+      assert.deepEqual(result.output.sections[index].evidenceRefs, raw.sections[index].evidenceRefs);
+      assert.deepEqual(result.output.sections[index].telemetryRefs, raw.sections[index].telemetryRefs);
+      assert.deepEqual(result.output.sections[index].uncertainties, raw.sections[index].uncertainties);
+    }
+    assert.deepEqual(result.output.evidenceGaps, raw.evidenceGaps);
+    assert.deepEqual(result.output.evidenceReferences, ['e1']);
+    assert.deepEqual(result.output.furtherReadings, ['e1']);
+    assert.deepEqual(diagnostics.filter(value =>
+      value.stage === 'claudeAnalysisSectionNormalization'), [], marketState);
+    const residue = diagnostics.filter(value => value.stage === 'plainLanguageStyleResidue');
+    assert.equal(residue.length, 1, marketState);
+    assert.deepEqual(residue[0].sections, [1, 2, 4, 5, 6].map(sectionIndex => ({
+      sectionIndex, contentMatchCount: 3, uncertaintyMatchCount: 1
+    })));
+    assert.equal(residue[0].evidenceGapMatchCount, 1);
+    assert.equal(/hawkish|positioning|exposure/i.test(JSON.stringify(residue)), false);
+  }
+});
+
+test('T5 active malformed prose in content or uncertainties localizes only its section', async () => {
+  const input = activeUsInput();
+  for (const mutate of [
+    output => { output.sections[5].content = MALFORMED_SPLICE; },
+    output => { output.sections[5].uncertainties = [MALFORMED_SPLICE]; }
+  ]) {
+    const raw = normalOutput(input);
+    mutate(raw);
+    const diagnostics = [];
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    assert.equal(result.type, 'SUCCESS', result.message);
+    assert.equal(result.output.status, 'DEGRADED');
+    assert.equal(result.output.sections[5].content, null);
+    assert.deepEqual(result.output.sections[5].evidenceRefs, []);
+    assert.equal(JSON.stringify(result.output).includes('how investors are already invested'), false);
+    for (const index of [0, 1, 2, 4, 6]) {
+      assert.notEqual(result.output.sections[index].content, null, `section ${index + 1}`);
+    }
+    const event = diagnostics.find(value => value.stage === 'claudeAnalysisSectionNormalization'
+      && value.sectionIndex === 5);
+    assert.deepEqual(event.validationViolationCategories, ['PLAIN_LANGUAGE_VALIDATION']);
+  }
+});
+
+test('T6 ungrounded Section 6 opportunity still localizes exactly as before when style words are present', async () => {
+  const input = activeUsInput();
+  const raw = styledActiveOutput(input);
+  raw.sections[5].content = `Apple offers an opportunity. ${STYLE_ONLY_SENTENCE}`;
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.sections[5].content, null);
+  assert.deepEqual(result.output.sections[5].uncertainties,
+    ['Constructive opportunity support could not be validated from the generated citation set.']);
+  const normalizationEvents = diagnostics.filter(value =>
+    value.stage === 'claudeAnalysisSectionNormalization');
+  assert.deepEqual(normalizationEvents.map(value => [value.sectionIndex, value.violationCategory]),
+    [[5, 'UNGROUNDED_OPPORTUNITY_SUBJECT']]);
+  for (const index of [1, 2, 4, 6]) {
+    assert.equal(result.output.sections[index].content, raw.sections[index].content);
+  }
+});
+
+test('T7 Section 4 uses the same style policy: style survives, malformed prose localizes', async () => {
+  const input = structuredClone(activeUsInput());
+  input.portfolioContext.myStocks = [{
+    market: 'US', symbol: 'MSFT', telemetryRefs: [], evidenceRefs: ['e1'], upcomingEvents: []
+  }];
+  for (const [content, survives] of [
+    [`Microsoft raised its outlook. ${STYLE_ONLY_SENTENCE}`, true],
+    [MALFORMED_SPLICE, false]
+  ]) {
+    const raw = normalOutput(input);
+    raw.sections[3] = {...raw.sections[3], content, evidenceRefs: ['e1'], telemetryRefs: []};
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+    });
+    assert.equal(result.type, 'SUCCESS', result.message);
+    if (survives) {
+      assert.equal(result.output.sections[3].content, content);
+      assert.deepEqual(result.output.sections[3].evidenceRefs, ['e1']);
+    } else {
+      assert.equal(result.output.sections[3].content, null);
+      assert.deepEqual(result.output.sections[3].evidenceRefs, []);
+      assert.notEqual(result.output.sections[1].content, null);
+    }
+  }
+});
+
 test('provider schema uses compact named string fields without nested section arrays or report section grammar', () => {
   const sectionPayload = {
     type: 'object',

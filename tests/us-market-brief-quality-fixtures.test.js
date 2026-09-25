@@ -4,7 +4,8 @@ const {
   validateClaudeAnalysisInput,
   validateClaudeAnalysisOutput,
   normalizePlainEnglishText,
-  hasAnalystDeskJargon
+  hasAnalystDeskJargon,
+  hasMalformedPlainEnglishProse
 } = require('../lib/claude-analysis-contract');
 const {
   buildClaudeAnalysisRequest,
@@ -780,15 +781,13 @@ test('preserves the deterministic empty initiating-list statement', async () => 
   assert.deepEqual(result.output.sections[3], output.sections[3]);
 });
 
-test('plain-English style is deterministic: raw analyst jargon is rejected and known phrases normalize safely', async () => {
+test('plain-English style is deterministic: raw analyst jargon is style-only and known phrases normalize safely', async () => {
   const input = richCompletedUsWeekInput();
   const good = supportedOutput(input, {plainEnglish: true});
   const bad = supportedOutput(input, {plainEnglish: false});
   assert.equal(validateClaudeAnalysisOutput(good, input).valid, true);
   const rawValidation = validateClaudeAnalysisOutput(bad, input);
-  assert.equal(rawValidation.valid, false);
-  assert.equal(rawValidation.errors.some(error =>
-    error.includes('analyst jargon requires plain-language wording')), true);
+  assert.equal(rawValidation.valid, true, rawValidation.errors.join('; '));
   const normalized = await invokeFixture(input, bad);
   assert.equal(normalized.type, 'SUCCESS', normalized.message);
   const rendered = normalized.output.sections.map(section => section.content).filter(Boolean).join(' ');
@@ -825,7 +824,7 @@ test('plain-English normalization covers the active-session analyst phrases with
   }
 });
 
-test('plain-English guard rewrites only safe phrases and rejects contextual jargon or broken prose', () => {
+test('plain-English guard rewrites only safe phrases, detects contextual jargon and blocks only broken prose', () => {
   for (const [raw, expected] of [
     ['Growth-oriented stocks gained.', 'Shares of companies expected to grow quickly gained.'],
     ['Riskier smaller-capitalization holdings fell.', 'Riskier shares of smaller companies fell.'],
@@ -840,11 +839,72 @@ test('plain-English guard rewrites only safe phrases and rejects contextual jarg
     'high-multiple-valuation holdings', 'high-multiple valuations',
     'risk exposure', 'market appetite',
     'equity positioning',
-    'defensive healthcare how investors are already invested in UNH has provided relative shelter'
+    'we do not know how investors are already invested'
   ]) {
     assert.equal(hasAnalystDeskJargon(normalizePlainEnglishText(phrase)), true, phrase);
+    assert.equal(hasMalformedPlainEnglishProse(normalizePlainEnglishText(phrase)), false, phrase);
   }
+  const broken = 'defensive healthcare how investors are already invested in UNH has provided relative shelter';
+  assert.equal(hasAnalystDeskJargon(broken), true);
+  assert.equal(hasMalformedPlainEnglishProse(broken), true);
   const ordinary = 'The Fed said interest rates may stay high. Treasury yields rose 0.2%. Apple earnings and revenue improved.';
   assert.equal(normalizePlainEnglishText(ordinary), ordinary);
   assert.equal(hasAnalystDeskJargon(ordinary), false);
+  assert.equal(hasMalformedPlainEnglishProse(ordinary), false);
+});
+
+const STYLE_ONLY_SENTENCE =
+  'Fed commentary sounded hawkish, positioning stayed cautious and risk exposure was debated.';
+const STYLE_ONLY_UNCERTAINTY = 'It is unclear whether hawkish commentary will persist.';
+
+test('T4 completed CLOSED, WEEKEND and HOLIDAY sections survive style-only jargon unchanged', async () => {
+  for (const [marketState, generatedAt] of [
+    ['CLOSED', '2026-09-04T22:00:00.000Z'],
+    ['WEEKEND', '2026-09-06T10:00:00.000Z'],
+    ['HOLIDAY', '2026-09-07T16:00:00.000Z']
+  ]) {
+    const input = structuredClone(richCompletedUsWeekInput());
+    input.analysisRequest.generatedAt = generatedAt;
+    input.marketPackages[0].marketContext.marketState = marketState;
+    for (const entry of input.marketPackages[0].telemetry.benchmarkSnapshots.concat(
+      input.marketPackages[0].telemetry.stockSnapshots)) entry.snapshot.marketState = marketState;
+    const styled = supportedOutput(input);
+    for (const sectionIndex of [1, 2, 3, 5, 6]) {
+      styled.sections[sectionIndex].content =
+        `${styled.sections[sectionIndex].content} ${STYLE_ONLY_SENTENCE}`;
+      styled.sections[sectionIndex].uncertainties =
+        styled.sections[sectionIndex].uncertainties.concat(STYLE_ONLY_UNCERTAINTY);
+    }
+    const diagnostics = [];
+    const result = await invokeFixture(input, styled, diagnostics);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(result.output.status, 'NORMAL', marketState);
+    for (const sectionIndex of [1, 2, 3, 5, 6]) {
+      assert.equal(result.output.sections[sectionIndex].content,
+        styled.sections[sectionIndex].content, `${marketState} section ${sectionIndex + 1}`);
+      assert.deepEqual(result.output.sections[sectionIndex].evidenceRefs,
+        styled.sections[sectionIndex].evidenceRefs);
+      assert.deepEqual(result.output.sections[sectionIndex].telemetryRefs,
+        styled.sections[sectionIndex].telemetryRefs);
+    }
+    assert.deepEqual(result.output.furtherReadings, styled.furtherReadings);
+    const residue = diagnostics.filter(value => value.stage === 'plainLanguageStyleResidue');
+    assert.equal(residue.length, 1);
+    assert.deepEqual(residue[0].sections.map(entry => entry.sectionIndex), [1, 2, 3, 5, 6]);
+    for (const entry of residue[0].sections) {
+      assert.equal(entry.contentMatchCount, 3);
+      assert.equal(entry.uncertaintyMatchCount, 1);
+    }
+    assert.equal(JSON.stringify(residue[0]).includes('hawkish'), false);
+  }
+});
+
+test('T5 completed-session malformed splice is still blocked from reaching the user', async () => {
+  const input = richCompletedUsWeekInput();
+  const output = supportedOutput(input);
+  output.sections[4].content =
+    'Defensive healthcare how investors are already invested in UNH has provided relative shelter.';
+  const result = await invokeFixture(input, output);
+  assert.equal(result.type, 'CONTRACT_FAILURE');
+  assert.match(result.message, /sections\[4\]: malformed plain-language prose/);
 });
