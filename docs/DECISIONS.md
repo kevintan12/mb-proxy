@@ -53,3 +53,19 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - What happens on a mismatch (correct, drop the sentence, or flag) instead of blanking the section?
   - How can Further Readings survive when only part of a section is rejected?
 - **Supersedes:** none.
+
+## D-003 — Development process setup (repo: both)
+
+- **Date:** 2026-09-26 · **Branch:** MarketBrief `step-8-runtime-cost` (610fa07) / mb-proxy `main` · **Status:** POLICY
+- **Intent:** Establish a repeatable, auditable development workflow that keeps Kevin in control of every commit while documenting all decisions in one place. Protect both repos from accidental or surprise changes.
+- **Decision:**
+  - **Git commands:** Kevin runs every git command that changes either repo (commit, push, merge, rebase, reset, checkout, tag, stash, branch create/delete, etc.) himself in Git Bash. Claude Code provides exact copy-paste command blocks (starting with `cd` and `git branch --show-current`) with expected output, but never executes them. Read-only commands (status, log, diff, show, rev-parse, etc.) are allowed.
+  - **Shared decision log:** the single authoritative decision log for both MarketBrief and mb-proxy is `mb-proxy/docs/DECISIONS.md`. Claude Code reads it at the start of each session and logs each request there, tagged `repo: MarketBrief` or `repo: mb-proxy` (or `repo: both`), with its intent, what must not change, and rejected options.
+  - **Permission mode:** Claude Code runs in Manual mode by default (approvals required for all tool use). Accept edits only temporarily for approved work. Auto/Bypass modes are never used. Intent: nothing changes without Kevin's deliberate approval.
+  - **Node modules:** `node_modules/` is excluded from Dropbox sync in both repos. Intent: Dropbox file locks prevent npm installs.
+- **Baseline state (26 Sep 2026):**
+  - MarketBrief `main` @ 610fa07: 130/130 tests passing, 14/14 syntax checks passing, `git diff --check` clean. Visible version `v2.20260921.25.F`, release commit `be5df88`.
+  - mb-proxy `main` @ 4127b19: D-001 committed on Preview; baseline pre-D-001 was 701/701 tests passing, 46/46 syntax checks.
+- **Must not change:** the rule that Kevin runs all repo-changing git commands himself. All other rules may be superseded if circumstances change.
+- **Rejected options:** having Claude Code auto-commit or push; logging decisions in separate files per repo; allowing Auto/Bypass modes.
+- **Supersedes:** none.
