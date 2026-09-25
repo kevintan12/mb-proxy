@@ -1929,6 +1929,43 @@ test('gives Claude plain-language and locked movement presentation instructions'
   }
 });
 
+test('PRE, REGULAR and POST share safe wording normalization without changing citations', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z',
+      '2026-09-08T11:30:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z',
+      '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z',
+      '2026-09-08T20:30:00.000Z']
+  ]) {
+    const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
+    const raw = normalOutput(input);
+    raw.sections[4].content = 'Growth-oriented stocks gained.';
+    const originalRefs = raw.sections[4].evidenceRefs.slice();
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+    });
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(result.output.sections[4].content,
+      'Shares of companies expected to grow quickly gained.');
+    assert.deepEqual(result.output.sections[4].evidenceRefs, originalRefs);
+  }
+});
+
+test('active broken replacement prose localizes its section while preserving other analysis', async () => {
+  const input = activeUsInput();
+  const raw = normalOutput(input);
+  raw.sections[4].content =
+    'Defensive healthcare how investors are already invested in UNH has provided relative shelter.';
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
+  });
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.sections[4].content, null);
+  assert.deepEqual(result.output.sections[4].evidenceRefs, []);
+  assert.notEqual(result.output.sections[0].content, null);
+});
+
 test('provider schema uses compact named string fields without nested section arrays or report section grammar', () => {
   const sectionPayload = {
     type: 'object',

@@ -151,9 +151,9 @@ function supportedOutput(input, {opportunity = true, plainEnglish = true} = {}) 
           : 'Policy uncertainty remains a material risk to the market outlook.',
         'The later Yahoo recap and policy calendar identify the next developments to monitor.'
       ]
-    : Array(7).fill('Equity positioning reflected rate-path expectations and reallocation momentum.');
+    : Array(7).fill('Rate-path expectations and reallocation momentum shaped the discussion.');
   if (!plainEnglish && broadMarketAvailable) {
-    ordinaryContent[2] = 'Broadcom equity positioning reflected reallocation momentum.';
+    ordinaryContent[2] = 'Broadcom shares reflected reallocation momentum.';
   }
   const evidenceRefs = [
     ['e2', 'e3'], ['e2', 'e3'], broadMarketAvailable ? ['e4', 'e5'] : ['e1', 'e2'],

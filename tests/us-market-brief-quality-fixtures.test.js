@@ -792,8 +792,8 @@ test('plain-English style is deterministic: raw analyst jargon is rejected and k
   const normalized = await invokeFixture(input, bad);
   assert.equal(normalized.type, 'SUCCESS', normalized.message);
   const rendered = normalized.output.sections.map(section => section.content).filter(Boolean).join(' ');
-  assert.doesNotMatch(rendered, /equity positioning|rate-path expectations|reallocation momentum/i);
-  assert.match(rendered, /how investors are already invested in stocks/i);
+  assert.doesNotMatch(rendered, /rate-path expectations|reallocation momentum/i);
+  assert.match(rendered, /expectations for future interest rates/i);
   const system = buildClaudeAnalysisRequest(input).system;
   assert.match(system, /clear, normal spoken English/);
   assert.match(system, /cyclical participants, risk appetite, asymmetric risk-reward/);
@@ -808,8 +808,7 @@ test('plain-English normalization covers the active-session analyst phrases with
     'risk appetite',
     'asymmetric risk-reward',
     'consolidation thesis',
-    'selective sentiment / positioning',
-    'positioning'
+    'selective sentiment / positioning'
   ];
   for (const phrase of jargon) {
     const raw = `The market discussion used ${phrase}.`;
@@ -824,4 +823,28 @@ test('plain-English normalization covers the active-session analyst phrases with
       assert.match(normalized, /stocks that often move more sharply than the broader market/);
     }
   }
+});
+
+test('plain-English guard rewrites only safe phrases and rejects contextual jargon or broken prose', () => {
+  for (const [raw, expected] of [
+    ['Growth-oriented stocks gained.', 'Shares of companies expected to grow quickly gained.'],
+    ['Riskier smaller-capitalization holdings fell.', 'Riskier shares of smaller companies fell.'],
+    ['The market is repricing downward.', 'The market is falling.']
+  ]) {
+    const normalized = normalizePlainEnglishText(raw);
+    assert.equal(normalized, expected);
+    assert.equal(hasAnalystDeskJargon(normalized), false);
+  }
+  for (const phrase of [
+    'hawkish commentary', 'monetary restraint', 'flight to quality',
+    'high-multiple-valuation holdings', 'high-multiple valuations',
+    'risk exposure', 'market appetite',
+    'equity positioning',
+    'defensive healthcare how investors are already invested in UNH has provided relative shelter'
+  ]) {
+    assert.equal(hasAnalystDeskJargon(normalizePlainEnglishText(phrase)), true, phrase);
+  }
+  const ordinary = 'The Fed said interest rates may stay high. Treasury yields rose 0.2%. Apple earnings and revenue improved.';
+  assert.equal(normalizePlainEnglishText(ordinary), ordinary);
+  assert.equal(hasAnalystDeskJargon(ordinary), false);
 });
