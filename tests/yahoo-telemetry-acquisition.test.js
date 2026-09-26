@@ -105,23 +105,53 @@ function regularRowsWithSep23ValidSep22Invalid() {
   });
 }
 
+const DEFAULT_INTRADAY_BAR = Object.freeze({open: 101, high: 104, low: 99, close: 103, volume: 10});
+
+// D-006: Yahoo's real 1m response is 390 regular-grid bars plus one terminal "closing
+// print" bar at the session close, with O=H=L=C = the official close. Defaults model
+// that shape; the closing print defaults to DEFAULT_INTRADAY_BAR.close so existing
+// assertions (written against the old 390-bar shape) keep passing unchanged.
 function intradayResponseFor(date = '2026-09-22', {
   missingFinal = false,
   mutateBar,
   malformed = false,
-  oversized = false
+  oversized = false,
+  closingPrint = true,
+  closingClose = DEFAULT_INTRADAY_BAR.close,
+  noTradeMinutes = [],
+  extraBarAfterClose = false,
+  sessionContext
 } = {}) {
-  const context = getSessionContext({market: 'US', exchangeDate: date});
+  const context = sessionContext || getSessionContext({market: 'US', exchangeDate: date});
   const open = Date.parse(context.regularOpenTime) / 1000;
   const close = Date.parse(context.regularCloseTime) / 1000;
   const timestamps = [];
   const quote = {open: [], high: [], low: [], close: [], volume: []};
-  const count = (close - open) / 60 - (missingFinal ? 1 : 0);
-  for (let index = 0; index < count; index++) {
-    const bar = {open: 101, high: 104, low: 99, close: 103, volume: 10};
-    if (mutateBar) mutateBar(bar, index, count);
+  const gridCount = (close - open) / 60 - (missingFinal ? 1 : 0);
+  for (let index = 0; index < gridCount; index++) {
+    const bar = {...DEFAULT_INTRADAY_BAR};
+    if (noTradeMinutes.includes(index)) {
+      bar.open = null; bar.high = null; bar.low = null; bar.close = null; bar.volume = 0;
+    }
+    if (mutateBar) mutateBar(bar, index, gridCount);
     timestamps.push(open + index * 60);
     for (const field of Object.keys(quote)) quote[field].push(bar[field]);
+  }
+  if (closingPrint) {
+    timestamps.push(close);
+    quote.open.push(closingClose);
+    quote.high.push(closingClose);
+    quote.low.push(closingClose);
+    quote.close.push(closingClose);
+    quote.volume.push(0);
+  }
+  if (extraBarAfterClose) {
+    timestamps.push(close + 60);
+    quote.open.push(DEFAULT_INTRADAY_BAR.close);
+    quote.high.push(DEFAULT_INTRADAY_BAR.close);
+    quote.low.push(DEFAULT_INTRADAY_BAR.close);
+    quote.close.push(DEFAULT_INTRADAY_BAR.close);
+    quote.volume.push(5);
   }
   if (malformed) return {ok: true, status: 200, text: async () => '{not-json'};
   if (oversized) return {ok: true, status: 200, text: async () => 'x'.repeat(128 * 1024 + 1)};
@@ -131,12 +161,13 @@ function intradayResponseFor(date = '2026-09-22', {
 
 function serviceFor({
   market = 'SG', instant = '2026-09-04T10:00:00Z', rows = normalRows(), meta = {},
-  intradayResponse, intradayFailure = false, onDiagnostics
+  intradayResponse, intradayFailure = false, onDiagnostics, sessionContextOverride
 } = {}) {
   const calls = [];
   const service = createYahooTelemetryAcquisitionService({
     now: () => new Date(instant),
     onDiagnostics,
+    ...(sessionContextOverride ? {getSessionContext: sessionContextOverride} : {}),
     fetchImpl: async (...args) => {
       calls.push(args);
       if (String(args[0]).includes('interval=1m')) {
@@ -679,5 +710,221 @@ test('validates market/symbol classification and remains independent of S.tz', a
   } finally {
     if (oldS === undefined) delete global.S;
     else global.S = oldS;
+  }
+});
+
+// ── D-006: Fix A — recovery on real Yahoo data (closing print, no-trade minutes, tolerance) ──
+
+test('D-006 real Yahoo intraday shape recovers using the closing print close, not the 15:59 bar', async () => {
+  const {service} = serviceFor({
+    market: 'US', instant: '2026-09-23T12:00:00Z', rows: preRowsWithSep22NullOhlcv(),
+    intradayResponse: intradayResponseFor('2026-09-22', {closingClose: 105.5})
+  });
+  const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  const session = snapshot.completedSessions.at(-1);
+  assert.equal(session.sessionDate, '2026-09-22');
+  assert.equal(session.open, 101);
+  assert.equal(session.high, 105.5);
+  assert.equal(session.low, 99);
+  assert.equal(session.close, 105.5);
+  assert.equal(validateFiveSessionSnapshot(snapshot).valid, true);
+});
+
+test('D-006 missing closing print returns MISSING_FINAL_REGULAR_OBSERVATION even with full regular-grid coverage', async () => {
+  const diagnostics = [];
+  const {service} = serviceFor({
+    market: 'US', instant: '2026-09-23T12:00:00Z', rows: preRowsWithSep22NullOhlcv(),
+    intradayResponse: intradayResponseFor('2026-09-22', {closingPrint: false}),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  assert.equal(diagnostics[0].intradayRecoveryRejectionCategory, 'MISSING_FINAL_REGULAR_OBSERVATION');
+  assert.equal(snapshot.completedSessions.at(-1).sessionDate, '2026-09-21');
+});
+
+test('D-006 an extra bar timestamped after the closing print still returns OUTSIDE_EXPECTED_SESSION', async () => {
+  const diagnostics = [];
+  const {service} = serviceFor({
+    market: 'US', instant: '2026-09-23T12:00:00Z', rows: preRowsWithSep22NullOhlcv(),
+    intradayResponse: intradayResponseFor('2026-09-22', {extraBarAfterClose: true}),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  assert.equal(diagnostics[0].intradayRecoveryRejectionCategory, 'OUTSIDE_EXPECTED_SESSION');
+});
+
+test('D-006 no-trade minutes are accepted, excluded from high/low, but still count toward coverage', async () => {
+  const {service} = serviceFor({
+    market: 'US', instant: '2026-09-23T12:00:00Z', rows: preRowsWithSep22NullOhlcv(),
+    intradayResponse: intradayResponseFor('2026-09-22', {noTradeMinutes: [50, 51, 200]})
+  });
+  const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  const session = snapshot.completedSessions.at(-1);
+  assert.equal(session.sessionDate, '2026-09-22');
+  assert.equal(session.open, 101);
+  assert.equal(session.high, 104);
+  assert.equal(session.low, 99);
+  assert.equal(session.close, 103);
+});
+
+test('D-006 a partially null bar (not all four fields) is still rejected as INVALID_INTRADAY_OHLC', async () => {
+  const diagnostics = [];
+  const {service} = serviceFor({
+    market: 'US', instant: '2026-09-23T12:00:00Z', rows: preRowsWithSep22NullOhlcv(),
+    intradayResponse: intradayResponseFor('2026-09-22', {
+      mutateBar: (bar, index) => { if (index === 50) bar.high = null; }
+    }),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  assert.equal(diagnostics[0].intradayRecoveryRejectionCategory, 'INVALID_INTRADAY_OHLC');
+});
+
+test('D-006 a no-trade opening (09:30) bar is rejected as INVALID_INTRADAY_OHLC', async () => {
+  const diagnostics = [];
+  const {service} = serviceFor({
+    market: 'US', instant: '2026-09-23T12:00:00Z', rows: preRowsWithSep22NullOhlcv(),
+    intradayResponse: intradayResponseFor('2026-09-22', {noTradeMinutes: [0]}),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  assert.equal(diagnostics[0].intradayRecoveryRejectionCategory, 'INVALID_INTRADAY_OHLC');
+});
+
+test('D-006 AAPL EQUITY recovers with a partial daily row (open/high/low present, close null)', async () => {
+  const {service} = serviceFor({
+    market: 'US', instant: '2026-09-23T12:00:00Z', rows: preRowsWithSep22NullClose(),
+    meta: {
+      currency: 'USD', instrumentType: 'EQUITY',
+      regularMarketPrice: 999999, regularMarketTime: epoch('2026-09-23T12:00:00Z')
+    },
+    intradayResponse: intradayResponseFor('2026-09-22')
+  });
+  const snapshot = await service.acquireSnapshot({market: 'US', symbol: 'AAPL'});
+  const session = snapshot.completedSessions.at(-1);
+  assert.equal(session.sessionDate, '2026-09-22');
+  assert.equal(session.open, 101);
+  assert.equal(session.high, 104);
+  assert.equal(session.low, 99);
+  assert.equal(session.close, 103);
+  assert.equal(validateFiveSessionSnapshot(snapshot).valid, true);
+});
+
+const TOLERANCE_CASES = Object.freeze([
+  {field: 'open', dailyValue: 101 * 1.0005, expectSuccess: true},
+  {field: 'open', dailyValue: 101 * 1.002, expectSuccess: false},
+  {field: 'high', dailyValue: 104 * 0.9995, expectSuccess: true},
+  {field: 'high', dailyValue: 104 * 0.998, expectSuccess: false},
+  {field: 'low', dailyValue: 99 * 1.0005, expectSuccess: true},
+  {field: 'low', dailyValue: 99 * 1.002, expectSuccess: false}
+]);
+
+test('D-006 primary-row tolerance: small daily/intraday mismatches recover and keep the daily value; larger ones conflict', async () => {
+  for (const {field, dailyValue, expectSuccess} of TOLERANCE_CASES) {
+    const rows = preRowsWithSep22NullClose().map((item, index) =>
+      index === 0 ? {...item, [field]: dailyValue} : item);
+    const diagnostics = [];
+    const {service} = serviceFor({
+      market: 'US', instant: '2026-09-23T12:00:00Z', rows,
+      intradayResponse: intradayResponseFor('2026-09-22'),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+    const label = `${field} ${dailyValue}`;
+    if (expectSuccess) {
+      const session = snapshot.completedSessions.at(-1);
+      assert.equal(session.sessionDate, '2026-09-22', label);
+      assert.equal(session[field], dailyValue, label);
+      assert.equal(diagnostics[0].intradayRecoveryResult, 'SUCCESS', label);
+    } else {
+      assert.equal(snapshot.completedSessions.some(item => item.sessionDate === '2026-09-22'), false, label);
+      assert.equal(diagnostics[0].intradayRecoveryResult, 'FAILURE', label);
+      assert.equal(diagnostics[0].intradayRecoveryRejectionCategory, 'DAILY_INTRADAY_OHLC_CONFLICT', label);
+    }
+  }
+});
+
+test('D-006 preceding-close tolerance: small mismatches recover the primary session; larger ones still exclude it', async () => {
+  for (const {field, dailyValue, expectSuccess} of TOLERANCE_CASES) {
+    const rows = regularRowsWithSep23ValidSep22Invalid().map(item =>
+      item.date === '2026-09-22' ? {...item, [field]: dailyValue} : item);
+    const diagnostics = [];
+    const {service} = serviceFor({
+      market: 'US', instant: '2026-09-24T15:00:00Z', rows,
+      intradayResponse: intradayResponseFor('2026-09-22'),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const result = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+    const label = `${field} ${dailyValue}`;
+    if (expectSuccess) {
+      assert.equal(result.completedSessions[0].sessionDate, '2026-09-23', label);
+      assert.equal(result.completedSessions[0].previousClose, 103, label);
+      assert.equal(diagnostics[0].precedingIntradayRecoveryResult, 'SUCCESS', label);
+    } else {
+      assert.equal(result.completedSessions.some(item => item.sessionDate === '2026-09-23'), false, label);
+      assert.equal(result.primaryCompletedSessionDate, '2026-09-21', label);
+      assert.equal(diagnostics[0].precedingIntradayRecoveryResult, 'FAILURE', label);
+      assert.equal(diagnostics[0].precedingIntradayRecoveryRejectionCategory, 'DAILY_INTRADAY_OHLC_CONFLICT', label);
+    }
+  }
+});
+
+test('D-006 early-close day: the closing print follows the session close time, not a hardcoded 16:00', async () => {
+  // The exchange calendar deliberately treats known US early-close dates (e.g. the day
+  // after Thanksgiving) as UNSUPPORTED_SPECIAL_SESSION, so no real supported date closes
+  // at 13:00. This verifies the mechanism is driven by sessionContext.regularCloseTime
+  // generically (not hardcoded to 16:00) via dependency injection of getSessionContext.
+  const normalContext = getSessionContext({market: 'US', exchangeDate: '2026-09-22'});
+  const earlyCloseTime = new Date(Date.parse(normalContext.regularCloseTime) - 3 * 60 * 60 * 1000).toISOString();
+  const earlyContext = {...normalContext, regularCloseTime: earlyCloseTime};
+  const sessionContextOverride = params => {
+    const context = getSessionContext(params);
+    return context.exchangeDate === '2026-09-22'
+      ? {...context, regularCloseTime: earlyCloseTime} : context;
+  };
+  const diagnostics = [];
+  const {service, calls} = serviceFor({
+    market: 'US', instant: '2026-09-23T12:00:00Z', rows: preRowsWithSep22NullOhlcv(),
+    intradayResponse: intradayResponseFor('2026-09-22', {sessionContext: earlyContext, closingClose: 105}),
+    sessionContextOverride,
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const snapshot = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+  const session = snapshot.completedSessions.at(-1);
+  assert.equal(session.sessionDate, '2026-09-22');
+  assert.equal(session.close, 105);
+  assert.equal(diagnostics[0].intradayRecoveryResult, 'SUCCESS');
+  const expectedPeriod2 = Math.floor(Date.parse(earlyCloseTime) / 1000);
+  assert.match(calls[1][0], new RegExp(`period2=${expectedPeriod2}&interval=1m$`));
+});
+
+test('D-006 existing conflict cases are unchanged: exact-magnitude mismatches still conflict', async () => {
+  const cases = [
+    {
+      rows: regularRowsWithSep23ValidSep22Invalid().map(item => item.date === '2026-09-22'
+        ? {...item, open: 100} : item),
+      rejection: 'DAILY_INTRADAY_OHLC_CONFLICT'
+    },
+    {
+      rows: regularRowsWithSep23ValidSep22Invalid().map(item => item.date === '2026-09-22'
+        ? {...item, low: 0} : item),
+      rejection: 'DAILY_INTRADAY_OHLC_CONFLICT'
+    },
+    {
+      rows: regularRowsWithSep23ValidSep22Invalid().map(item => item.date === '2026-09-22'
+        ? {...item, close: 0} : item),
+      rejection: 'DAILY_INTRADAY_OHLC_CONFLICT'
+    }
+  ];
+  for (const item of cases) {
+    const diagnostics = [];
+    const {service} = serviceFor({
+      market: 'US', instant: '2026-09-24T15:00:00Z', rows: item.rows,
+      intradayResponse: intradayResponseFor('2026-09-22'),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const result = await service.acquireSnapshot({market: 'US', symbol: '^DJI'});
+    assert.equal(result.completedSessions.some(session => session.sessionDate === '2026-09-23'), false);
+    assert.equal(diagnostics[0].precedingIntradayRecoveryRejectionCategory, item.rejection);
   }
 });
