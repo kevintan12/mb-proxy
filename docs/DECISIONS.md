@@ -143,3 +143,27 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Open questions (unresolved from D-005, still open):** how long Yahoo equity daily rows stay incomplete after the close; the exact wording of a Fix B statement (not implemented — Fix A alone resolved the 25 Sep failure without needing Fix B, since recovery now succeeds); whether Fix B should also apply when data is present but stale.
 - **Pending:** Kevin's commit decision; a live CLOSED Preview run soon after 20:00 ET (08:00 SGT on a weekday) to confirm in production-shaped conditions.
 - **Supersedes:** none (extends D-005's diagnosis with the approved fix; D-005 is left unedited).
+
+## D-007 — Plain-language rewrite of the Market Brief writing instructions (repo: mb-proxy)
+
+- **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost · **Status:** AGREED, not started.
+- **Context:** Kevin reviewed the 26 Sep CLOSED live run on Preview (generation be9d8e9f, following D-001 fix). All 8 sections were present and the content was substantively good, but the language remained analyst-style. Examples from the live brief: "measured reassessment of risk and opportunity rather than broad-based capitulation"; "positioning shifts"; "repricing dynamics". A reader without investment experience would not connect to these terms.
+- **Intent:** the brief must read in plain English that a non-analyst retail investor understands, without making confident claims that lack cited evidence. A non-expert should be able to follow the reasoning and assess whether the analysis fits their own situation.
+- **Decision (prompt only, no logic changes):**
+  - **Target language level:** "Level 2 plain English". Short sentences, everyday words, keep the numbers and detail. Example to target: "Stocks rose on Friday even though US government bond rates hit their highest level since 2008. Investors weren't panicking, but they weren't getting carried away either. Most of the buying went into technology and AI companies." Example to avoid (analyst-style): "Friday's market action reflects a measured reassessment of risk and opportunity rather than broad-based capitulation or euphoria."
+  - **Rewrite the writing instructions** in `lib/claude-analysis-invocation.js` (the main prompt, approximately line 73 and the section-specific prompts thereafter). Use short sentences, plain transitions ("because", "so"), concrete facts, and move away from abstract financial concepts. Keep the evidence grounding rules (Sections 3, 4, 6, 7 citations) and the Section 6 literal rule (`UNGROUNDED_OPPORTUNITY_SUBJECT`) intact.
+  - **Section 6 (Key Risks & Opportunities) must not make unsupported forward claims:** strike language like "years of runway ahead", "durable margin expansion", or "tailwinds ahead" unless they are grounded in a cited source or a logical consequence of cited facts. Risks and opportunities tied to cited evidence only.
+  - Carry the rewritten instructions into the Market Brief pipeline redesign (D-002 context).
+- **Must not change:** validation logic (malformed-prose checks remain), grounding rules (Sections 3/4/6 literal evidence, Section 7 empty-when-unsupported), D-001 behaviour (style residue never blocks).
+- **Rejected options:**
+  - Simpler language levels ("explaining to a friend", "assuming no finance knowledge"): these lose the precision needed for an investing decision.
+  - Automated jargon replacement beyond the existing `PLAIN_ENGLISH_REPLACEMENTS`: context-dependent rewrites risk changing claims.
+  - Removing Section 6 or weakening the `UNGROUNDED_OPPORTUNITY_SUBJECT` rule: that would invite unsupported claims.
+- **Implementation plan (when approved):**
+  - Rewrite the main generation prompt in `lib/claude-analysis-invocation.js` (lines ~73 onwards, and section-specific prompts).
+  - Add or strengthen the `PLAIN_ENGLISH_REPLACEMENTS` list with additional common analyst phrases → plain equivalents.
+  - Test with the existing 26 Sep fixture (live replay or regenerate from the same input).
+  - Once D-001 and D-006 are in Production, stage D-007 and run a new PRE/REGULAR/POST/CLOSED set on Preview before promotion.
+- **Timing:** after D-001 and D-006 are promoted to Production. Can be staged and reviewed independently, but carries forward only when both prior fixes are live.
+- **Open questions:** should the prompt also discourage hedging language ("may", "could", "possible") when alternatives are clearer, or is that over-specification?
+- **Supersedes:** none (complements D-001 on style and adds Section 6 unsupported-claim guidance; independent of D-006 telemetry logic).
