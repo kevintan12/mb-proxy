@@ -1909,21 +1909,39 @@ test('gives Claude the exact section uncertainty canonicality requirements', () 
 test('gives Claude plain-language and locked movement presentation instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
-    'clear, normal spoken English for an informed layperson, not a professional market analyst',
-    'Prefer common words when they are equally accurate',
-    'short, direct sentences where practical',
-    'Avoid analyst-desk jargon such as cyclical participants, risk appetite, asymmetric risk-reward',
-    'If a technical or financial term is unavoidable, explain it briefly in plain language',
-    'Preserve analytical depth: simplify wording, not reasoning',
-    'Apple fell $8.24 (2.51%) to $319.97.',
-    'Apple gained $3.25 (1.00%) to $328.21.',
-    'S&P 500 fell by 29.11 points (0.38%) to 7,718.60.',
-    'S&P 500 gained 81.11 points (1.06%) to 7,747.71.',
+    'Write in plain English that a retail investor with no finance training can follow',
+    'Use short sentences and everyday words',
+    'using plain links such as "because" and "so"',
+    'Keep every number and concrete detail: simplify the words, not the reasoning',
+    'Do not use analyst phrases',
+    'cyclical participants, asymmetric risk-reward',
+    'If a technical or financial term is unavoidable, explain it in a few plain words',
+    'Style example only, do not reuse its facts or wording as content',
+    '[Company] fell $[amount] ([percent]%) to $[price].',
+    '[Company] gained $[amount] ([percent]%) to $[price].',
+    '[Index] fell by [points] points ([percent]%) to [level].',
+    '[Index] gained [points] points ([percent]%) to [level].',
     'absolute movement first, percentage in brackets second, and resulting price or level last',
     'Do not omit absolute movement when the package supplies it',
-    'incorporate it naturally into the section prose and explain what is unknown and why it matters',
+    'Hedging words are allowed, but state uncertainty once, where it matters',
+    'if [cited fact], then [consequence]',
+    'Never stack hedges such as "could potentially" and never hedge a fact that is cited',
     'Do not write implementation-style labels such as "Uncertainty:" inside the prose',
     'continue to provide the structured uncertainties arrays separately'
+  ]) {
+    assert.equal(system.includes(requirement), true, requirement);
+  }
+  // Step 8J: example facts must not be able to leak into briefs.
+  for (const leak of ['Apple fell', 'Apple gained', '319.97', '328.21', '7,718.60', '7,747.71']) {
+    assert.equal(system.includes(leak), false, leak);
+  }
+});
+
+test('Step 8J: Section 6 forbids unsupported forward claims', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'Do not make forward claims such as "years of runway", "tailwinds ahead", or "durable margin expansion"',
+    'unless a cited source says so or the claim follows directly from cited facts'
   ]) {
     assert.equal(system.includes(requirement), true, requirement);
   }

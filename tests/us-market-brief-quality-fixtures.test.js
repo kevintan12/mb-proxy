@@ -794,9 +794,9 @@ test('plain-English style is deterministic: raw analyst jargon is style-only and
   assert.doesNotMatch(rendered, /rate-path expectations|reallocation momentum/i);
   assert.match(rendered, /expectations for future interest rates/i);
   const system = buildClaudeAnalysisRequest(input).system;
-  assert.match(system, /clear, normal spoken English/);
-  assert.match(system, /cyclical participants, risk appetite, asymmetric risk-reward/);
-  assert.match(system, /Preserve analytical depth: simplify wording, not reasoning/);
+  assert.match(system, /plain English that a retail investor with no finance training can follow/);
+  assert.match(system, /cyclical participants, asymmetric risk-reward/);
+  assert.match(system, /simplify the words, not the reasoning/);
 });
 
 test('plain-English normalization covers the active-session analyst phrases without changing reasoning', () => {
