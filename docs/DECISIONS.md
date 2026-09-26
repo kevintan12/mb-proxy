@@ -69,3 +69,46 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Must not change:** the rule that Kevin runs all repo-changing git commands himself. All other rules may be superseded if circumstances change.
 - **Rejected options:** having Claude Code auto-commit or push; logging decisions in separate files per repo; allowing Auto/Bypass modes.
 - **Supersedes:** none.
+
+## D-005 — CLOSED brief fails when Yahoo daily rows lag after the close (repo: mb-proxy)
+
+- **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost (05aed81) · **Status:** DIAGNOSING. No code change yet.
+- **Context:**
+  - A CLOSED-session Preview run failed (generation 51f0f1fc, 2026-09-26 01:29 UTC = Fri 25 Sep 21:29 ET). The failure was `sections[3]: factual content requires supplied evidence`.
+  - For all 15 My Stocks/Watchlist symbols, Yahoo's 2026-09-25 daily row existed but had no valid close (`expectedDailyCloseValid=false`). The 4 indices had valid rows.
+  - Intraday recovery (84f5ea4 / c96a132) then failed for every stock, with either `OUTSIDE_EXPECTED_SESSION` or `INVALID_INTRADAY_OHLC`. The freshness gate (39da041) therefore omitted every stock (`COMPLETED_SESSION_DATE_MISMATCH`).
+  - Claude still wrote Section 4 prose, with 0 evidence refs and 0 telemetry refs. The strict completed-session contract (14534fc) rejected the whole report.
+- **Findings (live Yahoo re-fetch, 26 Sep, same endpoints):**
+  - **Daily rows are complete now.** MSFT, NVDA and the other listed symbols now have valid 25 Sep daily rows (e.g. MSFT O 499.04 H 519.40 L 497.25 C 516.17). The gap at 21:29 ET was real but temporary. The row values at run time were not logged, so the exact shape of the gap cannot be re-checked.
+  - **Yahoo adds a closing bar that the check rejects.** The 1m request (`period1`=09:30 ET, `period2`=16:00 ET) returns 391 bars. Bar 391 is stamped exactly 16:00:00, with volume 0 and O=H=L=C equal to the official close. `normalizeIntradaySession` rejects any bar at or after `closeMs` (`OUTSIDE_EXPECTED_SESSION`), so recovery cannot succeed on real data for any symbol, indices included. The test fixtures model exactly 390 bars and no 16:00 bar, so the tests never caught this.
+  - **Quiet minutes also fail the check.** Thinly traded names have minutes with no trades. Bad bars on 25 Sep: CPRI 4, CPRT 1, VEEV 21, VRSK 50, all before 16:00. Any invalid bar returns `INVALID_INTRADAY_OHLC` before the 16:00 check is reached. This explains the mix of the two rejection categories in the logs.
+  - **The 15:59 close is not the official close.** Recovery uses the 15:59 bar's close, but the official close is on the 16:00 bar (e.g. VRSK 169.39 vs 169.21; MSFT 516.10 vs 516.17). Simply dropping the 16:00 bar would recover a wrong close. That wrong value could later conflict with Yahoo's corrected daily row (`CANONICAL_SESSION_VALUES_CONFLICT`).
+  - **Why Section 4 failed the whole report:** `portfolioList` passes every configured security to the model, including omitted ones, each with empty ref arrays. The deterministic statement applies only to an empty list. The prompt has no instruction for a non-empty list with no data. Section-level localization (`normalizeUsIndependentSections`) runs only in active states. The completed-session Section 4 normalizer only handles wrong refs, not missing refs.
+  - **Production (origin/main 430b0a6) is different.** It has neither the intraday recovery nor the 39da041 freshness gate. With the same Yahoo data, Production would most likely build stock snapshots ending 24 Sep and present them as the latest session: the stale-baseline problem 39da041 fixed, not this failure. This was not run live. The same contract rule (`factual content requires supplied evidence`) exists in Production.
+- **Intent:**
+  - Recovery must work on Yahoo's real 1m shape and must return the official close.
+  - A brief whose initiating list has no usable data must degrade to a clear deterministic Section 4 statement, not fail the whole report.
+- **Candidate fixes (not approved):**
+  - **A (root cause, `lib/yahoo-telemetry-acquisition.js`):**
+    - Accept exactly one terminal bar stamped at `closeMs` and use its close as the recovered close. Require that bar; if it is absent, fail closed.
+    - Treat all-null minutes as no-trade minutes. Still require valid 09:30 and 16:00 bars, and still reject partially null or inconsistent bars.
+    - Replace the fixtures with a real-shape fixture: 391 bars plus null minutes.
+  - **B (graceful Section 4, contract + invocation + prompt):** when the initiating list is non-empty but no initiating security has any telemetry or evidence ref, Section 4 becomes a fixed server-owned statement with no refs. The report is DEGRADED with an evidence gap. This applies in both active and completed modes. Partial-data lists are unchanged.
+- **Must not change:**
+  - 39da041 freshness: a stale snapshot must never define the baseline.
+  - The 14534fc strict completed-session contract for all other sections.
+  - c96a132 exact-date recovery semantics: intraday data must never promote a row it cannot reconcile.
+  - Section 4 initiating-list-only scope.
+  - One Anthropic request per generation, with no retry.
+  - A failed regeneration preserves the previous valid report.
+- **Rejected options:**
+  - Just dropping the 16:00 bar: it recovers the 15:59 price, not the official close.
+  - Loosening freshness to accept 24 Sep snapshots: that brings back the 39da041 stale-baseline bug.
+  - Removing omitted securities from `portfolioContext`: Section 4 would then falsely say no securities are configured.
+  - Enabling active-style section localization for all completed-session sections: that weakens 14534fc.
+- **Open questions:**
+  - How long after the close do Yahoo equity daily rows stay incomplete? The answer sets the failure window and whether recovery is needed routinely.
+  - What is the exact wording of the Fix B statement?
+  - Should Fix B also apply when data is present but stale?
+- **Note:** a CLOSED re-run now would probably pass, because Yahoo has since filled the daily rows. That would hide this bug, not validate a fix.
+- **Supersedes:** none.
