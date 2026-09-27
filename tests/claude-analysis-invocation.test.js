@@ -20,7 +20,8 @@ const {
   NO_CURRENT_SESSION_SUMMARY,
   noCurrentSessionEvidenceOutput,
   resolveActiveFurtherReadings,
-  eligibleActiveFurtherReadingReferences
+  eligibleActiveFurtherReadingReferences,
+  hasDirectMarketCausalClaim
 } = require('../lib/claude-analysis-contract');
 const {
   CLAUDE_ANALYSIS_MODEL,
@@ -1913,8 +1914,53 @@ test('Step 8J citation fix: Section 2 and 3 citation instructions and no causal-
     'When evidenceContext.principalCatalysts is not empty, Section 2 must cite at least one of them.',
     'Never add a recap, session, index or weekly-summary reference to Section 3; put index and weekly moves in Sections 1 or 5 and keep Section 3 to the focus companies and sectors'
   ]) assert.equal(system.includes(requirement), true, requirement);
-  assert.equal(system.includes('Style example only'), false);
+  assert.equal(system.includes('Style example only — do not reuse its wording or facts; the placeholders in brackets are not data'), true);
   assert.equal(system.includes('Stocks rose on'), false);
+});
+
+const STYLE_HEADING = 'FINAL STYLE CHECK — apply to every section before you finish.';
+const STYLE_LAST_LINE = 'Before finishing each section, reread it: split any sentence over 25 words into two, and replace any banned word with the plain fact.';
+const DYNAMIC_MARKER = ' Request-specific Section 3 telemetry allowlist';
+
+test('Step 8J readability round: FINAL STYLE CHECK sits after the citation rules and before the dynamic allowlists', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  assert.equal(system.split(STYLE_HEADING).length, 2);
+  const at = system.indexOf(STYLE_HEADING);
+  const staticPrompt = system.split(DYNAMIC_MARKER)[0];
+  assert.equal(staticPrompt.endsWith(STYLE_LAST_LINE), true);
+  assert.equal(at < system.indexOf(DYNAMIC_MARKER), true);
+  assert.equal(at < system.indexOf('Request-specific Section 4 reference allowlist'), true);
+  for (const citation of [
+    'When evidenceContext.principalCatalysts is not empty, Section 2 must cite at least one of them.',
+    'Never add a recap, session, index or weekly-summary reference to Section 3',
+    'Hard output constraint for Sections 6-7',
+    'Section slot s8 FURTHER READINGS must be exactly {}',
+    'MarketBrief derives top-level Further Readings and evidenceReferences from the validated sections'
+  ]) {
+    assert.equal(system.indexOf(citation) >= 0 && system.indexOf(citation) < at, true, citation);
+  }
+  // Moved sentences appear exactly once (nothing left behind at the old position).
+  for (const once of [
+    'Write in plain English that a retail investor with no finance training can follow',
+    'Never use these words or phrases: tailwind',
+    'Hedging words are allowed, but state uncertainty once',
+    'Keep every sentence under 25 words and give each sentence one idea',
+    'Style example only'
+  ]) assert.equal(system.split(once).length, 2, once);
+});
+
+test('Step 8J readability round: the worked style example cannot trigger the causal-claim validator', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  const match = system.match(/the placeholders in brackets are not data: "([^"]+)"/);
+  assert.notEqual(match, null);
+  const example = match[1];
+  assert.equal(hasDirectMarketCausalClaim(example), false);
+  for (const sentence of example.split(/(?<=.) /)) {
+    assert.equal(hasDirectMarketCausalClaim(sentence), false, sentence);
+  }
+  for (const sentence of example.split(/(?<=.) /)) {
+    assert.equal(sentence.split(/s+/).length < 25, true, sentence);
+  }
 });
 
 test('gives Claude plain-language and locked movement presentation instructions', () => {
