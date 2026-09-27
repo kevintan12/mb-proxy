@@ -1906,17 +1906,31 @@ test('gives Claude the exact section uncertainty canonicality requirements', () 
   }
 });
 
+test('Step 8J citation fix: Section 2 and 3 citation instructions and no causal-pattern style example', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    "including plain wording such as 'rose on', 'because' or 'so', its evidenceRefs must include at least one evidenceContext.principalCatalysts reference",
+    'When evidenceContext.principalCatalysts is not empty, Section 2 must cite at least one of them.',
+    'Never add a recap, session, index or weekly-summary reference to Section 3; put index and weekly moves in Sections 1 or 5 and keep Section 3 to the focus companies and sectors'
+  ]) assert.equal(system.includes(requirement), true, requirement);
+  assert.equal(system.includes('Style example only'), false);
+  assert.equal(system.includes('Stocks rose on'), false);
+});
+
 test('gives Claude plain-language and locked movement presentation instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
     'Write in plain English that a retail investor with no finance training can follow',
     'Use short sentences and everyday words',
-    'using plain links such as "because" and "so"',
+    'using plain links such as "so" where a cited principal catalyst supports the link',
+    'Keep every sentence under 25 words and give each sentence one idea',
+    'Do not join two ideas with "while", "as", "with" or a semicolon',
+    'Never use these words or phrases: tailwind, headwind, durable, resilience, resilient, bifurcated, cohort, wall of worry, validates, validated, underpinned, cascaded, narrative, renaissance, sustained investor appetite',
+    'If a banned word feels needed, write the plain fact instead',
     'Keep every number and concrete detail: simplify the words, not the reasoning',
     'Do not use analyst phrases',
     'cyclical participants, asymmetric risk-reward',
     'If a technical or financial term is unavoidable, explain it in a few plain words',
-    'Style example only, do not reuse its facts or wording as content',
     '[Company] fell $[amount] ([percent]%) to $[price].',
     '[Company] gained $[amount] ([percent]%) to $[price].',
     '[Index] fell by [points] points ([percent]%) to [level].',
