@@ -1565,7 +1565,9 @@ test('active package coverage diagnostic exposes bounded classifier roles and re
   assert.equal(packageDiagnostic.upcomingEventCount, 0);
   const serialized = JSON.stringify(diagnostics);
   assert.equal(serialized.includes('PRIVATE article prose'), false);
-  assert.equal(serialized.includes('Microsoft'), false);
+  // Step 8K: only the candidate audit event may carry (truncated) headlines.
+  assert.equal(JSON.stringify(diagnostics.filter(value =>
+    value.stage !== 'activeYahooCandidateAudit')).includes('Microsoft'), false);
   assert.equal(output.marketPackages[0].evidenceContext.broadMarketFocus[0].evidenceRef, focusRef);
   assert.equal(diagnostics.some(value => value.stage === 'activeSessionSectionCoveragePackage'), true);
 
@@ -4710,4 +4712,255 @@ test('returns immutable output without mutating membership or acquired canonical
   assert.equal(Object.isFrozen(acquiredSnapshot), true);
   assert.equal(Object.isFrozen(acquiredEvidence), true);
   assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+// ── Step 8K: relevance ranking before the active Yahoo article fetch, and the candidate audit log ──
+function step8kCandidate(headline, extra = {}) {
+  const slug = headline.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return {
+    headline, url: `https://finance.yahoo.com/news/${slug}.html`, uuid: null,
+    publisher: 'Yahoo Finance', ...extra
+  };
+}
+
+function step8kUsableArticle(candidate, publishedAt = '2026-09-08T14:30:00.000Z') {
+  return {ok: true, type: 'SUCCESS', articleContent: {
+    sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url, headline: candidate.headline,
+    publisher: 'Yahoo Finance', publishedAt, updatedAt: null,
+    articleText: 'Usable current-session article content.'
+  }};
+}
+
+async function step8kActiveRun({candidates, myStocks = [], watchlist = [], mostActive = [], acquire = null}) {
+  const diagnostics = [];
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {overlayAsOf: '2026-09-08T14:55:00.000Z'});
+      }
+    }),
+    yahooMostActiveAcquisition: {
+      async acquireMostActive() { return {ok: true, type: 'SUCCESS', candidates: mostActive}; }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        calls.yahooCurrentNewsArticle.push(candidate);
+        return acquire ? acquire(candidate)
+          : {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
+      }
+    },
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const output = await service.assemble(request('US', {myStocks, watchlist}));
+  const auditEvents = diagnostics.filter(value => value.stage === 'activeYahooCandidateAudit');
+  return {
+    output, calls, diagnostics, auditEvents,
+    audit: auditEvents.flatMap(event => event.candidates)
+  };
+}
+
+test('Step 8K the real caller passes My Stocks snapshots so a holding headline outranks a neutral one', async () => {
+  const neutral = step8kCandidate('Quarterly gardening tips for spring');
+  const holding = step8kCandidate('VEEV lifts guidance after a strong quarter');
+  const {audit, calls} = await step8kActiveRun({
+    candidates: [neutral, holding], myStocks: [{market: 'US', symbol: 'VEEV'}]
+  });
+  assert.deepEqual(audit.map(entry => [entry.rank, entry.tier, entry.headline]), [
+    [1, 1, holding.headline], [2, 3, neutral.headline]
+  ]);
+  assert.equal(calls.yahooCurrentNewsArticle[0].url, holding.url);
+});
+
+test('Step 8K the real caller passes Watchlist snapshots so a watchlist headline outranks a neutral one', async () => {
+  const neutral = step8kCandidate('Quarterly gardening tips for spring');
+  const watched = step8kCandidate('AAPL unveils a new product line');
+  const {audit, calls} = await step8kActiveRun({
+    candidates: [neutral, watched], watchlist: [{market: 'US', symbol: 'AAPL'}]
+  });
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.headline]), [
+    [1, watched.headline], [3, neutral.headline]
+  ]);
+  assert.equal(calls.yahooCurrentNewsArticle[0].url, watched.url);
+});
+
+test('Step 8K a headline naming a most-active stock is still ranked first', async () => {
+  const {audit} = await step8kActiveRun({
+    candidates: [step8kCandidate('Oil jumps as Iran tension builds'),
+      step8kCandidate('Microsoft outlook lifts sentiment')],
+    mostActive: [{symbol: 'MSFT', shortName: 'Microsoft', longName: 'Microsoft Corporation'}]
+  });
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.headline]), [
+    [1, 'Microsoft outlook lifts sentiment'], [2, 'Oil jumps as Iran tension builds']
+  ]);
+});
+
+test('Step 8K real headlines: US market and macro stories outrank non-US and lifestyle stories', async () => {
+  const headlines = [
+    'Australian developer axes Sydney suburban data centre plan after local opposition',
+    'Singapore Stocks Rally to Three-Week High; Oiltek International Zooms 13%',
+    "What's a 'normal' age to retire? Experts weigh in",
+    'Stocks fall as Middle East stalemate boosts oil',
+    'Dollar steadies near two-month high as US-Iran stalemate lifts oil, Fed rate hike bets build'
+  ];
+  const {audit, calls} = await step8kActiveRun({candidates: headlines.map(h => step8kCandidate(h))});
+  assert.deepEqual(audit.map(entry => [entry.rank, entry.tier, entry.headline]), [
+    [1, 2, headlines[3]], [2, 2, headlines[4].slice(0, 80)],
+    [3, 4, headlines[0].slice(0, 80)], [4, 4, headlines[1]], [5, 4, headlines[2]]
+  ]);
+  assert.equal(calls.yahooCurrentNewsArticle.length, 5);
+});
+
+test('Step 8K whole-word matching: Oiltek is not oil and generic words do not add relevance', async () => {
+  const {audit} = await step8kActiveRun({candidates: [
+    step8kCandidate('Oiltek International wins a new contract'),
+    step8kCandidate('Stocks and shares in focus as markets wait'),
+    step8kCandidate('Oil prices jump, crude stays firm'),
+    step8kCandidate('Fed rate cut hopes lift Treasury yields'),
+    step8kCandidate('How to open a savings account')
+  ]});
+  const tierByHeadline = new Map(audit.map(entry => [entry.headline, entry.tier]));
+  assert.equal(tierByHeadline.get('Oiltek International wins a new contract'), 3);
+  assert.equal(tierByHeadline.get('Stocks and shares in focus as markets wait'), 3);
+  assert.equal(tierByHeadline.get('Oil prices jump, crude stays firm'), 2);
+  assert.equal(tierByHeadline.get('Fed rate cut hopes lift Treasury yields'), 2);
+  assert.equal(tierByHeadline.get('How to open a savings account'), 4);
+});
+
+test('Step 8K a tier 1 or tier 2 signal keeps a non-US headline out of the lowest tier', async () => {
+  const {audit} = await step8kActiveRun({candidates: [
+    step8kCandidate('Singapore retirement savings guide'),
+    step8kCandidate('US tariffs on China hit Nasdaq futures')
+  ]});
+  assert.deepEqual(audit.map(entry => entry.tier), [2, 4]);
+});
+
+test('Step 8K lowest-tier candidates are never dropped and are fetched when nothing else remains', async () => {
+  const headlines = ['Singapore retirement savings guide', 'Australian mortgage rates explained',
+    'How to choose a credit card'];
+  const {audit, calls} = await step8kActiveRun({candidates: headlines.map(h => step8kCandidate(h))});
+  assert.equal(calls.yahooCurrentNewsArticle.length, 3);
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.decision]), [
+    [4, 'EXTRACTION_FAILED'], [4, 'EXTRACTION_FAILED'], [4, 'EXTRACTION_FAILED']
+  ]);
+});
+
+test('Step 8K page order stays stable inside a tier', async () => {
+  const headlines = Array.from({length: 6}, (_, index) => `Neutral story number ${index + 1}`);
+  const {audit} = await step8kActiveRun({candidates: headlines.map(h => step8kCandidate(h))});
+  assert.deepEqual(audit.map(entry => entry.headline), headlines);
+  assert.deepEqual(audit.map(entry => entry.tier), headlines.map(() => 3));
+});
+
+test('Step 8K fetch budget is unchanged: eight attempts, three admissions', async () => {
+  const many = Array.from({length: 12}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
+  const unusable = await step8kActiveRun({candidates: many});
+  assert.equal(unusable.calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(unusable.calls.evidenceRoleClassification.length, 0);
+  assert.equal(unusable.audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 4);
+
+  const usable = Array.from({length: 10}, (_, index) => step8kCandidate(`Oil story number ${index + 1}`));
+  const admitted = await step8kActiveRun({candidates: usable, acquire: step8kUsableArticle});
+  assert.equal(admitted.calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
+  assert.equal(admitted.audit.filter(entry => entry.decision === 'ADMITTED').length,
+    ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
+  assert.equal(admitted.audit.filter(entry => entry.decision === 'SKIPPED_MAX_ADMITTED').length, 7);
+  assert.equal(admitted.calls.evidenceRoleClassification.length, 1);
+});
+
+test('Step 8K candidate audit lists all candidates in numbered parts of at most ten', async () => {
+  const candidates = Array.from({length: 23}, (_, index) => step8kCandidate(`Neutral story number ${index + 1}`));
+  const {auditEvents, audit} = await step8kActiveRun({candidates});
+  assert.deepEqual(auditEvents.map(event => [event.part, event.parts, event.candidates.length]), [
+    [1, 3, 10], [2, 3, 10], [3, 3, 3]
+  ]);
+  assert.deepEqual(audit.map(entry => entry.rank), Array.from({length: 23}, (_, index) => index + 1));
+  assert.equal(auditEvents[0].windowStartsAtInclusive, '2026-09-08T08:00:00.000Z');
+  assert.equal(auditEvents[0].windowEndsAtInclusive, '2026-09-08T15:00:00.000Z');
+});
+
+test('Step 8K candidate audit records the decision for each rejection type', async () => {
+  const candidates = ['exception', 'timeout', 'extraction', 'notime', 'before', 'after', 'admitted',
+    'duplicate', 'ninth'].map(name => step8kCandidate(`Neutral ${name} story`));
+  const byName = name => candidates.find(candidate => candidate.headline === `Neutral ${name} story`);
+  const {audit, calls} = await step8kActiveRun({
+    candidates,
+    acquire: async candidate => {
+      if (candidate.headline === byName('exception').headline) throw new Error('network');
+      if (candidate.headline === byName('timeout').headline) {
+        return {ok: false, type: 'TIMEOUT', articleContent: null};
+      }
+      if (candidate.headline === byName('extraction').headline) return {
+        ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null,
+        extractionFailureType: 'NO_ARTICLE_BODY_CONTAINER_OR_TEXT'
+      };
+      if (candidate.headline === byName('notime').headline) {
+        const value = step8kUsableArticle(candidate);
+        return {...value, articleContent: {...value.articleContent, publishedAt: null}};
+      }
+      if (candidate.headline === byName('before').headline) return step8kUsableArticle(candidate, '2026-09-08T07:00:00.000Z');
+      if (candidate.headline === byName('after').headline) return step8kUsableArticle(candidate, '2026-09-08T15:30:00.000Z');
+      if (candidate.headline === byName('duplicate').headline) {
+        const value = step8kUsableArticle(byName('admitted'));
+        return {...value, articleContent: {...value.articleContent, headline: candidate.headline}};
+      }
+      return step8kUsableArticle(candidate);
+    }
+  });
+  assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  const byHeadline = new Map(audit.map(entry => [entry.headline, entry]));
+  const decision = name => byHeadline.get(`Neutral ${name} story`);
+  assert.deepEqual([decision('exception').decision, decision('exception').failureType],
+    ['FETCH_FAILED', 'EXCEPTION']);
+  assert.deepEqual([decision('timeout').decision, decision('timeout').failureType],
+    ['FETCH_FAILED', 'TIMEOUT']);
+  assert.deepEqual([decision('extraction').decision, decision('extraction').failureType],
+    ['EXTRACTION_FAILED', 'NO_ARTICLE_BODY_CONTAINER_OR_TEXT']);
+  assert.equal(decision('notime').decision, 'REJECTED_NO_PUBLICATION_TIME');
+  assert.deepEqual([decision('before').decision, decision('before').publishedAt],
+    ['REJECTED_BEFORE_WINDOW', '2026-09-08T07:00:00.000Z']);
+  assert.deepEqual([decision('after').decision, decision('after').publishedAt],
+    ['REJECTED_AFTER_WINDOW', '2026-09-08T15:30:00.000Z']);
+  assert.equal(decision('admitted').decision, 'ADMITTED');
+  assert.equal(decision('duplicate').decision, 'REJECTED_DUPLICATE');
+  assert.equal(decision('ninth').decision, 'SKIPPED_MAX_ATTEMPTS');
+});
+
+test('Step 8K candidate audit events stay under 3.5 KB, truncate text and carry no article text or URL query', async () => {
+  const candidates = Array.from({length: 30}, (_, index) => {
+    const headline = `日本語${index} `.repeat(40);
+    return {
+      headline, uuid: null, publisher: 'Very Long Publisher Name '.repeat(6),
+      url: `https://finance.yahoo.com/news/${'long-slug-segment-'.repeat(8)}${index}.html?utm=SECRETQUERY`
+    };
+  });
+  const {auditEvents, audit} = await step8kActiveRun({candidates});
+  assert.equal(audit.length, 30);
+  for (const event of auditEvents) {
+    const bytes = Buffer.byteLength(JSON.stringify({
+      ...event, generationId: '0123456789abcdef0123456789abcdef'
+    }), 'utf8');
+    assert.ok(bytes <= 3500, `event part ${event.part} is ${bytes} bytes`);
+    assert.equal(event.parts, auditEvents.length);
+  }
+  for (const entry of audit) {
+    assert.ok(Array.from(entry.headline).length <= 80);
+    assert.ok(Array.from(entry.publisher).length <= 24);
+    assert.ok(entry.slug.length <= 48);
+  }
+  const serialized = JSON.stringify(auditEvents);
+  assert.equal(serialized.includes('SECRETQUERY'), false);
+  assert.equal(serialized.includes('articleText'), false);
+});
+
+test('Step 8K completed-session runs emit no candidate audit event', async () => {
+  const diagnostics = [];
+  const {service} = harness({onDiagnostics: value => diagnostics.push(value)});
+  await service.assemble(request());
+  assert.equal(diagnostics.some(value => value.stage === 'activeYahooCandidateAudit'), false);
+  assert.ok(diagnostics.some(value => value.stage === 'activeYahooAcquisition'
+    && value.outcome === 'SKIPPED_COMPLETED_SESSION'));
 });
