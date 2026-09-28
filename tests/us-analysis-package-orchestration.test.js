@@ -4811,7 +4811,12 @@ test('Step 8K real headlines: US market and macro stories outrank non-US and lif
     [1, 2, headlines[3]], [2, 2, headlines[4].slice(0, 80)],
     [3, 4, headlines[0].slice(0, 80)], [4, 4, headlines[1]], [5, 4, headlines[2]]
   ]);
-  assert.equal(calls.yahooCurrentNewsArticle.length, 5);
+  // Step 8K.1: the three non-US and lifestyle headlines are never fetched.
+  assert.deepEqual(audit.map(entry => entry.decision), [
+    'EXTRACTION_FAILED', 'EXTRACTION_FAILED',
+    'SKIPPED_BELOW_RELEVANCE_FLOOR', 'SKIPPED_BELOW_RELEVANCE_FLOOR', 'SKIPPED_BELOW_RELEVANCE_FLOOR'
+  ]);
+  assert.equal(calls.yahooCurrentNewsArticle.length, 2);
 });
 
 test('Step 8K whole-word matching: Oiltek is not oil and generic words do not add relevance', async () => {
@@ -4838,14 +4843,99 @@ test('Step 8K a tier 1 or tier 2 signal keeps a non-US headline out of the lowes
   assert.deepEqual(audit.map(entry => entry.tier), [2, 4]);
 });
 
-test('Step 8K lowest-tier candidates are never dropped and are fetched when nothing else remains', async () => {
+test('Step 8K.1 tier 4a candidates are dropped before fetching and stay in the audit', async () => {
   const headlines = ['Singapore retirement savings guide', 'Australian mortgage rates explained',
-    'How to choose a credit card'];
+    'How to choose a credit card', 'ASX slips on local news', 'Malaysia and Indonesia budgets'];
   const {audit, calls} = await step8kActiveRun({candidates: headlines.map(h => step8kCandidate(h))});
-  assert.equal(calls.yahooCurrentNewsArticle.length, 3);
+  assert.equal(calls.yahooCurrentNewsArticle.length, 0);
+  assert.equal(audit.length, headlines.length);
+  assert.ok(audit.every(entry => entry.tier === 4 && entry.decision === 'SKIPPED_BELOW_RELEVANCE_FLOOR'));
+});
+
+test('Step 8K.1 tier 4b China and India headlines are kept, fetched and ranked last', async () => {
+  const china = step8kCandidate('China May Reopen Nvidia AI Market');
+  const india = step8kCandidate('India growth outlook improves');
+  const neutral = step8kCandidate('Neutral story number 1');
+  const dropped = step8kCandidate('Singapore stocks rally');
+  const macro = step8kCandidate('Oil jumps on Iran tension');
+  const {audit, calls} = await step8kActiveRun({candidates: [china, dropped, india, neutral, macro]});
   assert.deepEqual(audit.map(entry => [entry.tier, entry.decision]), [
-    [4, 'EXTRACTION_FAILED'], [4, 'EXTRACTION_FAILED'], [4, 'EXTRACTION_FAILED']
+    [2, 'EXTRACTION_FAILED'], [3, 'EXTRACTION_FAILED'],
+    [4, 'EXTRACTION_FAILED'], [4, 'EXTRACTION_FAILED'],
+    [4, 'SKIPPED_BELOW_RELEVANCE_FLOOR']
   ]);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url),
+    [macro.url, neutral.url, china.url, india.url]);
+});
+
+test('Step 8K.1 a China or India headline is kept even when it also matches a tier 4a term', async () => {
+  const {audit, calls} = await step8kActiveRun({candidates: [
+    step8kCandidate('Singapore retirement funds eye China rebound'),
+    step8kCandidate('Australia miners rally on India demand')
+  ]});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.decision]), [
+    [4, 'EXTRACTION_FAILED'], [4, 'EXTRACTION_FAILED']
+  ]);
+  assert.equal(calls.yahooCurrentNewsArticle.length, 2);
+});
+
+test('Step 8K.1 Hong Kong, Hang Seng, Nikkei and FTSE headlines are kept and ranked last', async () => {
+  const kept = ['Hong Kong shares slide overnight', 'Hang Seng falls on property worries',
+    'Nikkei hits record high', 'FTSE 100 edges up in early trade'].map(h => step8kCandidate(h));
+  const neutral = step8kCandidate('Neutral story number 1');
+  const {audit, calls} = await step8kActiveRun({candidates: kept.concat(neutral)});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.decision]), [
+    [3, 'EXTRACTION_FAILED'], ...kept.map(() => [4, 'EXTRACTION_FAILED'])
+  ]);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url),
+    [neutral.url, ...kept.map(candidate => candidate.url)]);
+});
+
+test('Step 8K.1 STI matches as a whole word only: stimulus and investing are not dropped', async () => {
+  const {audit} = await step8kActiveRun({candidates: [
+    step8kCandidate('Stimulus hopes lift sentiment'), step8kCandidate('Investing for the long run'),
+    step8kCandidate('STI closes higher')
+  ]});
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.decision]), [
+    ['Stimulus hopes lift sentiment', 'EXTRACTION_FAILED'],
+    ['Investing for the long run', 'EXTRACTION_FAILED'],
+    ['STI closes higher', 'SKIPPED_BELOW_RELEVANCE_FLOOR']
+  ]);
+});
+
+test('Step 8K.1 "how to" is dropped only at the start of a headline', async () => {
+  const {audit} = await step8kActiveRun({candidates: [
+    step8kCandidate('How to trade volatile markets'), step8kCandidate('Investors weigh how to respond')
+  ]});
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.tier, entry.decision]), [
+    ['Investors weigh how to respond', 3, 'EXTRACTION_FAILED'],
+    ['How to trade volatile markets', 4, 'SKIPPED_BELOW_RELEVANCE_FLOOR']
+  ]);
+});
+
+test('Step 8K.1 a neutral tier 3 headline is not dropped', async () => {
+  const {audit, calls} = await step8kActiveRun({candidates: [step8kCandidate('Quarterly gardening tips for spring')]});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.decision]), [[3, 'EXTRACTION_FAILED']]);
+  assert.equal(calls.yahooCurrentNewsArticle.length, 1);
+});
+
+test('Step 8K.1 when every candidate is dropped the limited-evidence path is unchanged', async () => {
+  const {output, calls} = await step8kActiveRun({candidates: [
+    step8kCandidate('Singapore stocks rally'), step8kCandidate('How to choose a credit card')
+  ]});
+  assert.equal(calls.yahooCurrentNewsArticle.length, 0);
+  assert.equal(calls.evidenceRoleClassification.length, 0);
+  assert.ok(output.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('current-session Yahoo Finance news was unavailable')));
+});
+
+test('Step 8K.1 dropped candidates use no fetch attempts, so the eight-attempt cap still applies to the rest', async () => {
+  const dropped = Array.from({length: 5}, (_, index) => step8kCandidate(`Singapore story number ${index + 1}`));
+  const neutral = Array.from({length: 12}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
+  const {audit, calls} = await step8kActiveRun({candidates: dropped.concat(neutral)});
+  assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_BELOW_RELEVANCE_FLOOR').length, 5);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 4);
 });
 
 test('Step 8K page order stays stable inside a tier', async () => {

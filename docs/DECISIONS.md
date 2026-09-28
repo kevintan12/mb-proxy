@@ -143,3 +143,24 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Open questions (unresolved from D-005, still open):** how long Yahoo equity daily rows stay incomplete after the close; the exact wording of a Fix B statement (not implemented — Fix A alone resolved the 25 Sep failure without needing Fix B, since recovery now succeeds); whether Fix B should also apply when data is present but stale.
 - **Pending:** Kevin's commit decision; a live CLOSED Preview run soon after 20:00 ET (08:00 SGT on a weekday) to confirm in production-shaped conditions.
 - **Supersedes:** none (extends D-005's diagnosis with the approved fix; D-005 is left unedited).
+
+## Step 8K.1 — Drop clearly unrelated active Yahoo candidates before fetching (repo: mb-proxy)
+
+- **Request:** add a relevance floor to the active-session (PRE/REGULAR/POST) Yahoo candidate selection built in Step 8K (dd57d1b).
+- **Kevin's reason:** the quality of Pre-Market and After-Hours analysis is the key of the project. On 28 Sep 2026 three PRE runs admitted clearly unrelated articles (a Sydney data centre, Singapore stocks, retirement age), which blocked good sections.
+- **Previous decision:** Step 8K ranked candidates by US-market relevance and chose that **no candidate is dropped**. This reverses that choice **only for tier 4a**.
+- **Decision:**
+  - Tier 4 is split. **4a (dropped before fetching):** headlines with no tier 1 or tier 2 signal that match Singapore, STI, ASX, Australia, Australian, Hong Kong, Hang Seng, Nikkei, FTSE, Malaysia, Indonesia, retire, retirement, mortgage, credit card, savings account, how to. **4b (kept, ranked last):** China and India headlines, since items such as "China May Reopen Nvidia's AI Market" are US-relevant. Tier 3 (neutral) is not dropped. A headline matching both a 4a and a 4b term is dropped.
+  - Dropped candidates are never fetched and use no fetch attempts. The 8-attempt and 3-admitted caps are unchanged.
+  - They stay in `activeYahooCandidateAudit` (listed after all fetchable candidates, tier 4) with decision `SKIPPED_BELOW_RELEVANCE_FLOOR`. The log line and fields are unchanged.
+  - If nothing fetchable remains, behaviour is unchanged: classification skipped, `ACTIVE_YAHOO_NEWS_UNAVAILABLE_GAP` added, one Claude call with the limited-evidence instruction, report DEGRADED. `noCurrentSessionEvidenceOutput` is untouched.
+- **Must not change:** the CNBC completed-session path (138af60); the 8-attempt and 3-admitted caps; prompts.
+- **Deferred:** rejecting an article after fetch on a non-US exchange tag is not added.
+- **Implementation:** `lib/us-analysis-package-orchestration.js` (`activeYahooCandidateTier`, `selectedActiveYahooCandidates`, the fetch loop skips dropped entries).
+- **Evidence/tests:** `tests/us-analysis-package-orchestration.test.js`: the Step 8K "never dropped" test is inverted; the real-headlines test now expects the non-US and lifestyle items skipped; new tests cover 4a dropped and not fetched, 4b kept and ranked last, tier 3 kept, all-dropped takes the limited path, and the attempt cap unchanged.
+- **Amendment (Step 8K.1 correction, 28 Sep 2026):**
+  - **Kevin's reason:** China and other Asian or European market headlines can affect US markets, and the Pre-Market focus (Step 21G) includes what happened in Asia and Europe overnight. The first Step 8K.1 build dropped a headline on any 4a match, even one that also named China or India, and dropped Hong Kong, Hang Seng, Nikkei and FTSE headlines.
+  - **4b (kept, ranked last) is now:** China, India, Hong Kong, Hang Seng, Nikkei, FTSE. A 4b match wins over a 4a match in the same headline.
+  - **4a (dropped before fetching) is now only:** Singapore, STI, ASX, Australia, Australian, Malaysia, Indonesia, retire, retirement, mortgage, credit card, savings account, and "how to" at the start of the headline.
+  - **Matching:** whole words only, case-insensitive, so "stimulus" and "investing" never match STI. "how to" counts only at the start, so "Investors weigh how to respond" is kept.
+  - Tier 1 and tier 2 signals still win first. Caps, audit fields, the log line and the empty-result path are unchanged. This replaces the term lists above; the rest of the Step 8K.1 decision stands.
