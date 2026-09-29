@@ -634,12 +634,14 @@ test('diagnoses primary subject omission separately from subjects sanitized to e
   assert.deepEqual(diagnostics[0].subjectCoverage, result.subjectCoverage);
 });
 
-test('never retries network, HTTP, malformed-envelope, or contract failures', async () => {
+test('never retries network, HTTP, unreadable-body, or truncated failures', async () => {
   const transports = [
     async () => { throw new Error('network secret'); },
+    async () => ({ok: false, status: 401, headers: {get: () => null}}),
+    async () => ({ok: false, status: 429, headers: {get: () => null}}),
     async () => ({ok: false, status: 503, headers: {get: () => null}}),
-    async () => ({ok: true, status: 200, headers: {get: () => null}, async json() { return {content: []}; }}),
-    async () => response(classifications({index: 2, value: {roles: ['PRINCIPAL_CATALYST']}}))
+    async () => ({ok: true, status: 200, headers: {get: () => null}, async json() { throw new Error('unreadable'); }}),
+    async () => response({classifications: []}, {stop_reason: 'max_tokens'})
   ];
   for (const transport of transports) {
     let calls = 0;
@@ -649,6 +651,53 @@ test('never retries network, HTTP, malformed-envelope, or contract failures', as
     assert.equal(result.ok, false);
     assert.equal(calls, 1);
   }
+});
+
+test('Step 8L: classifier retries once silently after a contract failure and then succeeds', async () => {
+  // e3 is a SUBSEQUENT_DEVELOPMENT, so tagging it PRINCIPAL_CATALYST breaks the contract.
+  const bad = response(classifications({index: 2, value: {roles: ['PRINCIPAL_CATALYST']}}));
+  const good = response(classifications());
+  const responses = [bad, good];
+  let calls = 0;
+  const diagnostics = [];
+  const bodies = [];
+  const result = await invokeClaudeEvidenceRoleClassification({
+    input: input(), apiKey: 'secret', onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async (url, options) => { bodies.push(options.body); return responses[calls++]; }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 2);
+  assert.equal(bodies[0], bodies[1]);
+  const retries = diagnostics.filter(value => value.stage === 'contractRetry');
+  assert.equal(retries.length, 1);
+  assert.equal(retries[0].call, 'classifier');
+  assert.equal(retries[0].firstFailureMessage, 'subsequent development cannot be a principal catalyst');
+  assert.equal(retries[0].retryOutcome, 'SUCCESS');
+  assert.equal(JSON.stringify(diagnostics).includes('secret'), false);
+});
+
+test('Step 8L: classifier stops after one retry when the second answer also fails', async () => {
+  let calls = 0;
+  const result = await invokeClaudeEvidenceRoleClassification({
+    input: input(), apiKey: 'secret',
+    fetchImpl: async () => { calls++; return response(classifications({index: 2, value: {roles: ['PRINCIPAL_CATALYST']}})); }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.type, 'CONTRACT_FAILURE');
+  assert.equal(result.message, 'subsequent development cannot be a principal catalyst');
+  assert.equal(calls, 2);
+});
+
+test('Step 8L: classifier first-try success makes one call and logs no retry', async () => {
+  let calls = 0;
+  const diagnostics = [];
+  const result = await invokeClaudeEvidenceRoleClassification({
+    input: input(), apiKey: 'secret', onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async () => { calls++; return response(classifications()); }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 1);
+  assert.equal(diagnostics.some(value => value.stage === 'contractRetry'), false);
 });
 
 test('blocks oversized requests before fetch', async () => {

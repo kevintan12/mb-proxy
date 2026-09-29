@@ -167,3 +167,27 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Timing:** after D-001 and D-006 are promoted to Production. Can be staged and reviewed independently, but carries forward only when both prior fixes are live.
 - **Open questions:** should the prompt also discourage hedging language ("may", "could", "possible") when alternatives are clearer, or is that over-specification?
 - **Supersedes:** none (complements D-001 on style and adds Section 6 unsupported-claim guidance; independent of D-006 telemetry logic).
+
+## Step 8L — Silent automatic retry on CONTRACT_FAILURE (repo: mb-proxy)
+
+- **Date:** 2026-09-29 · **Branch:** step-8l-silent-retry (off Production 74740be) · **Status:** IMPLEMENTED, tests passing; not yet committed; live validation pending.
+- **Trigger:** a live CLOSED run on the frozen Staging build failed once with "subsequent development cannot be a principal catalyst" (the evidence-role classifier, raised during `?analysisPackage=1` and shown to the user as a 502 PACKAGE_ASSEMBLY_FAILURE). A manual retry succeeded. The model produced a bad answer once; nothing was wrong with the input.
+- **Decision:** when the classifier or the writer returns `CONTRACT_FAILURE`, the server repeats the identical request once, silently. This **supersedes** the earlier rule "one Anthropic request per generation, with no retry", but only for this case.
+- **Scope (narrow):**
+  - Retried: `CONTRACT_FAILURE` from `invokeClaudeEvidenceRoleClassification` and `invokeClaudeAnalysis`. One retry at most, never a loop.
+  - Not retried: `INPUT_FAILURE`, `REQUEST_TOO_LARGE`, every `UPSTREAM_FAILURE` (network error, 401/403 key problems, 429 rate limits, 5xx/overloaded, unreadable body), a missing API key, and any answer cut off with `stop_reason: max_tokens`.
+  - The subject-repair call is unchanged: it is fail-soft (a failure leaves the classification without repaired subjects and is logged as `evidenceSubjectRepair`), so it is never retried.
+  - The second request is byte-identical to the first. The model is not told what it got wrong; no prompt, validator, grounding rule or assembly order changed.
+  - Elapsed-time guard: no retry if the first attempt has already used more than 150 s (`CONTRACT_RETRY_MAX_ELAPSED_MS`), so a retry cannot push a single endpoint towards the 300 s Vercel limit.
+- **Behaviour:**
+  - First-try success: unchanged. One call, no new log line.
+  - Failure then success: the user sees a normal result. Vercel logs show one `contractRetry` diagnostic (call, first failure type and message, first attempt time, retry outcome) beside the per-attempt invocation diagnostics, which carry the usage of both attempts.
+  - Failure then failure: the second attempt's error is returned exactly as before (same type and HTTP status). A failed regeneration still preserves the previous valid report.
+- **Implementation:** `lib/contract-retry.js` (`retryOnContractFailure`, `markTruncatedFailure`); the two public invoke functions now wrap the former single-attempt functions. Tests: `tests/contract-retry.test.js`, plus Step 8L tests in the writer and classifier test files. Two existing diagnostics tests and the classifier "never retries" test were updated to the new rule; no rule test was weakened.
+- **Cost and time:** a retry costs at most one extra call of the same kind (an estimate of roughly 1–5 US cents at the request-size caps, usually less) and only happens on failure, so the average cost per run is barely affected. The US$0.20 ceiling still holds. The repo holds no real timing figures (only mocked values in tests), so the 150 s guard is a conservative bound, not a measured one.
+- **Must not change:** retry only on `CONTRACT_FAILURE`, at most once, identical request, silent to the user, skipped after `max_tokens`; all the other protections and rules listed in earlier entries.
+- **Replay note:** a replay that used to end in a contract failure can now pass on its second sample. Look for `contractRetry` in the logs when comparing replay results.
+- **Rejected options:**
+  - Telling the model what it got wrong on the second attempt: adds a prompt change that needs its own live validation; revisit only if repeat failures show up in the logs.
+  - More than one retry: raises cost and time for little gain.
+  - Retrying upstream errors: they are not bad answers, and retrying rate limits or outages adds load.
