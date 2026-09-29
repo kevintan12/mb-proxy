@@ -716,14 +716,14 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
       .snapshot.currentOverlay.marketState, marketState);
     assert.equal(calls.yahooMostActive, 1);
     assert.equal(calls.yahooLatestNews, 1);
-    assert.equal(calls.yahooCurrentNewsArticle.length, 3);
+    assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
     assert.equal(calls.yahooCurrentNewsArticle[0].headline, 'NVDA leads active stocks');
     assert.equal(calls.yahooRecapResearch.length, 0);
     assert.equal(calls.cnbcRecapResearch.length, 0);
     assert.equal(calls.cnbc.length, 0);
     const currentEntries = calls.evidenceRoleClassification[0].evidence.filter(entry =>
       entry.item.evidenceCategory === 'news');
-    assert.equal(currentEntries.length, 3);
+    assert.equal(currentEntries.length, ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
     assert.equal(currentEntries.every(entry => entry.horizon === 'CURRENT_SESSION'), true);
     assert.deepEqual(output.marketPackages[0].evidenceContext.subsequentDevelopments, []);
     assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
@@ -732,9 +732,9 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
     assert.ok(diagnostics.some(item => item.stage === 'activeYahooAcquisition'
       && item.mostActiveCount === 1 && item.latestNewsCandidateCount === 8
       && item.selectedCandidateCount === 8
-      && item.candidateConsideredCount === 3
-      && item.articleFetchAttemptCount === 3
-      && item.articleFetchSuccessCount === 3
+      && item.candidateConsideredCount === ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES
+      && item.articleFetchAttemptCount === ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES
+      && item.articleFetchSuccessCount === ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES
       && item.articleFetchRequestFailureCount === 0
       && item.articleExtractionFailureCount === 0
       && item.articleMetadataFailureCount === 0
@@ -742,13 +742,13 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
       && item.articleBodyUnavailableCount === 0
       && item.articleCanonicalRedirectMismatchCount === 0
       && item.otherArticleExtractionRejectionCount === 0
-      && item.backfillUsed === false
+      && item.backfillUsed === true
       && item.missingOrMalformedPublicationTimeCount === 0
       && item.beforeSessionWindowCount === 0
       && item.afterSessionWindowCount === 0
-      && item.acquiredCurrentSessionCount === 3));
+      && item.acquiredCurrentSessionCount === ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES));
     assert.ok(diagnostics.some(item => item.stage === 'activeYahooEvidenceHandoff'
-      && item.admittedCurrentSessionCount === 3
+      && item.admittedCurrentSessionCount === ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES
       && item.classifierAdmissionRejectedCount === 0));
     assert.ok(diagnostics.some(item => item.stage === 'completedSessionResearch'
       && item.outcome === 'SKIPPED_ACTIVE_SESSION'));
@@ -760,7 +760,10 @@ test('active Yahoo retains a narrow first article and later broad-market article
     'Local retailer updates one store',
     'Nvidia chip orders lift semiconductor shares',
     'Banks gain as lending outlook improves',
-    'Fourth current article is beyond the three-article stop'
+    'Fourth current-session story for classification',
+    'Fifth current-session story for classification',
+    'Sixth current-session story for classification',
+    'Seventh current article is beyond the six-article stop'
   ].map((headline, index) => ({
     headline,
     url: `https://finance.yahoo.com/news/current-breadth-${index + 1}.html`,
@@ -804,26 +807,26 @@ test('active Yahoo retains a narrow first article and later broad-market article
   const output = await service.assemble(request());
   const classifiedCurrent = calls.evidenceRoleClassification[0].evidence.filter(entry =>
     entry.horizon === 'CURRENT_SESSION');
-  assert.equal(ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES, 3);
+  assert.equal(ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES, 6);
   assert.deepEqual(calls.yahooCurrentNewsArticle.map(entry => entry.headline),
-    candidates.slice(0, 3).map(entry => entry.headline));
+    candidates.slice(0, 6).map(entry => entry.headline));
   assert.deepEqual(classifiedCurrent.map(entry => entry.item.title),
-    candidates.slice(0, 3).map(entry => entry.headline));
+    candidates.slice(0, 6).map(entry => entry.headline));
   const currentRefs = classifiedCurrent.map(entry => entry.reference);
-  assert.deepEqual(output.marketPackages[0].evidenceContext.materialEvents,
-    currentRefs.slice(1));
+  const materialRefs = [currentRefs[1], currentRefs[2]];
+  assert.deepEqual(output.marketPackages[0].evidenceContext.materialEvents, materialRefs);
   assert.deepEqual(output.marketPackages[0].evidenceContext.broadMarketFocus.map(entry =>
-    entry.evidenceRef), currentRefs.slice(1));
+    entry.evidenceRef), materialRefs);
   assert.deepEqual(JSON.parse(buildClaudeAnalysisRequest(output).messages[0].content)
     .currentSessionContext[0].evidenceRefs, currentRefs);
   assert.equal(output.marketPackages[0].evidenceContext.furtherReadings.length, 0);
   assert.ok(diagnostics.some(entry => entry.stage === 'activeYahooEvidenceHandoff'
-    && entry.acquiredCurrentSessionCount === 3
-    && entry.admittedCurrentSessionCount === 3));
+    && entry.acquiredCurrentSessionCount === 6
+    && entry.admittedCurrentSessionCount === 6));
 });
 
-test('duplicate and rejected active Yahoo articles do not count toward the three-article stop', async () => {
-  const candidates = Array.from({length: 6}, (_, index) => ({
+test('duplicate and rejected active Yahoo articles do not count toward the six-article stop', async () => {
+  const candidates = Array.from({length: 9}, (_, index) => ({
     headline: `Current Yahoo article ${index + 1}`,
     url: `https://finance.yahoo.com/news/current-bounded-${index + 1}.html`,
     uuid: null, publisher: 'Yahoo Finance'
@@ -854,16 +857,16 @@ test('duplicate and rejected active Yahoo articles do not count toward the three
   });
   const output = await service.assemble(request());
   assert.deepEqual(calls.yahooCurrentNewsArticle.map(entry => entry.url),
-    candidates.slice(0, 5).map(entry => entry.url));
+    candidates.slice(0, 8).map(entry => entry.url));
   const acquisition = diagnostics.find(entry => entry.stage === 'activeYahooAcquisition');
-  assert.equal(acquisition.articleFetchAttemptCount, 5);
+  assert.equal(acquisition.articleFetchAttemptCount, 8);
   assert.equal(acquisition.duplicateEvidenceCount, 1);
   assert.equal(acquisition.articleExtractionFailureCount, 1);
-  assert.equal(acquisition.acquiredCurrentSessionCount, 3);
+  assert.equal(acquisition.acquiredCurrentSessionCount, 6);
   assert.equal(calls.evidenceRoleClassification[0].evidence.filter(entry =>
-    entry.horizon === 'CURRENT_SESSION').length, 3);
+    entry.horizon === 'CURRENT_SESSION').length, 6);
   assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
-    entry.item.canonicalUrl === candidates[5].url), false);
+    entry.item.canonicalUrl === candidates[8].url), false);
 });
 
 test('one matching benchmark overlay admits current Yahoo evidence in PRE, REGULAR and POST', async () => {
@@ -4770,7 +4773,7 @@ test('Step 8K the real caller passes My Stocks snapshots so a holding headline o
     candidates: [neutral, holding], myStocks: [{market: 'US', symbol: 'VEEV'}]
   });
   assert.deepEqual(audit.map(entry => [entry.rank, entry.tier, entry.headline]), [
-    [1, 1, holding.headline], [2, 3, neutral.headline]
+    [1, 1, holding.headline], [2, 5, neutral.headline]
   ]);
   assert.equal(calls.yahooCurrentNewsArticle[0].url, holding.url);
 });
@@ -4782,7 +4785,7 @@ test('Step 8K the real caller passes Watchlist snapshots so a watchlist headline
     candidates: [neutral, watched], watchlist: [{market: 'US', symbol: 'AAPL'}]
   });
   assert.deepEqual(audit.map(entry => [entry.tier, entry.headline]), [
-    [1, watched.headline], [3, neutral.headline]
+    [1, watched.headline], [5, neutral.headline]
   ]);
   assert.equal(calls.yahooCurrentNewsArticle[0].url, watched.url);
 });
@@ -4828,7 +4831,7 @@ test('Step 8K whole-word matching: Oiltek is not oil and generic words do not ad
     step8kCandidate('How to open a savings account')
   ]});
   const tierByHeadline = new Map(audit.map(entry => [entry.headline, entry.tier]));
-  assert.equal(tierByHeadline.get('Oiltek International wins a new contract'), 3);
+  assert.equal(tierByHeadline.get('Oiltek International wins a new contract'), 5);
   assert.equal(tierByHeadline.get('Stocks and shares in focus as markets wait'), 3);
   assert.equal(tierByHeadline.get('Oil prices jump, crude stays firm'), 2);
   assert.equal(tierByHeadline.get('Fed rate cut hopes lift Treasury yields'), 2);
@@ -4860,12 +4863,12 @@ test('Step 8K.1 tier 4b China and India headlines are kept, fetched and ranked l
   const macro = step8kCandidate('Oil jumps on Iran tension');
   const {audit, calls} = await step8kActiveRun({candidates: [china, dropped, india, neutral, macro]});
   assert.deepEqual(audit.map(entry => [entry.tier, entry.decision]), [
-    [2, 'EXTRACTION_FAILED'], [3, 'EXTRACTION_FAILED'],
-    [4, 'EXTRACTION_FAILED'], [4, 'EXTRACTION_FAILED'],
+    [2, 'EXTRACTION_FAILED'], [4, 'EXTRACTION_FAILED'],
+    [4, 'EXTRACTION_FAILED'], [5, 'EXTRACTION_FAILED'],
     [4, 'SKIPPED_BELOW_RELEVANCE_FLOOR']
   ]);
   assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url),
-    [macro.url, neutral.url, china.url, india.url]);
+    [macro.url, china.url, india.url, neutral.url]);
 });
 
 test('Step 8K.1 a China or India headline is kept even when it also matches a tier 4a term', async () => {
@@ -4885,10 +4888,10 @@ test('Step 8K.1 Hong Kong, Hang Seng, Nikkei and FTSE headlines are kept and ran
   const neutral = step8kCandidate('Neutral story number 1');
   const {audit, calls} = await step8kActiveRun({candidates: kept.concat(neutral)});
   assert.deepEqual(audit.map(entry => [entry.tier, entry.decision]), [
-    [3, 'EXTRACTION_FAILED'], ...kept.map(() => [4, 'EXTRACTION_FAILED'])
+    ...kept.map(() => [4, 'EXTRACTION_FAILED']), [5, 'EXTRACTION_FAILED']
   ]);
   assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url),
-    [neutral.url, ...kept.map(candidate => candidate.url)]);
+    [...kept.map(candidate => candidate.url), neutral.url]);
 });
 
 test('Step 8K.1 STI matches as a whole word only: stimulus and investing are not dropped', async () => {
@@ -4908,15 +4911,61 @@ test('Step 8K.1 "how to" is dropped only at the start of a headline', async () =
     step8kCandidate('How to trade volatile markets'), step8kCandidate('Investors weigh how to respond')
   ]});
   assert.deepEqual(audit.map(entry => [entry.headline, entry.tier, entry.decision]), [
-    ['Investors weigh how to respond', 3, 'EXTRACTION_FAILED'],
+    ['Investors weigh how to respond', 5, 'EXTRACTION_FAILED'],
     ['How to trade volatile markets', 4, 'SKIPPED_BELOW_RELEVANCE_FLOOR']
   ]);
 });
 
-test('Step 8K.1 a neutral tier 3 headline is not dropped', async () => {
+test('Step 8K.1 a neutral tier 3b headline is not dropped', async () => {
   const {audit, calls} = await step8kActiveRun({candidates: [step8kCandidate('Quarterly gardening tips for spring')]});
-  assert.deepEqual(audit.map(entry => [entry.tier, entry.decision]), [[3, 'EXTRACTION_FAILED']]);
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.subTier, entry.decision]),
+    [[5, '3b', 'EXTRACTION_FAILED']]);
   assert.equal(calls.yahooCurrentNewsArticle.length, 1);
+});
+
+test('Step 8K.1 tier 3a (benchmark index or broad-market term) is ranked above tier 4b', async () => {
+  const tier3a = step8kCandidate('Russell rebounds after a volatile trading day');
+  const tier4b = step8kCandidate('China factory data lifts sentiment');
+  const {audit, calls} = await step8kActiveRun({candidates: [tier4b, tier3a]});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.subTier, entry.headline]), [
+    [3, '3a', tier3a.headline], [4, '4b', tier4b.headline]
+  ]);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url), [tier3a.url, tier4b.url]);
+});
+
+test('Step 8K.1 tier 3b (no relevance signal) is ranked last, below tier 4b', async () => {
+  const tier4b = step8kCandidate('Nikkei climbs on tech rally');
+  const tier3b = step8kCandidate('Quarterly gardening tips for spring');
+  const {audit, calls} = await step8kActiveRun({candidates: [tier3b, tier4b]});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.subTier, entry.headline]), [
+    [4, '4b', tier4b.headline], [5, '3b', tier3b.headline]
+  ]);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url), [tier4b.url, tier3b.url]);
+});
+
+test('Step 8K.1 a Singapore/lifestyle drop term still wins over a bare tier 3a word in the same headline', async () => {
+  const {audit} = await step8kActiveRun({candidates: [step8kCandidate('Singapore stocks rally')]});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.subTier, entry.decision]),
+    [[4, '4a', 'SKIPPED_BELOW_RELEVANCE_FLOOR']]);
+});
+
+test('Step 8K.1 the candidate audit records the sub-tier alongside the tier for every candidate', async () => {
+  const identity = step8kCandidate('AAPL unveils a new product line');
+  const macro = step8kCandidate('Fed rate cut hopes lift Treasury yields');
+  const tier3a = step8kCandidate('Broad market stocks rally on trading day');
+  const tier4b = step8kCandidate('China factory data lifts sentiment');
+  const tier4a = step8kCandidate('Singapore retirement savings guide');
+  const tier3b = step8kCandidate('Quarterly gardening tips for spring');
+  const {audit} = await step8kActiveRun({
+    candidates: [identity, macro, tier3a, tier4b, tier4a, tier3b], watchlist: [{market: 'US', symbol: 'AAPL'}]
+  });
+  const subTierByHeadline = new Map(audit.map(entry => [entry.headline, [entry.tier, entry.subTier]]));
+  assert.deepEqual(subTierByHeadline.get(identity.headline), [1, null]);
+  assert.deepEqual(subTierByHeadline.get(macro.headline), [2, null]);
+  assert.deepEqual(subTierByHeadline.get(tier3a.headline), [3, '3a']);
+  assert.deepEqual(subTierByHeadline.get(tier4b.headline), [4, '4b']);
+  assert.deepEqual(subTierByHeadline.get(tier4a.headline), [4, '4a']);
+  assert.deepEqual(subTierByHeadline.get(tier3b.headline), [5, '3b']);
 });
 
 test('Step 8K.1 when every candidate is dropped the limited-evidence path is unchanged', async () => {
@@ -4942,22 +4991,25 @@ test('Step 8K page order stays stable inside a tier', async () => {
   const headlines = Array.from({length: 6}, (_, index) => `Neutral story number ${index + 1}`);
   const {audit} = await step8kActiveRun({candidates: headlines.map(h => step8kCandidate(h))});
   assert.deepEqual(audit.map(entry => entry.headline), headlines);
-  assert.deepEqual(audit.map(entry => entry.tier), headlines.map(() => 3));
+  assert.deepEqual(audit.map(entry => entry.tier), headlines.map(() => 5));
 });
 
-test('Step 8K fetch budget is unchanged: eight attempts, three admissions', async () => {
+test('Step 8K.1 fetch budget: eight attempts (unchanged), six admissions', async () => {
   const many = Array.from({length: 12}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
   const unusable = await step8kActiveRun({candidates: many});
   assert.equal(unusable.calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS, 8);
   assert.equal(unusable.calls.evidenceRoleClassification.length, 0);
   assert.equal(unusable.audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 4);
 
   const usable = Array.from({length: 10}, (_, index) => step8kCandidate(`Oil story number ${index + 1}`));
   const admitted = await step8kActiveRun({candidates: usable, acquire: step8kUsableArticle});
+  assert.equal(ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES, 6);
   assert.equal(admitted.calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
   assert.equal(admitted.audit.filter(entry => entry.decision === 'ADMITTED').length,
     ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
-  assert.equal(admitted.audit.filter(entry => entry.decision === 'SKIPPED_MAX_ADMITTED').length, 7);
+  assert.equal(admitted.audit.filter(entry => entry.decision === 'SKIPPED_MAX_ADMITTED').length,
+    usable.length - ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
   assert.equal(admitted.calls.evidenceRoleClassification.length, 1);
 });
 
