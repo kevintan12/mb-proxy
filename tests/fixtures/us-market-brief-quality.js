@@ -169,11 +169,11 @@ function supportedOutput(input, {opportunity = true, plainEnglish = true} = {}) 
     telemetryRefs: index === 7 || (index === 2 && !broadMarketAvailable)
       ? [] : index === 3 ? ['t2'] : ['t1'],
     uncertainties: index === 2 && !broadMarketAvailable
-      ? ['Validated broad-market company or sector evidence was unavailable.'] : []
+      ? ['Not enough data to point out specific stocks or sectors.'] : []
   }));
   const evidenceGaps = [];
   if (!broadMarketAvailable) {
-    evidenceGaps.push('Validated broad-market company or sector evidence was unavailable.');
+    evidenceGaps.push('Not enough data to point out specific stocks or sectors.');
   }
   return {
     status: broadMarketAvailable ? 'NORMAL' : 'DEGRADED',

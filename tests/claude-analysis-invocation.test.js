@@ -2142,7 +2142,7 @@ test('T6 ungrounded Section 6 opportunity still localizes exactly as before when
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.sections[5].content, null);
   assert.deepEqual(result.output.sections[5].uncertainties,
-    ['Constructive opportunity support could not be validated from the generated citation set.']);
+    ['Not enough data to point out a clear opportunity.']);
   const normalizationEvents = diagnostics.filter(value =>
     value.stage === 'claudeAnalysisSectionNormalization');
   assert.deepEqual(normalizationEvents.map(value => [value.sectionIndex, value.violationCategory]),
@@ -2275,7 +2275,7 @@ test('deterministically downgrades evidence-limited NORMAL output while preservi
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
   });
 
-  const message = 'The supplied evidence did not support a reliable KEY RISKS & OPPORTUNITIES section.';
+  const message = 'Not enough data to write the KEY RISKS & OPPORTUNITIES section.';
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.status, 'DEGRADED');
   assert.deepEqual(result.output.sections[5], {
@@ -2306,8 +2306,8 @@ test('deterministically nulls impossible Sections 2-4 and recomputes first-use r
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.status, 'DEGRADED');
   const expected = [
-    'The supplied evidence did not establish a material market driver.',
-    'Validated broad-market company or sector evidence was unavailable.'
+    'Not enough data to point to a main market driver.',
+    'Not enough data to point out specific stocks or sectors.'
   ];
   for (const [offset, message] of expected.entries()) {
     const section = result.output.sections[offset + 1];
@@ -2337,7 +2337,7 @@ test('localizes empty broad-market focus to Section 3 without removing valid dri
     content: null,
     evidenceRefs: [],
     telemetryRefs: [],
-    uncertainties: ['Validated broad-market company or sector evidence was unavailable.']
+    uncertainties: ['Not enough data to point out specific stocks or sectors.']
   });
 });
 
