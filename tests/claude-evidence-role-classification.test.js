@@ -697,6 +697,61 @@ test('captures only sanitized size, counts, request-id, timing, usage, and fetch
   }
 });
 
+test('Step 8K.2 a worst-case widened-window package of six max-size admitted current-session articles stays under the 64 KB classifier limit', () => {
+  const {
+    YAHOO_CURRENT_NEWS_MAX_ARTICLE_TEXT_BYTES,
+    YAHOO_CURRENT_NEWS_MAX_HEADLINE_BYTES
+  } = require('../lib/yahoo-current-news-article-content-acquisition');
+  const {ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES} = require('../lib/us-analysis-package-orchestration');
+
+  function padToBytes(seed, bytes) {
+    let text = seed;
+    while (Buffer.byteLength(text, 'utf8') < bytes) text += 'x';
+    return text;
+  }
+  const maxTitle = padToBytes('Current-session headline ', YAHOO_CURRENT_NEWS_MAX_HEADLINE_BYTES);
+  const maxSummary = padToBytes('Current-session article body. ', YAHOO_CURRENT_NEWS_MAX_ARTICLE_TEXT_BYTES);
+  assert.equal(Buffer.byteLength(maxTitle, 'utf8'), YAHOO_CURRENT_NEWS_MAX_HEADLINE_BYTES);
+  assert.equal(Buffer.byteLength(maxSummary, 'utf8'), YAHOO_CURRENT_NEWS_MAX_ARTICLE_TEXT_BYTES);
+
+  const currentSessionSnapshot = createFiveSessionSnapshot({
+    market: 'US', symbol: '^GSPC', instrumentName: 'S&P 500 benchmark', instrumentType: 'INDEX',
+    currency: 'USD', marketState: 'REGULAR',
+    completedSessions: [createCompletedRegularSession({
+      market: 'US', sessionDate: '2026-09-04', open: 100, high: 105, low: 98,
+      close: 104, previousClose: 100, volume: 1000000,
+      asOf: '2026-09-04T16:00:00-04:00', sourceId: 'us.yahoo-finance',
+      validationState: 'VALIDATED'
+    })],
+    currentOverlay: null
+  });
+  const admittedItems = Array.from({length: ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES}, (_, index) =>
+    createEvidenceItem({
+      sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+      title: maxTitle, summary: maxSummary,
+      canonicalUrl: `https://finance.yahoo.com/news/worst-case-current-story-${index + 1}.html`,
+      publishedAt: `2026-09-08T14:${String(10 + index).padStart(2, '0')}:00Z`,
+      symbols: ['MSFT'], publisher: 'Yahoo Finance'
+    }));
+  const worstCaseInput = {
+    marketContext: {
+      market: 'US', exchangeTimezone: 'America/New_York', marketState: 'REGULAR',
+      primaryCompletedSessionDate: '2026-09-04'
+    },
+    benchmarkTelemetry: [{reference: 't1', snapshot: currentSessionSnapshot}],
+    evidence: admittedItems.map((item, index) => ({
+      reference: `e${index + 1}`, horizon: 'CURRENT_SESSION',
+      requiresBroadMarketSubjects: true, item
+    }))
+  };
+  const request = buildClaudeEvidenceRoleClassificationRequest(worstCaseInput);
+  const requestBytes = Buffer.byteLength(request.messages[0].content, 'utf8');
+  assert.ok(
+    requestBytes < CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES,
+    `worst-case request is ${requestBytes} bytes`
+  );
+});
+
 test('does not integrate final package construction or provider acquisition', () => {
   const source = fs.readFileSync(path.join(__dirname, '../lib/claude-evidence-role-classification.js'), 'utf8');
   for (const forbidden of [

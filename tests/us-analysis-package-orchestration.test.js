@@ -659,10 +659,10 @@ test('maps supported US market states to explicit package-owned analysis modes',
 });
 
 test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip completed-session research', async () => {
-  for (const [marketState, generatedAt, overlayAsOf] of [
-    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z'],
-    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z'],
-    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z']
+  for (const [marketState, generatedAt, overlayAsOf, articlePublishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z', '2026-09-08T11:00:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T11:00:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
   ]) {
     const diagnostics = [];
     const candidates = Array.from({length: 8}, (_, index) => ({
@@ -698,7 +698,7 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
             ok: true, type: 'SUCCESS', articleContent: {
               sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
               headline: candidate.headline, publisher: 'Yahoo Finance',
-              publishedAt: '2026-09-08T11:00:00.000Z', updatedAt: null,
+              publishedAt: articlePublishedAt, updatedAt: null,
               articleText: `Bounded current article for ${candidate.headline}.`
             }
           };
@@ -1650,7 +1650,7 @@ test('PRE, REGULAR and POST conservatively complete an omitted CURRENT_SESSION c
 test('stale and future Yahoo news never become CURRENT_SESSION evidence', async () => {
   const generatedAt = '2026-09-08T15:00:00.000Z';
   const candidates = [
-    ['Stale market story', 'stale', '2026-09-05T14:00:00.000Z'],
+    ['Stale market story', 'stale', '2026-09-04T19:00:00.000Z'],
     ['Future market story', 'future', '2026-09-08T15:00:00.001Z'],
     ['Current market story', 'current', '2026-09-08T14:30:00.000Z'],
     ['Missing-time market story', 'missing-time', null],
@@ -5020,7 +5020,7 @@ test('Step 8K candidate audit lists all candidates in numbered parts of at most 
     [1, 3, 10], [2, 3, 10], [3, 3, 3]
   ]);
   assert.deepEqual(audit.map(entry => entry.rank), Array.from({length: 23}, (_, index) => index + 1));
-  assert.equal(auditEvents[0].windowStartsAtInclusive, '2026-09-08T08:00:00.000Z');
+  assert.equal(auditEvents[0].windowStartsAtInclusive, '2026-09-04T20:00:00.000Z');
   assert.equal(auditEvents[0].windowEndsAtInclusive, '2026-09-08T15:00:00.000Z');
 });
 
@@ -5043,7 +5043,7 @@ test('Step 8K candidate audit records the decision for each rejection type', asy
         const value = step8kUsableArticle(candidate);
         return {...value, articleContent: {...value.articleContent, publishedAt: null}};
       }
-      if (candidate.headline === byName('before').headline) return step8kUsableArticle(candidate, '2026-09-08T07:00:00.000Z');
+      if (candidate.headline === byName('before').headline) return step8kUsableArticle(candidate, '2026-09-04T19:00:00.000Z');
       if (candidate.headline === byName('after').headline) return step8kUsableArticle(candidate, '2026-09-08T15:30:00.000Z');
       if (candidate.headline === byName('duplicate').headline) {
         const value = step8kUsableArticle(byName('admitted'));
@@ -5063,7 +5063,7 @@ test('Step 8K candidate audit records the decision for each rejection type', asy
     ['EXTRACTION_FAILED', 'NO_ARTICLE_BODY_CONTAINER_OR_TEXT']);
   assert.equal(decision('notime').decision, 'REJECTED_NO_PUBLICATION_TIME');
   assert.deepEqual([decision('before').decision, decision('before').publishedAt],
-    ['REJECTED_BEFORE_WINDOW', '2026-09-08T07:00:00.000Z']);
+    ['REJECTED_BEFORE_WINDOW', '2026-09-04T19:00:00.000Z']);
   assert.deepEqual([decision('after').decision, decision('after').publishedAt],
     ['REJECTED_AFTER_WINDOW', '2026-09-08T15:30:00.000Z']);
   assert.equal(decision('admitted').decision, 'ADMITTED');

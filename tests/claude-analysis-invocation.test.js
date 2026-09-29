@@ -396,6 +396,36 @@ test('active synthesis receives exact CURRENT_SESSION refs and state-aware secti
     .snapshot.currentOverlay.sessionDate, '2026-09-08');
   assert.equal(JSON.stringify(input), original);
   assert.equal(Object.hasOwn(input, 'currentSessionContext'), false);
+  const evidenceByRef = new Map(modelInput.marketPackages[0].evidenceContext.evidence.map(
+    entry => [entry.reference, entry.item]
+  ));
+  assert.equal(evidenceByRef.get('e1').ageHoursAtGeneration, 0.5);
+  assert.equal(Object.hasOwn(evidenceByRef.get('e2'), 'ageHoursAtGeneration'), false);
+});
+
+test('ageHoursAtGeneration is present and rounded to one decimal only on current-session evidence', () => {
+  const input = activeUsInput({
+    marketState: 'REGULAR', generatedAt: '2026-09-08T15:00:00.000Z',
+    overlayAsOf: '2026-09-08T14:55:00.000Z',
+    currentPublishedAt: '2026-09-08T02:07:00.000Z'
+  });
+  const modelInput = projectClaudeAnalysisInput(input);
+  const evidenceByRef = new Map(modelInput.marketPackages[0].evidenceContext.evidence.map(
+    entry => [entry.reference, entry.item]
+  ));
+  // generatedAt 15:00 minus publishedAt 02:07 = 12h53m = 12.9 hours (rounded to one decimal).
+  assert.equal(evidenceByRef.get('e1').ageHoursAtGeneration, 12.9);
+  assert.equal(Object.hasOwn(evidenceByRef.get('e2'), 'ageHoursAtGeneration'), false);
+});
+
+test('the ageHoursAtGeneration overnight-background prompt sentence appears exactly once', () => {
+  const sentence = 'Items with ageHoursAtGeneration above 12 are overnight background from before '
+    + 'the session, not fresh news; do not present them as new.';
+  for (const input of [canonicalInput(), activeUsInput()]) {
+    const request = buildClaudeAnalysisRequest(input);
+    const occurrences = request.system.split(sentence).length - 1;
+    assert.equal(occurrences, 1);
+  }
 });
 
 test('PRE permits grounded prior-session context in Section 1 without requiring it to carry current evidence', async () => {
