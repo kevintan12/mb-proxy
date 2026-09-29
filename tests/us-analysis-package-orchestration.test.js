@@ -4734,7 +4734,8 @@ function step8kUsableArticle(candidate, publishedAt = '2026-09-08T14:30:00.000Z'
   }};
 }
 
-async function step8kActiveRun({candidates, myStocks = [], watchlist = [], mostActive = [], acquire = null}) {
+async function step8kActiveRun({candidates, myStocks = [], watchlist = [], mostActive = [], acquire = null,
+  discoveryExtra = {}}) {
   const diagnostics = [];
   const {service, calls} = harness({
     createTelemetryAcquisition: () => ({
@@ -4746,7 +4747,7 @@ async function step8kActiveRun({candidates, myStocks = [], watchlist = [], mostA
       async acquireMostActive() { return {ok: true, type: 'SUCCESS', candidates: mostActive}; }
     },
     yahooLatestNewsDiscovery: {
-      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates, ...discoveryExtra}; }
     },
     yahooCurrentNewsArticleContentAcquisition: {
       async acquireArticleContent(candidate) {
@@ -4966,6 +4967,52 @@ test('Step 8K.1 the candidate audit records the sub-tier alongside the tier for 
   assert.deepEqual(subTierByHeadline.get(tier4b.headline), [4, '4b']);
   assert.deepEqual(subTierByHeadline.get(tier4a.headline), [4, '4a']);
   assert.deepEqual(subTierByHeadline.get(tier3b.headline), [5, '3b']);
+});
+
+test('Step 8K.3 the candidate audit records the edition and the acquisition diagnostic carries the US counts', async () => {
+  const us = step8kCandidate('Oil jumps on Iran tension', {edition: 'US'});
+  const sg = step8kCandidate('Quarterly gardening tips for spring', {edition: 'SG'});
+  const untagged = step8kCandidate('Nikkei climbs on tech rally');
+  const {audit, diagnostics} = await step8kActiveRun({
+    candidates: [us, sg, untagged],
+    discoveryExtra: {usOutcome: 'SHAPE_CHANGED', usSectionCount: 48, usCandidateCount: 0,
+      singaporeCandidateCount: 3, crossEditionDuplicateCount: 2}
+  });
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.edition]), [
+    [us.headline, 'US'], [untagged.headline, null], [sg.headline, 'SG']
+  ]);
+  const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.usNewsOutcome, 'SHAPE_CHANGED');
+  assert.equal(acquisition.usNewsSectionCount, 48);
+  assert.equal(acquisition.usNewsCandidateCount, 0);
+  assert.equal(acquisition.singaporeNewsCandidateCount, 3);
+  assert.equal(acquisition.crossEditionDuplicateCount, 2);
+});
+
+test('Step 8K.3 a discovery service without edition metadata still runs and reports zero US counts', async () => {
+  const {diagnostics} = await step8kActiveRun({candidates: [step8kCandidate('Oil jumps on Iran tension')]});
+  const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.usNewsOutcome, 'NOT_CONFIGURED');
+  assert.equal(acquisition.usNewsCandidateCount, 0);
+  assert.equal(acquisition.crossEditionDuplicateCount, 0);
+});
+
+test('Step 8K.3 ninety worst-case audit entries stay inside the per-event byte budget, all present, none truncated', async () => {
+  const candidates = Array.from({length: 90}, (_, index) => step8kCandidate(
+    `Oil jumps on Iran tension ${String(index).padStart(2, '0')} ${'x'.repeat(100)}`,
+    {edition: index < 60 ? 'US' : 'SG', publisher: 'P'.repeat(60),
+      url: `https://finance.yahoo.com/markets/stocks/articles/${'s'.repeat(80)}-${String(index).padStart(9, '0')}.html`}
+  ));
+  const {auditEvents} = await step8kActiveRun({candidates});
+  const entries = auditEvents.flatMap(event => event.candidates);
+  assert.equal(entries.length, 90);
+  assert.deepEqual(entries.map(entry => entry.rank), Array.from({length: 90}, (_, index) => index + 1));
+  for (const event of auditEvents) {
+    assert.ok(event.candidates.length <= 10);
+    assert.ok(Buffer.byteLength(JSON.stringify({...event, generationId: '0'.repeat(36)}), 'utf8') <= 3400,
+      `event part ${event.part} exceeds the byte budget`);
+    assert.equal(event.parts, auditEvents.length);
+  }
 });
 
 test('Step 8K.1 when every candidate is dropped the limited-evidence path is unchanged', async () => {
