@@ -1047,7 +1047,7 @@ test('PRE, REGULAR and POST continue after a sixth valid article until the attem
     assert.equal(acquisition.candidateConsideredCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
     assert.equal(acquisition.articleFetchAttemptCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
     assert.equal(acquisition.articleFetchSuccessCount, 1);
-    assert.equal(acquisition.articleExtractionFailureCount, 7);
+    assert.equal(acquisition.articleExtractionFailureCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS - 1);
     assert.equal(acquisition.acquiredCurrentSessionCount, 1);
     assert.equal(acquisition.backfillUsed, true);
   }
@@ -1228,7 +1228,7 @@ test('active Yahoo classifier preflight counts previously admitted current artic
   assert.equal(acquisition.acquiredCurrentSessionCount, 1);
 });
 
-test('active Yahoo stops at eight attempts even when the ninth candidate would be usable', async () => {
+test('active Yahoo stops at the twelve-attempt ceiling even when the next candidate would be usable', async () => {
   const diagnostics = [];
   const candidates = Array.from({length: ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS + 2}, (_, index) => ({
     headline: `Unusable Yahoo story ${index + 1}`,
@@ -1248,11 +1248,11 @@ test('active Yahoo stops at eight attempts even when the ninth candidate would b
     yahooCurrentNewsArticleContentAcquisition: {
       async acquireArticleContent(candidate) {
         calls.yahooCurrentNewsArticle.push(candidate);
-        if (candidate.url.endsWith('-9.html')) return {ok: true, type: 'SUCCESS', articleContent: {
+        if (candidate.url.endsWith(`-${ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS + 1}.html`)) return {ok: true, type: 'SUCCESS', articleContent: {
           sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
           headline: candidate.headline, publisher: 'Yahoo Finance',
           publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
-          articleText: 'This valid ninth article must remain outside the fixed attempt ceiling.'
+          articleText: 'This valid thirteenth article must remain outside the fixed attempt ceiling.'
         }};
         return {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
       }
@@ -4961,7 +4961,7 @@ test('Step 8K.1 the candidate audit records the sub-tier alongside the tier for 
     candidates: [identity, macro, tier3a, tier4b, tier4a, tier3b], watchlist: [{market: 'US', symbol: 'AAPL'}]
   });
   const subTierByHeadline = new Map(audit.map(entry => [entry.headline, [entry.tier, entry.subTier]]));
-  assert.deepEqual(subTierByHeadline.get(identity.headline), [1, null]);
+  assert.deepEqual(subTierByHeadline.get(identity.headline), [1, '1a']);
   assert.deepEqual(subTierByHeadline.get(macro.headline), [2, null]);
   assert.deepEqual(subTierByHeadline.get(tier3a.headline), [3, '3a']);
   assert.deepEqual(subTierByHeadline.get(tier4b.headline), [4, '4b']);
@@ -5025,9 +5025,9 @@ test('Step 8K.1 when every candidate is dropped the limited-evidence path is unc
     gap.includes('current-session Yahoo Finance news was unavailable')));
 });
 
-test('Step 8K.1 dropped candidates use no fetch attempts, so the eight-attempt cap still applies to the rest', async () => {
+test('Step 8K.1 dropped candidates use no fetch attempts, so the twelve-attempt cap still applies to the rest', async () => {
   const dropped = Array.from({length: 5}, (_, index) => step8kCandidate(`Singapore story number ${index + 1}`));
-  const neutral = Array.from({length: 12}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
+  const neutral = Array.from({length: 16}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
   const {audit, calls} = await step8kActiveRun({candidates: dropped.concat(neutral)});
   assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
   assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_BELOW_RELEVANCE_FLOOR').length, 5);
@@ -5041,11 +5041,11 @@ test('Step 8K page order stays stable inside a tier', async () => {
   assert.deepEqual(audit.map(entry => entry.tier), headlines.map(() => 5));
 });
 
-test('Step 8K.1 fetch budget: eight attempts (unchanged), six admissions', async () => {
-  const many = Array.from({length: 12}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
+test('Step 8K.5 fetch budget: twelve attempts (raised from eight), six admissions', async () => {
+  const many = Array.from({length: 16}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
   const unusable = await step8kActiveRun({candidates: many});
   assert.equal(unusable.calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
-  assert.equal(ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS, 8);
+  assert.equal(ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS, 12);
   assert.equal(unusable.calls.evidenceRoleClassification.length, 0);
   assert.equal(unusable.audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 4);
 
@@ -5073,7 +5073,8 @@ test('Step 8K candidate audit lists all candidates in numbered parts of at most 
 
 test('Step 8K candidate audit records the decision for each rejection type', async () => {
   const candidates = ['exception', 'timeout', 'extraction', 'notime', 'before', 'after', 'admitted',
-    'duplicate', 'ninth'].map(name => step8kCandidate(`Neutral ${name} story`));
+    'duplicate', 'fillone', 'filltwo', 'fillthree', 'fillfour', 'last'
+  ].map(name => step8kCandidate(`Neutral ${name} story`));
   const byName = name => candidates.find(candidate => candidate.headline === `Neutral ${name} story`);
   const {audit, calls} = await step8kActiveRun({
     candidates,
@@ -5081,6 +5082,9 @@ test('Step 8K candidate audit records the decision for each rejection type', asy
       if (candidate.headline === byName('exception').headline) throw new Error('network');
       if (candidate.headline === byName('timeout').headline) {
         return {ok: false, type: 'TIMEOUT', articleContent: null};
+      }
+      if (['fillone', 'filltwo', 'fillthree', 'fillfour'].some(name => candidate.headline === byName(name).headline)) {
+        return {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
       }
       if (candidate.headline === byName('extraction').headline) return {
         ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null,
@@ -5115,7 +5119,7 @@ test('Step 8K candidate audit records the decision for each rejection type', asy
     ['REJECTED_AFTER_WINDOW', '2026-09-08T15:30:00.000Z']);
   assert.equal(decision('admitted').decision, 'ADMITTED');
   assert.equal(decision('duplicate').decision, 'REJECTED_DUPLICATE');
-  assert.equal(decision('ninth').decision, 'SKIPPED_MAX_ATTEMPTS');
+  assert.equal(decision('last').decision, 'SKIPPED_MAX_ATTEMPTS');
 });
 
 test('Step 8K candidate audit events stay under 3.5 KB, truncate text and carry no article text or URL query', async () => {
@@ -5152,4 +5156,112 @@ test('Step 8K completed-session runs emit no candidate audit event', async () =>
   assert.equal(diagnostics.some(value => value.stage === 'activeYahooCandidateAudit'), false);
   assert.ok(diagnostics.some(value => value.stage === 'activeYahooAcquisition'
     && value.outcome === 'SKIPPED_COMPLETED_SESSION'));
+});
+
+// ---- Step 8K.5: stale-by-label filter, twelve attempts, and the tier reorder ----
+test('Step 8K.5 a candidate whose label proves it is older than the window start plus four hours is skipped before fetching', async () => {
+  // REGULAR run at 2026-09-08T15:00Z; the window starts 2026-09-04T20:00Z (91 h earlier); tolerance 4 h, so 95 h is the boundary.
+  const labelled = (name, ageLabel) => step8kCandidate(`Neutral ${name} story`, ageLabel ? {ageLabel} : {});
+  const candidates = [
+    labelled('fresh', '3h ago'), labelled('boundary', '95h ago'), labelled('stalehours', '96h ago'),
+    labelled('staledays', '5d ago'), labelled('yesterday', 'yesterday'), labelled('nolabel', null),
+    labelled('weeks', '3 weeks ago'), labelled('minutes', '12 min ago')
+  ];
+  const {audit, calls, diagnostics} = await step8kActiveRun({candidates});
+  const decisionOf = name => audit.find(entry => entry.headline === `Neutral ${name} story`).decision;
+  assert.equal(decisionOf('stalehours'), 'SKIPPED_STALE_BY_LABEL');
+  assert.equal(decisionOf('staledays'), 'SKIPPED_STALE_BY_LABEL');
+  for (const name of ['fresh', 'boundary', 'yesterday', 'nolabel', 'weeks', 'minutes']) {
+    assert.equal(decisionOf(name), 'EXTRACTION_FAILED', name);
+  }
+  assert.equal(calls.yahooCurrentNewsArticle.length, 6);
+  assert.equal(audit.find(entry => entry.headline === 'Neutral fresh story').ageLabel, '3h ago');
+  assert.equal(audit.find(entry => entry.headline === 'Neutral nolabel story').ageLabel, null);
+  const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.staleByLabelCount, 2);
+  assert.equal(acquisition.articleFetchAttemptCount, 6);
+});
+
+test('Step 8K.5 stale-by-label candidates use no fetch attempts', async () => {
+  const stale = Array.from({length: 14}, (_, index) => step8kCandidate(`Neutral old story ${index + 1}`, {ageLabel: '6d ago'}));
+  const fresh = Array.from({length: 14}, (_, index) => step8kCandidate(`Neutral new story ${index + 1}`, {ageLabel: '2h ago'}));
+  const {audit, calls} = await step8kActiveRun({candidates: stale.concat(fresh)});
+  assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_STALE_BY_LABEL').length, 14);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 2);
+});
+
+test('Step 8K.5 an unusable or missing label never causes a skip', async () => {
+  const unusable = ['', '   ', 'just now', '5 ago', 'ago 5d', '5 fortnights ago', '99999d ago'];
+  const candidates = unusable.map((ageLabel, index) => step8kCandidate(`Neutral odd label story ${index + 1}`, {ageLabel}));
+  const {audit} = await step8kActiveRun({candidates: candidates.concat(
+    step8kCandidate('Neutral huge label story', {ageLabel: '9999d ago'})
+  )});
+  // "9999d ago" parses (four digits) and is stale; every other label is unusable and is fetched.
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_STALE_BY_LABEL').length, 1);
+  assert.equal(audit.filter(entry => entry.decision === 'EXTRACTION_FAILED').length, unusable.length);
+});
+
+test('Step 8K.5 tier order: portfolio, then wire market wrap, then most-active only, then other macro', async () => {
+  const plainMacro = step8kCandidate('Oil jumps on Iran tension');
+  const mostActiveOnly = step8kCandidate('Intel unveils a new chip line');
+  const wireWrap = step8kCandidate('US stock futures slip as oil rises', {publisher: 'Reuters'});
+  const portfolio = step8kCandidate('AAPL unveils a new product line');
+  const {audit, calls} = await step8kActiveRun({
+    candidates: [plainMacro, mostActiveOnly, wireWrap, portfolio],
+    watchlist: [{market: 'US', symbol: 'AAPL'}],
+    mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
+  });
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.tier, entry.subTier]), [
+    [portfolio.headline, 1, '1a'], [wireWrap.headline, 2, '2w'],
+    [mostActiveOnly.headline, 1, '1b'], [plainMacro.headline, 2, null]
+  ]);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url),
+    [portfolio.url, wireWrap.url, mostActiveOnly.url, plainMacro.url]);
+});
+
+test('Step 8K.5 a wire partner without a tier 2 term does not jump ahead of a most-active headline', async () => {
+  const wireNoMacro = step8kCandidate('Retailer names a new chief executive', {publisher: 'Reuters'});
+  const mostActiveOnly = step8kCandidate('Intel unveils a new chip line');
+  const {audit} = await step8kActiveRun({
+    candidates: [wireNoMacro, mostActiveOnly],
+    mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
+  });
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.subTier]),
+    [[mostActiveOnly.headline, '1b'], [wireNoMacro.headline, '3b']]);
+});
+
+test('Step 8K.5 a wire market wrap outranks a single-company piece from a blog partner', async () => {
+  const blog = step8kCandidate('Intel: is the stock a buy at these levels', {publisher: 'Simply Wall St.'});
+  const wrap = step8kCandidate('Stocks fall as Treasury yields climb', {publisher: 'Associated Press'});
+  const {audit} = await step8kActiveRun({
+    candidates: [blog, wrap],
+    mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
+  });
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.subTier]),
+    [[wrap.headline, '2w'], [blog.headline, '1b']]);
+});
+
+test('Step 8K.5 blog-style partners rank last inside their tier and are never dropped', async () => {
+  const blogFirst = step8kCandidate('Neutral gardening story one', {publisher: 'Simply Wall St.'});
+  const motley = step8kCandidate('Neutral gardening story two', {publisher: 'The Motley Fool'});
+  const insider = step8kCandidate('Neutral gardening story three', {publisher: 'Insider Monkey'});
+  const regular = step8kCandidate('Neutral gardening story four');
+  const otherRegular = step8kCandidate('Neutral gardening story five', {publisher: 'Barchart'});
+  const {audit, calls} = await step8kActiveRun({candidates: [blogFirst, motley, regular, insider, otherRegular]});
+  assert.deepEqual(audit.map(entry => entry.headline),
+    [regular.headline, otherRegular.headline, blogFirst.headline, motley.headline, insider.headline]);
+  assert.equal(calls.yahooCurrentNewsArticle.length, 5);
+  assert.ok(audit.every(entry => entry.decision === 'EXTRACTION_FAILED'));
+});
+
+test('Step 8K.5 a blog partner still loses to a most-active headline in the same tier and keeps page order among blogs', async () => {
+  const blogA = step8kCandidate('Intel valuation looks stretched', {publisher: 'Motley Fool'});
+  const active = step8kCandidate('Intel unveils a new chip line');
+  const blogB = step8kCandidate('Intel dividend prospects', {publisher: 'Motley Fool'});
+  const {audit} = await step8kActiveRun({
+    candidates: [blogA, active, blogB],
+    mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
+  });
+  assert.deepEqual(audit.map(entry => entry.headline), [active.headline, blogA.headline, blogB.headline]);
 });

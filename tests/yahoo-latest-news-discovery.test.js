@@ -116,7 +116,7 @@ function routedFetch({us, sg}) {
   return {fetchImpl, requested};
 }
 
-test('Step 8K.3 the US parser accepts any module and the article fetcher path shapes only', async () => {
+test('Step 8K.3 / 8K.5 the US parser accepts any module and the article fetcher path shapes only (singular article yes, live no)', async () => {
   const html = [
     usStory({module: 'topic-content-module', headline: 'Bond yields move higher'}),
     usStory({module: 'ai-storyline-0373', headline: 'Rates weigh on tech',
@@ -136,7 +136,7 @@ test('Step 8K.3 the US parser accepts any module and the article fetcher path sh
   }).discoverUsMarketNews();
   assert.equal(result.type, 'SUCCESS');
   assert.deepEqual(result.candidates.map(item => item.headline),
-    ['Bond yields move higher', 'Rates weigh on tech', 'Any future module works']);
+    ['Bond yields move higher', 'Rates weigh on tech', 'Any future module works', 'Singular article page']);
   assert.equal(result.sectionCount, 9);
   assert.equal(result.candidates[0].url,
     'https://finance.yahoo.com/markets/stocks/articles/nvidia-buyback-fuel-rally-120000123.html');
@@ -336,4 +336,46 @@ test('Step 8K.3 US only when Singapore fails; both failing gives an unsuccessful
   const noneResult = await createYahooMultiEditionNewsDiscoveryService({fetchImpl: none.fetchImpl}).discoverLatestNews();
   assert.equal(noneResult.ok, false);
   assert.deepEqual(noneResult.candidates, []);
+});
+
+// ---- Step 8K.5: page age label ----
+test('Step 8K.5 discovery keeps the page relative label verbatim as an age hint, and omits it when absent', async () => {
+  const withLabel = usStory({headline: 'US story with a label'});
+  const withoutLabel = story({
+    href: 'https://finance.yahoo.com/markets/stocks/articles/no-label-120000456.html',
+    headline: 'US story without a label', module: 'ai-topic-stream', uuid: '62345678-1234-1234-1234-123456789abc'
+  });
+  const nested = story({
+    href: 'https://finance.yahoo.com/markets/stocks/articles/nested-120000457.html',
+    headline: 'US story with a nested label', module: 'ai-topic-stream', uuid: '72345678-1234-1234-1234-123456789abc',
+    extra: '<span class="published-date"><b>58m</b> ago</span>'
+  });
+  const result = await createYahooUsMarketNewsDiscoveryService({
+    fetchImpl: async () => response(withLabel + withoutLabel + nested)
+  }).discoverUsMarketNews();
+  assert.deepEqual(result.candidates.map(item => item.ageLabel ?? null), ['3h ago', null, '58m ago']);
+  assert.equal(Object.hasOwn(result.candidates[1], 'ageLabel'), false);
+  assert.equal(Object.hasOwn(result.candidates[0], 'publishedAt'), false);
+});
+
+test('Step 8K.5 the Singapore parser carries its own label form and stays otherwise unchanged', async () => {
+  const html = story({extra: '<span class="published-date">3 min ago</span>'});
+  const result = await createYahooLatestNewsDiscoveryService({
+    fetchImpl: async () => response(html)
+  }).discoverLatestNews();
+  assert.deepEqual(result.candidates[0], {
+    headline: 'Nvidia rallies on demand',
+    url: 'https://finance.yahoo.com/news/nvidia-rallies-on-demand-120000123.html',
+    uuid: '12345678-1234-1234-1234-123456789abc', publisher: 'Reuters', ageLabel: '3 min ago'
+  });
+});
+
+test('Step 8K.5 merged discovery carries the label through the merge', async () => {
+  const {fetchImpl} = routedFetch({
+    us: response(usStory({headline: 'US labelled story'})),
+    sg: response(story({headline: 'SG labelled story', href: 'https://sg.finance.yahoo.com/news/sg-lab-120000901.html',
+      uuid: '82345678-1234-1234-1234-123456789abc', extra: '<span class="published-date">7 min ago</span>'}))
+  });
+  const result = await createYahooMultiEditionNewsDiscoveryService({fetchImpl}).discoverLatestNews();
+  assert.deepEqual(result.candidates.map(item => [item.edition, item.ageLabel]), [['US', '3h ago'], ['SG', '7 min ago']]);
 });
