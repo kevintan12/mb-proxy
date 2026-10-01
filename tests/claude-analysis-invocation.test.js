@@ -2141,6 +2141,36 @@ test('T5 active malformed prose in content or uncertainties localizes only its s
   }
 });
 
+const INTERNAL_IDENTIFIER_LEAK_TEXT =
+  'Supported risks remain material. It cites evidenceContext.broadMarketFocus directly.';
+
+test('Step 8M: active internal-identifier leak in content or uncertainties localizes only its section', async () => {
+  const input = activeUsInput();
+  for (const mutate of [
+    output => { output.sections[5].content = INTERNAL_IDENTIFIER_LEAK_TEXT; },
+    output => { output.sections[5].uncertainties = [INTERNAL_IDENTIFIER_LEAK_TEXT]; }
+  ]) {
+    const raw = normalOutput(input);
+    mutate(raw);
+    const diagnostics = [];
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    assert.equal(result.type, 'SUCCESS', result.message);
+    assert.equal(result.output.status, 'DEGRADED');
+    assert.equal(result.output.sections[5].content, null);
+    assert.deepEqual(result.output.sections[5].evidenceRefs, []);
+    assert.equal(JSON.stringify(result.output).includes('evidenceContext'), false);
+    for (const index of [0, 1, 2, 4, 6]) {
+      assert.notEqual(result.output.sections[index].content, null, `section ${index + 1}`);
+    }
+    const event = diagnostics.find(value => value.stage === 'claudeAnalysisSectionNormalization'
+      && value.sectionIndex === 5);
+    assert.deepEqual(event.validationViolationCategories, ['INTERNAL_IDENTIFIER_LEAK']);
+  }
+});
+
 test('T6 ungrounded Section 6 opportunity still localizes exactly as before when style words are present', async () => {
   const input = activeUsInput();
   const raw = styledActiveOutput(input);

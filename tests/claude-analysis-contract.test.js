@@ -24,7 +24,8 @@ const {
   createClaudeAnalysisInput,
   validateClaudeAnalysisInput,
   validateClaudeAnalysisOutput,
-  createClaudeAnalysisOutput
+  createClaudeAnalysisOutput,
+  hasInternalIdentifierLeak
 } = require('../lib/claude-analysis-contract');
 
 const MARKET_CONFIG = {
@@ -605,6 +606,36 @@ test('rejects reordered sections, unknown references, model URLs and mismatched 
   const telemetryOnly = normalOutput(input);
   telemetryOnly.sections[0].evidenceRefs = [];
   assert.equal(validateClaudeAnalysisOutput(telemetryOnly, input).valid, false);
+});
+
+test('Step 8M: hasInternalIdentifierLeak flags leaked identifiers without flagging real dotted names', () => {
+  assert.equal(hasInternalIdentifierLeak('evidenceContext.broadMarketFocus'), true);
+  assert.equal(hasInternalIdentifierLeak(
+    'The report cited evidenceContext.broadMarketFocus directly.'), true);
+  assert.equal(hasInternalIdentifierLeak(
+    'MarketBrief reconstructs the final report from validated sections.'), true);
+  assert.equal(hasInternalIdentifierLeak(
+    'Per the section slot definition, content must be a string.'), true);
+  assert.equal(hasInternalIdentifierLeak('The JSON schema requires exact keys.'), true);
+  assert.equal(hasInternalIdentifierLeak('eBay.com reported strong holiday sales.'), false);
+  assert.equal(hasInternalIdentifierLeak('iShares.com lists the fund details.'), false);
+  assert.equal(hasInternalIdentifierLeak(
+    'iPhone.apple sales were strong this quarter.'), false);
+  assert.equal(hasInternalIdentifierLeak('BRK.B shares rose 1.2%.'), false);
+  assert.equal(hasInternalIdentifierLeak('The index fell 0.38% to 7,718.60.'), false);
+  assert.equal(hasInternalIdentifierLeak(
+    'The report has a broad market focus this week.'), false);
+});
+
+test('Step 8M: validateClaudeAnalysisOutput rejects a section containing the real leaked string', () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  output.sections[2].content =
+    `${output.sections[2].content} It cites evidenceContext.broadMarketFocus directly.`;
+  const result = validateClaudeAnalysisOutput(output, input);
+  assert.equal(result.valid, false);
+  assert.equal(result.errors.includes('sections[2]: internal identifier leak'), true);
+  assert.throws(() => createClaudeAnalysisOutput(output, input), /internal identifier leak/);
 });
 
 test('rejects populated Section 3 with telemetry but no supplied evidence reference', () => {

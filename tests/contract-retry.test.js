@@ -62,6 +62,26 @@ test('Step 8L: skips the retry once the elapsed-time guard is exceeded', async (
   assert.equal(calls, 1);
 });
 
+test('Step 8M: a CONTRACT_FAILURE from the new internal-identifier-leak validator still retries once', async () => {
+  // The retry helper is keyed only on result.type, never on which validator produced the
+  // failure or its message text, so a leak-detector failure gets the same one-shot retry as
+  // any other CONTRACT_FAILURE with no change to this file. See end-to-end proof in
+  // tests/us-market-brief-quality-fixtures.test.js.
+  const leakFailure = () => ({
+    ok: false, type: 'CONTRACT_FAILURE',
+    message: 'sections[2]: internal identifier leak', upstreamStatus: 200
+  });
+  const results = [leakFailure(), {ok: true, type: 'SUCCESS'}];
+  let calls = 0;
+  const events = [];
+  const result = await retryOnContractFailure(async () => results[calls++], {
+    call: 'writer', onDiagnostics: value => events.push(value)
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 2);
+  assert.equal(events[0].firstFailureMessage, 'sections[2]: internal identifier leak');
+});
+
 test('Step 8L: a throwing diagnostics callback does not change the result', async () => {
   const results = [contractFailure(), {ok: true, type: 'SUCCESS'}];
   let calls = 0;
