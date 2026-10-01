@@ -429,9 +429,10 @@ test('Section 7 may be null and degraded when no upcoming catalysts are supplied
   assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
 });
 
-test('Section 3 rejects a portfolio reference without independent broad-market focus', async () => {
+test('Step 8O Section 3 trims a portfolio reference and keeps the section with its focus references', async () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
+  const originalContent = output.sections[2].content;
   output.sections[2].evidenceRefs = ['e2', 'e4', 'e5'];
   output.evidenceReferences = ['e2', 'e3', 'e4', 'e5', 'e1'];
   assert.equal(validateClaudeAnalysisOutput(output, input).errors.includes(
@@ -440,20 +441,63 @@ test('Section 3 rejects a portfolio reference without independent broad-market f
   const diagnostics = [];
   const result = await invokeFixture(input, output, diagnostics);
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.equal(result.output.status, 'DEGRADED');
-  assert.deepEqual(result.output.sections[2], {
-    name: 'STOCKS & SECTORS IN FOCUS', content: null, evidenceRefs: [], telemetryRefs: [],
-    uncertainties: ['Broad-market company and sector support could not be validated from the generated Section 3 scope.']
-  });
+  assert.equal(result.output.status, 'NORMAL');
+  assert.equal(result.output.sections[2].content, originalContent);
+  assert.deepEqual(result.output.sections[2].evidenceRefs, ['e4', 'e5']);
+  assert.deepEqual(result.output.sections[2].uncertainties, []);
   assert.deepEqual(result.output.sections[3].evidenceRefs, ['e2']);
   assert.deepEqual(result.output.sections[3].telemetryRefs, ['t2']);
   assert.deepEqual(input.marketPackages[0].evidenceContext.broadMarketFocus, originalFocus);
   assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization'), [{
     stage: 'claudeAnalysisSectionNormalization', sectionIndex: 2,
-    violationCategory: 'NON_FOCUS_EVIDENCE', suppliedReferenceCount: 3,
+    violationCategory: 'NON_FOCUS_EVIDENCE', action: 'TRIMMED', suppliedReferenceCount: 3,
     allowedReferenceCount: 2, offendingReferenceCount: 1
   }]);
   assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
+});
+
+test('Step 8O Section 3 is still localized when no focus reference remains after trimming', async () => {
+  const input = richCompletedUsWeekInput();
+  const output = supportedOutput(input);
+  output.sections[2].evidenceRefs = ['e2'];
+  output.evidenceReferences = ['e2', 'e3', 'e4', 'e5', 'e1'];
+  const diagnostics = [];
+  const result = await invokeFixture(input, output, diagnostics);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.deepEqual(result.output.sections[2], {
+    name: 'STOCKS & SECTORS IN FOCUS', content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['Broad-market company and sector support could not be validated from the generated Section 3 scope.']
+  });
+  const events = diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].violationCategory, 'NON_FOCUS_EVIDENCE');
+  assert.equal(events[0].action, undefined);
+  assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
+});
+
+test('Step 8O Section 3 is localized when a kept focus reference has no named subject in the text', async () => {
+  const input = richCompletedUsWeekInput();
+  const output = supportedOutput(input);
+  output.sections[2].evidenceRefs = ['e2', 'e4'];
+  output.sections[2].content = 'Several unnamed names were in focus.';
+  output.evidenceReferences = ['e2', 'e3', 'e4', 'e5', 'e1'];
+  const result = await invokeFixture(input, output);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.sections[2].content, null);
+  assert.deepEqual(result.output.sections[2].evidenceRefs, []);
+});
+
+test('Step 8O Section 3 trimming does not hide stock telemetry', async () => {
+  const input = richCompletedUsWeekInput();
+  const output = supportedOutput(input);
+  output.sections[2].evidenceRefs = ['e2', 'e4', 'e5'];
+  output.sections[2].telemetryRefs = ['t1', 't2'];
+  output.evidenceReferences = ['e2', 'e3', 'e4', 'e5', 'e1'];
+  const result = await invokeFixture(input, output);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.sections[2].content, null);
+  assert.deepEqual(result.output.sections[2].telemetryRefs, []);
 });
 
 test('Section 3 accepts focus evidence and benchmark telemetry but localizes stock telemetry', async () => {
