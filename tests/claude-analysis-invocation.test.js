@@ -403,6 +403,47 @@ test('active synthesis receives exact CURRENT_SESSION refs and state-aware secti
   assert.equal(Object.hasOwn(evidenceByRef.get('e2'), 'ageHoursAtGeneration'), false);
 });
 
+test('Step 8P.2(a) lead-with-live-session sentence appears for PRE, REGULAR and POST when current evidence exists', () => {
+  const sentence = 'This applies the same way whichever active session is in progress — PRE, REGULAR '
+    + '(Trading), or POST (After-Hours): open Section 1 and Section 2 by describing the current session '
+    + 'itself, its live move and immediate drivers, and use the previous completed session’s close '
+    + 'only as background for comparison. Do not state or imply that current-session evidence caused a '
+    + 'move, or name any cause, beyond what the cited evidence actually supports.';
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z', '2026-09-08T11:30:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
+  ]) {
+    const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
+    const request = buildClaudeAnalysisRequest(input);
+    assert.equal(request.system.includes(sentence), true, marketState);
+  }
+});
+
+test('Step 8P.2(a) sentence is absent when no validated current-session evidence survives', () => {
+  const sentence = 'This applies the same way whichever active session is in progress';
+  const input = activeUsInput({
+    marketState: 'REGULAR', generatedAt: '2026-09-08T15:00:00.000Z',
+    overlayAsOf: '2026-09-08T14:55:00.000Z',
+    currentPublishedAt: '2026-08-01T00:00:00.000Z'
+  });
+  const modelInput = projectClaudeAnalysisInput(input);
+  assert.deepEqual(modelInput.currentSessionContext, [
+    {market: 'US', sessionDate: '2026-09-08', evidenceRefs: []}
+  ]);
+  const request = buildClaudeAnalysisRequest(input);
+  assert.equal(request.system.includes(sentence), false);
+  assert.equal(request.system.includes('ACTIVE_SESSION evidence is limited'), true);
+});
+
+test('Step 8P.2(a) sentence is absent for non-active (no currentSessionContext) analyses', () => {
+  const sentence = 'This applies the same way whichever active session is in progress';
+  const input = canonicalInput();
+  const request = buildClaudeAnalysisRequest(input);
+  assert.equal(request.system.includes(sentence), false);
+  assert.equal(request.system.includes('ACTIVE_SESSION request-specific semantics'), false);
+});
+
 test('ageHoursAtGeneration is present and rounded to one decimal only on current-session evidence', () => {
   const input = activeUsInput({
     marketState: 'REGULAR', generatedAt: '2026-09-08T15:00:00.000Z',
