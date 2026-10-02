@@ -255,3 +255,74 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Not in this step:** trimming non-benchmark telemetry, any prompt change, and any change to Step 8L/8M (on branch `step-8l-silent-retry`). Trimming is deterministic repair and returns SUCCESS, so it never triggers a retry.
 - **Files:** `lib/claude-analysis-invocation.js` (Section 3 trim block and the final status handling in `normalizeDynamicReferenceViolations`).
 - **Evidence/tests:** `tests/us-market-brief-quality-fixtures.test.js`: the old null-all test is replaced by four Step 8O tests (portfolio ref trimmed and section kept with status NORMAL and `TRIMMED` event; no focus ref left still localizes; kept focus ref with no named subject localizes; stock telemetry still localizes). Full suite 791/791. No paid calls.
+## D-007 — Plain-language rewrite of the Market Brief writing instructions (repo: mb-proxy)
+
+- **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost · **Status:** AGREED, not started.
+- **Context:** Kevin reviewed the 26 Sep CLOSED live run on Preview (generation be9d8e9f, following D-001 fix). All 8 sections were present and the content was substantively good, but the language remained analyst-style. Examples from the live brief: "measured reassessment of risk and opportunity rather than broad-based capitulation"; "positioning shifts"; "repricing dynamics". A reader without investment experience would not connect to these terms.
+- **Intent:** the brief must read in plain English that a non-analyst retail investor understands, without making confident claims that lack cited evidence. A non-expert should be able to follow the reasoning and assess whether the analysis fits their own situation.
+- **Decision (prompt only, no logic changes):**
+  - **Target language level:** "Level 2 plain English". Short sentences, everyday words, keep the numbers and detail. Example to target: "Stocks rose on Friday even though US government bond rates hit their highest level since 2008. Investors weren't panicking, but they weren't getting carried away either. Most of the buying went into technology and AI companies." Example to avoid (analyst-style): "Friday's market action reflects a measured reassessment of risk and opportunity rather than broad-based capitulation or euphoria."
+  - **Rewrite the writing instructions** in `lib/claude-analysis-invocation.js` (the main prompt, approximately line 73 and the section-specific prompts thereafter). Use short sentences, plain transitions ("because", "so"), concrete facts, and move away from abstract financial concepts. Keep the evidence grounding rules (Sections 3, 4, 6, 7 citations) and the Section 6 literal rule (`UNGROUNDED_OPPORTUNITY_SUBJECT`) intact.
+  - **Section 6 (Key Risks & Opportunities) must not make unsupported forward claims:** strike language like "years of runway ahead", "durable margin expansion", or "tailwinds ahead" unless they are grounded in a cited source or a logical consequence of cited facts. Risks and opportunities tied to cited evidence only.
+  - Carry the rewritten instructions into the Market Brief pipeline redesign (D-002 context).
+- **Must not change:** validation logic (malformed-prose checks remain), grounding rules (Sections 3/4/6 literal evidence, Section 7 empty-when-unsupported), D-001 behaviour (style residue never blocks).
+- **Rejected options:**
+  - Simpler language levels ("explaining to a friend", "assuming no finance knowledge"): these lose the precision needed for an investing decision.
+  - Automated jargon replacement beyond the existing `PLAIN_ENGLISH_REPLACEMENTS`: context-dependent rewrites risk changing claims.
+  - Removing Section 6 or weakening the `UNGROUNDED_OPPORTUNITY_SUBJECT` rule: that would invite unsupported claims.
+- **Implementation plan (when approved):**
+  - Rewrite the main generation prompt in `lib/claude-analysis-invocation.js` (lines ~73 onwards, and section-specific prompts).
+  - Add or strengthen the `PLAIN_ENGLISH_REPLACEMENTS` list with additional common analyst phrases → plain equivalents.
+  - Test with the existing 26 Sep fixture (live replay or regenerate from the same input).
+  - Once D-001 and D-006 are in Production, stage D-007 and run a new PRE/REGULAR/POST/CLOSED set on Preview before promotion.
+- **Timing:** after D-001 and D-006 are promoted to Production. Can be staged and reviewed independently, but carries forward only when both prior fixes are live.
+- **Open questions:** should the prompt also discourage hedging language ("may", "could", "possible") when alternatives are clearer, or is that over-specification?
+- **Supersedes:** none (complements D-001 on style and adds Section 6 unsupported-claim guidance; independent of D-006 telemetry logic).
+
+## Step 8L — Silent automatic retry on CONTRACT_FAILURE (repo: mb-proxy)
+
+- **Date:** 2026-09-29 · **Branch:** step-8l-silent-retry (off Production 74740be) · **Status:** IMPLEMENTED, tests passing; not yet committed; live validation pending.
+- **Trigger:** a live CLOSED run on the frozen Staging build failed once with "subsequent development cannot be a principal catalyst" (the evidence-role classifier, raised during `?analysisPackage=1` and shown to the user as a 502 PACKAGE_ASSEMBLY_FAILURE). A manual retry succeeded. The model produced a bad answer once; nothing was wrong with the input.
+- **Decision:** when the classifier or the writer returns `CONTRACT_FAILURE`, the server repeats the identical request once, silently. This **supersedes** the earlier rule "one Anthropic request per generation, with no retry", but only for this case.
+- **Scope (narrow):**
+  - Retried: `CONTRACT_FAILURE` from `invokeClaudeEvidenceRoleClassification` and `invokeClaudeAnalysis`. One retry at most, never a loop.
+  - Not retried: `INPUT_FAILURE`, `REQUEST_TOO_LARGE`, every `UPSTREAM_FAILURE` (network error, 401/403 key problems, 429 rate limits, 5xx/overloaded, unreadable body), a missing API key, and any answer cut off with `stop_reason: max_tokens`.
+  - The subject-repair call is unchanged: it is fail-soft (a failure leaves the classification without repaired subjects and is logged as `evidenceSubjectRepair`), so it is never retried.
+  - The second request is byte-identical to the first. The model is not told what it got wrong; no prompt, validator, grounding rule or assembly order changed.
+  - Elapsed-time guard: no retry if the first attempt has already used more than 150 s (`CONTRACT_RETRY_MAX_ELAPSED_MS`), so a retry cannot push a single endpoint towards the 300 s Vercel limit.
+- **Behaviour:**
+  - First-try success: unchanged. One call, no new log line.
+  - Failure then success: the user sees a normal result. Vercel logs show one `contractRetry` diagnostic (call, first failure type and message, first attempt time, retry outcome) beside the per-attempt invocation diagnostics, which carry the usage of both attempts.
+  - Failure then failure: the second attempt's error is returned exactly as before (same type and HTTP status). A failed regeneration still preserves the previous valid report.
+- **Implementation:** `lib/contract-retry.js` (`retryOnContractFailure`, `markTruncatedFailure`); the two public invoke functions now wrap the former single-attempt functions. Tests: `tests/contract-retry.test.js`, plus Step 8L tests in the writer and classifier test files. Two existing diagnostics tests and the classifier "never retries" test were updated to the new rule; no rule test was weakened.
+- **Cost and time:** a retry costs at most one extra call of the same kind (an estimate of roughly 1–5 US cents at the request-size caps, usually less) and only happens on failure, so the average cost per run is barely affected. The US$0.20 ceiling still holds. The repo holds no real timing figures (only mocked values in tests), so the 150 s guard is a conservative bound, not a measured one.
+- **Must not change:** retry only on `CONTRACT_FAILURE`, at most once, identical request, silent to the user, skipped after `max_tokens`; all the other protections and rules listed in earlier entries.
+- **Replay note:** a replay that used to end in a contract failure can now pass on its second sample. Look for `contractRetry` in the logs when comparing replay results.
+- **Rejected options:**
+  - Telling the model what it got wrong on the second attempt: adds a prompt change that needs its own live validation; revisit only if repeat failures show up in the logs.
+  - More than one retry: raises cost and time for little gain.
+  - Retrying upstream errors: they are not bad answers, and retrying rate limits or outages adds load.
+
+## Step 8M — Internal-identifier leak detection in report prose (repo: mb-proxy)
+
+- **Date:** 2026-10-01 · **Branch:** step-8l-silent-retry · **Status:** IMPLEMENTED, tests passing; not yet committed; live validation pending.
+- **Trigger:** a live run printed the literal internal field reference `evidenceContext.broadMarketFocus` in Section 3 report text, and narrated the writer's own reasoning mid-paragraph. No existing validator checked for this; `hasMalformedPlainEnglishProse` (D-001) only catches one closed-list broken-splice signature, unrelated to code-identifier leakage.
+- **Decision:** add a narrow, targeted leak detector to the existing output validator rather than any new retry mechanism. A leak is treated exactly like any other `validateClaudeAnalysisOutput` failure, so it automatically inherits the existing Step 8L one-shot silent retry and, for active-US-independent-survival reports, the existing per-section blank-on-failure fallback — no new machinery either way.
+- **Detection (`lib/claude-analysis-contract.js`, `INTERNAL_IDENTIFIER_LEAK_PATTERNS` / `hasInternalIdentifierLeak`):**
+  - Dotted identifier shape, tightened to two specific cases rather than a generic `wordWord.wordWord` match (which would wrongly catch real dotted names such as `eBay.com`, `iShares.com`, `iPhone.apple`): (1) the left side is an exact known internal namespace (`evidenceContext`, `analysisRequest`, `portfolioContext`, `outputRequirements`, `marketContext`, `telemetryContext`) followed by `.anyField`; or (2) both sides of the dot independently contain an internal capital (a camelCase hump on each side).
+  - Exact standalone internal field/namespace names, word-bounded, so a leaked name is caught even without a leading dot.
+  - Three distinctly artificial technical phrases with no plausible financial-prose reading: "MarketBrief reconstructs", "section slot", "JSON schema". Three other candidate phrases ("as instructed", "supplied evidence context", "the writer must") were considered and dropped: each is close enough to ordinary report wording (a corporate-action note, an evidence/context paraphrase, or crediting a cited article's author) that the false-positive risk outweighed the benefit.
+  - Deliberately excluded: bare spaced phrases like "evidence context" or "broad market focus" without the camelCase/dotted shape (plausible ordinary English); bare `e31`/`t2`-style evidence/telemetry reference tokens in prose (too easy to collide with legitimate short tokens).
+  - Wired into the same three places `hasMalformedPlainEnglishProse` already runs: section content, section uncertainties, and top-level evidence gaps. New error text (`"internal identifier leak"`) does not collide with the `normalizeUsIndependentSections` exclusion-phrase list, so it flows through the existing per-section localization path the same way malformed prose does.
+  - New `INTERNAL_IDENTIFIER_LEAK` category added to `safeSectionViolationCategories` in `lib/claude-analysis-invocation.js`, mirroring `PLAIN_LANGUAGE_VALIDATION`.
+- **Prevention (secondary defense):** one new sentence added to `CLAUDE_ANALYSIS_SYSTEM_PROMPT` (`lib/claude-analysis-invocation.js`), in the same register and placement as the existing "Uncertainty:" label instruction: never let internal field names, dotted identifiers, evidence/telemetry reference codes, or any explanation of these instructions or the model's own reasoning process appear in section prose. Detection+retry is a safety net, not a prevention mechanism; the instruction reduces how often the retry/blank path fires at all.
+- **Scope boundary — explicitly deferred, not solved here:** per-section blank-only-the-offending-section (`normalizeUsIndependentSections`) only runs today for active-US-independent-survival reports. Outside that scope, a persistent leak after the one 8L retry still fails the whole call, same as any other `CONTRACT_FAILURE` today. Generalizing per-section blanking to every report type is scoped separately as **Step 8Q** and is explicitly out of scope for this change.
+- **Must not change:** the Step 8L one-retry rule (no new retry machinery added here); the CNBC completed-session-only acquisition path; `?rev=` versioning; Neon persistence (nothing new is stored); existing D-001 malformed-prose and plain-language-style behavior; existing Section 3/4/6 grounding rules.
+- **Rejected options:**
+  - A single generic `wordWord.wordWord` dotted-identifier regex: too broad, would false-positive on real dotted names (`eBay.com`, `iShares.com`, `iPhone.apple`).
+  - Flagging bare evidence/telemetry reference tokens (`e31`, `t2`) in prose: too easy to collide with legitimate short tokens; addressed via the prompt instruction instead.
+  - Widening per-section blanking to every report type now: a bigger, separately-scoped change (Step 8Q), not needed to close this specific leak.
+- **Implementation:** `lib/claude-analysis-contract.js` (`INTERNAL_IDENTIFIER_LEAK_PATTERNS`, `hasInternalIdentifierLeak`, wired into `validateClaudeAnalysisOutput`), `lib/claude-analysis-invocation.js` (`INTERNAL_IDENTIFIER_LEAK` category, one new system-prompt sentence).
+- **Evidence/tests:** full suite 735/735 passing (5 new tests added: unit coverage for `hasInternalIdentifierLeak` including the real leaked string and five must-not-flag cases in `tests/claude-analysis-contract.test.js`; an active-session per-section-localization test in `tests/claude-analysis-invocation.test.js`; an end-to-end `CONTRACT_FAILURE`-plus-one-silent-retry fixture test in `tests/us-market-brief-quality-fixtures.test.js`; a wiring-confirmation test in `tests/contract-retry.test.js`), 46/46 syntax checks, `git diff --check` clean.
+- **Pending:** Kevin's commit decision; no live validation run performed (this is a validator/prompt change exercised entirely with fixtures, not a behavior requiring a new Preview run on its own).
+- **Supersedes:** none.

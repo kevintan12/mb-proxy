@@ -952,3 +952,17 @@ test('T5 completed-session malformed splice is still blocked from reaching the u
   assert.equal(result.type, 'CONTRACT_FAILURE');
   assert.match(result.message, /sections\[4\]: malformed plain-language prose/);
 });
+
+test('Step 8M: an internal-identifier leak (the real live-run string) is blocked, with one silent retry', async () => {
+  const input = richCompletedUsWeekInput();
+  const output = supportedOutput(input);
+  output.sections[2].content =
+    `${output.sections[2].content} It examines evidenceContext.broadMarketFocus directly.`;
+  const diagnostics = [];
+  const result = await invokeFixture(input, output, diagnostics);
+  assert.equal(result.type, 'CONTRACT_FAILURE');
+  assert.match(result.message, /sections\[2\]: internal identifier leak/);
+  const retries = diagnostics.filter(value => value.stage === 'contractRetry');
+  assert.equal(retries.length, 1);
+  assert.equal(retries[0].firstFailureType, 'CONTRACT_FAILURE');
+});

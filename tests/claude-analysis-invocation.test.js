@@ -1431,7 +1431,8 @@ test('reports request sizes and optional usage on later contract failure', async
 
   assert.equal(result.type, 'CONTRACT_FAILURE');
   const invocationDiagnostics = diagnostics.filter(value => value.model === CLAUDE_ANALYSIS_MODEL);
-  assert.equal(invocationDiagnostics.length, 1);
+  // Step 8L: a contract failure is retried once, so there is one diagnostic per attempt.
+  assert.equal(invocationDiagnostics.length, 2);
   const invocationDiagnostic = invocationDiagnostics[0];
   assert.equal(invocationDiagnostic.requestId, null);
   assert.deepEqual(invocationDiagnostic.usage, {input_tokens: 321});
@@ -1471,7 +1472,8 @@ test('reports only sanitized Section 4 structure when populated content lacks ev
     upstreamStatus: 200
   });
   const invocationDiagnostics = diagnostics.filter(value => value.model === CLAUDE_ANALYSIS_MODEL);
-  assert.equal(invocationDiagnostics.length, 1);
+  // Step 8L: a contract failure is retried once, so there is one diagnostic per attempt.
+  assert.equal(invocationDiagnostics.length, 2);
   const invocationDiagnostic = invocationDiagnostics[0];
   assert.deepEqual(invocationDiagnostic.contractFailure, {
     sectionIndex: 2,
@@ -1488,6 +1490,93 @@ test('reports only sanitized Section 4 structure when populated content lacks ev
     'Analyze only', 'test-key'
   ]) assert.equal(serialized.includes(forbidden), false, forbidden);
   assert.equal(Object.isFrozen(invocationDiagnostic.contractFailure), true);
+});
+
+test('Step 8L: writer retries once silently after a contract failure and then succeeds', async () => {
+  const input = canonicalInput();
+  const invalidOutput = normalOutput(input);
+  invalidOutput.sections[0].evidenceRefs = ['e2'];
+  const validOutput = normalOutput(input);
+  const responses = [anthropicResponse(invalidOutput), anthropicResponse(validOutput)];
+  let calls = 0;
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key',
+    onDiagnostics(value) { diagnostics.push(value); },
+    fetchImpl: async () => responses[calls++]
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 2);
+  const retries = diagnostics.filter(value => value.stage === 'contractRetry');
+  assert.equal(retries.length, 1);
+  assert.equal(retries[0].call, 'writer');
+  assert.equal(retries[0].firstFailureType, 'CONTRACT_FAILURE');
+  assert.equal(retries[0].retryOutcome, 'SUCCESS');
+  assert.equal(JSON.stringify(diagnostics).includes('test-key'), false);
+});
+
+test('Step 8L: writer stops after one retry when the second answer also fails', async () => {
+  const input = canonicalInput();
+  const invalidOutput = normalOutput(input);
+  invalidOutput.sections[0].evidenceRefs = ['e2'];
+  let calls = 0;
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key',
+    onDiagnostics(value) { diagnostics.push(value); },
+    fetchImpl: async () => { calls++; return anthropicResponse(invalidOutput); }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.type, 'CONTRACT_FAILURE');
+  assert.equal(result.upstreamStatus, 200);
+  assert.equal(calls, 2);
+  const retries = diagnostics.filter(value => value.stage === 'contractRetry');
+  assert.equal(retries.length, 1);
+  assert.equal(retries[0].retryOutcome, 'CONTRACT_FAILURE');
+});
+
+test('Step 8L: writer first-try success makes one call and logs no retry', async () => {
+  const input = canonicalInput();
+  let calls = 0;
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key',
+    onDiagnostics(value) { diagnostics.push(value); },
+    fetchImpl: async () => { calls++; return anthropicResponse(normalOutput(input)); }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 1);
+  assert.equal(diagnostics.some(value => value.stage === 'contractRetry'), false);
+});
+
+test('Step 8L: writer never retries upstream, input, truncated or oversized failures', async () => {
+  const input = canonicalInput();
+  const truncated = {
+    ok: true, status: 200,
+    async json() { return {stop_reason: 'max_tokens', content: [{type: 'text', text: '{"status":'}]}; }
+  };
+  const transports = [
+    async () => { throw new Error('network secret'); },
+    async () => ({ok: false, status: 401, headers: {get: () => null}}),
+    async () => ({ok: false, status: 429, headers: {get: () => null}}),
+    async () => ({ok: false, status: 503, headers: {get: () => null}}),
+    async () => ({ok: true, status: 200, async json() { throw new Error('unreadable'); }}),
+    async () => truncated
+  ];
+  for (const transport of transports) {
+    let calls = 0;
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async (...args) => { calls++; return transport(...args); }
+    });
+    assert.equal(result.ok, false);
+    assert.equal(calls, 1);
+  }
+  let calls = 0;
+  const missingKey = await invokeClaudeAnalysis({input, apiKey: '', fetchImpl: async () => { calls++; }});
+  assert.equal(missingKey.type, 'UPSTREAM_FAILURE');
+  const invalidInput = await invokeClaudeAnalysis({input: {}, apiKey: 'test-key', fetchImpl: async () => { calls++; }});
+  assert.equal(invalidInput.type, 'INPUT_FAILURE');
+  assert.equal(calls, 0);
 });
 
 test('pre-normalization diagnostics report grounded Sections 6 and 7 without changing output', async () => {
@@ -2120,6 +2209,36 @@ test('T5 active malformed prose in content or uncertainties localizes only its s
     const event = diagnostics.find(value => value.stage === 'claudeAnalysisSectionNormalization'
       && value.sectionIndex === 5);
     assert.deepEqual(event.validationViolationCategories, ['PLAIN_LANGUAGE_VALIDATION']);
+  }
+});
+
+const INTERNAL_IDENTIFIER_LEAK_TEXT =
+  'Supported risks remain material. It cites evidenceContext.broadMarketFocus directly.';
+
+test('Step 8M: active internal-identifier leak in content or uncertainties localizes only its section', async () => {
+  const input = activeUsInput();
+  for (const mutate of [
+    output => { output.sections[5].content = INTERNAL_IDENTIFIER_LEAK_TEXT; },
+    output => { output.sections[5].uncertainties = [INTERNAL_IDENTIFIER_LEAK_TEXT]; }
+  ]) {
+    const raw = normalOutput(input);
+    mutate(raw);
+    const diagnostics = [];
+    const result = await invokeClaudeAnalysis({
+      input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    assert.equal(result.type, 'SUCCESS', result.message);
+    assert.equal(result.output.status, 'DEGRADED');
+    assert.equal(result.output.sections[5].content, null);
+    assert.deepEqual(result.output.sections[5].evidenceRefs, []);
+    assert.equal(JSON.stringify(result.output).includes('evidenceContext'), false);
+    for (const index of [0, 1, 2, 4, 6]) {
+      assert.notEqual(result.output.sections[index].content, null, `section ${index + 1}`);
+    }
+    const event = diagnostics.find(value => value.stage === 'claudeAnalysisSectionNormalization'
+      && value.sectionIndex === 5);
+    assert.deepEqual(event.validationViolationCategories, ['INTERNAL_IDENTIFIER_LEAK']);
   }
 });
 
