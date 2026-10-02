@@ -166,10 +166,10 @@ test('thin fixture remains canonical and supports deterministic degraded output'
     content: null,
     evidenceRefs: [],
     telemetryRefs: [],
-    uncertainties: ['Validated broad-market company or sector evidence was unavailable.']
+    uncertainties: ['Not enough data to point out specific stocks or sectors.']
   });
   assert.deepEqual(output.evidenceGaps, [
-    'Validated broad-market company or sector evidence was unavailable.'
+    'Not enough data to point out specific stocks or sectors.'
   ]);
 });
 
@@ -291,7 +291,7 @@ test('Section 6 keeps risk-only output while localizing unsupported or generic o
       name: 'KEY RISKS & OPPORTUNITIES', content: null,
       evidenceRefs: [], telemetryRefs: [],
       uncertainties: [
-        'Constructive opportunity support could not be validated from the generated citation set.'
+        'Not enough data to point out a clear opportunity.'
       ]
     });
     assert.deepEqual(diagnostics.filter(value =>
@@ -467,7 +467,7 @@ test('Step 8O Section 3 is still localized when no focus reference remains after
   assert.equal(result.output.status, 'DEGRADED');
   assert.deepEqual(result.output.sections[2], {
     name: 'STOCKS & SECTORS IN FOCUS', content: null, evidenceRefs: [], telemetryRefs: [],
-    uncertainties: ['Broad-market company and sector support could not be validated from the generated Section 3 scope.']
+    uncertainties: ['Not enough data to point out specific stocks or sectors.']
   });
   const events = diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization');
   assert.equal(events.length, 1);
@@ -551,7 +551,7 @@ test('Production-shaped Section 3 overlap localizes mixed stock telemetry and pr
     name: 'STOCKS & SECTORS IN FOCUS', content: null,
     evidenceRefs: [], telemetryRefs: [],
     uncertainties: [
-      'Broad-market company and sector support could not be validated from the generated Section 3 scope.'
+      'Not enough data to point out specific stocks or sectors.'
     ]
   });
   assert.deepEqual(result.output.sections[3], output.sections[3]);
@@ -651,7 +651,7 @@ test('Section 4 accepts selected refs and still localizes two appended refs from
     assert.equal(localized.output.status, 'DEGRADED');
     assert.deepEqual(localized.output.sections[3], {
       name: valid.sections[3].name, content: null, evidenceRefs: [], telemetryRefs: [],
-      uncertainties: ['Initiating-list support could not be validated from the generated citation set.']
+      uncertainties: ['Not enough data to comment on the stocks in this list.']
     });
     assert.deepEqual(diagnostics.filter(event =>
       event.stage === 'claudeAnalysisSectionNormalization' && event.sectionIndex === 3
@@ -738,16 +738,16 @@ test('localizes uncited driver causality and broad-market evidence leaking into 
   assert.deepEqual(result.output.sections[1], {
     name: 'KEY MARKET DRIVERS', content: null,
     evidenceRefs: [], telemetryRefs: [],
-    uncertainties: ['Supported market causality could not be established from the generated citation set.']
+    uncertainties: ['Not enough data to say what moved the market.']
   });
   assert.deepEqual(result.output.sections[3], {
     name: 'MY STOCKS & WATCHLIST - MATERIAL MOVEMENTS', content: null,
     evidenceRefs: [], telemetryRefs: [],
-    uncertainties: ['Initiating-list support could not be validated from the generated citation set.']
+    uncertainties: ['Not enough data to comment on the stocks in this list.']
   });
   assert.deepEqual(result.output.evidenceGaps, [
-    'Supported market causality could not be established from the generated citation set.',
-    'Initiating-list support could not be validated from the generated citation set.'
+    'Not enough data to say what moved the market.',
+    'Not enough data to comment on the stocks in this list.'
   ]);
   assert.deepEqual(result.output.sections[1].evidenceRefs, []);
   assert.deepEqual(result.output.sections[2].evidenceRefs, ['e4', 'e5']);
@@ -787,7 +787,7 @@ test('localizes non-initiating Section 4 telemetry without filtering references 
   assert.deepEqual(result.output.sections[3].evidenceRefs, []);
   assert.deepEqual(result.output.sections[3].telemetryRefs, []);
   assert.deepEqual(result.output.sections[3].uncertainties,
-    ['Initiating-list support could not be validated from the generated citation set.']);
+    ['Not enough data to comment on the stocks in this list.']);
   assert.deepEqual(result.output.sections[2].evidenceRefs, ['e4', 'e5']);
   assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization'), [{
     stage: 'claudeAnalysisSectionNormalization', sectionIndex: 3,
@@ -838,9 +838,9 @@ test('plain-English style is deterministic: raw analyst jargon is style-only and
   assert.doesNotMatch(rendered, /rate-path expectations|reallocation momentum/i);
   assert.match(rendered, /expectations for future interest rates/i);
   const system = buildClaudeAnalysisRequest(input).system;
-  assert.match(system, /clear, normal spoken English/);
-  assert.match(system, /cyclical participants, risk appetite, asymmetric risk-reward/);
-  assert.match(system, /Preserve analytical depth: simplify wording, not reasoning/);
+  assert.match(system, /plain English that a retail investor with no finance training can follow/);
+  assert.match(system, /cyclical participants, asymmetric risk-reward/);
+  assert.match(system, /simplify the words, not the reasoning/);
 });
 
 test('plain-English normalization covers the active-session analyst phrases without changing reasoning', () => {

@@ -2,7 +2,7 @@
 
 One entry per decision. Newest last. Never delete or rewrite an entry; supersede it with a new one.
 
-## D-001 — Plain-English style is non-blocking (step 8)
+## Step 8F — Plain-English style is non-blocking
 
 - **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost · **Status:** COMMITTED (4127b19) on Preview; REGULAR live-validated; PRE and POST live runs pending
 - **Context:** 6b40f2b made context-dependent analyst jargon section-fatal. Words such as "hawkish", "positioning", "risk exposure" or "repriced" in a section's content or uncertainties caused the whole section to be removed, even when it was fully grounded. The same words in evidence gaps, or in a completed-session report, failed the entire report. On the 25 Sep PRE run, a healthy package produced empty Sections 1, 2, 3, 5, 6 and 7 and no Further Readings, because Further Readings derive only from surviving cited sections. Section 4 still carried jargon that the list did not cover.
@@ -22,7 +22,7 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - `lib/claude-analysis-invocation.js`: the `PLAIN_LANGUAGE_VALIDATION` category now means malformed prose only. A new `plainLanguageStyleResidue` diagnostic runs after final validation. It records per-section content and uncertainty match counts plus an evidence-gap count, contains no prose, and is emitted only when a count is above zero.
 - **Evidence/tests:**
   - Baseline at 6b40f2b: 701/701 tests passing, 46/46 syntax checks, `git diff --check` clean.
-  - After D-001: 707/707 tests passing (6 new tests, 2 updated), 46/46 syntax checks, `git diff --check` clean.
+  - After Step 8F: 707/707 tests passing (6 new tests, 2 updated), 46/46 syntax checks, `git diff --check` clean.
   - New tests:
     - `tests/claude-analysis-invocation.test.js`: T1–T3 with T8 and T9 (PRE, REGULAR and POST keep their content, references, uncertainties, gaps and Further Readings); T5 active (malformed content or uncertainty localizes only Section 6, tagged `PLAIN_LANGUAGE_VALIDATION`); T6 (UNGROUNDED_OPPORTUNITY_SUBJECT is unchanged); T7 (Section 4 follows the same policy).
     - `tests/us-market-brief-quality-fixtures.test.js`: T4 (CLOSED, WEEKEND and HOLIDAY); T5 completed (a malformed splice still causes CONTRACT_FAILURE).
@@ -30,18 +30,18 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - Discrimination check: all 8 new or updated tests fail against the unmodified 6b40f2b code.
 - **Live validation:**
   - 2026-09-26, REGULAR on Preview (generation be9d8e9f): passed. There were no `PLAIN_LANGUAGE_VALIDATION` events. `plainLanguageStyleResidue` fired for Section 7 without deleting anything. 3 Yahoo articles were admitted.
-  - The same run showed a separate, pre-existing Section 3 and number-accuracy issue, recorded as D-002. It is not a D-001 regression.
+  - The same run showed a separate, pre-existing Section 3 and number-accuracy issue, recorded as Step 8G. It is not a Step 8F regression.
 - **Pending:** PRE and POST live runs on Preview, then Kevin's decision on promotion to `main`.
 - **Supersedes:** none.
 
-## D-002 — Section 3 blanking and unchecked numbers (record only)
+## Step 8G — Section 3 blanking and unchecked numbers (record only)
 
 - **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost · **Status:** RECORDED, not fixed. Deferred to the Market Brief pipeline redesign.
 - **Context:**
   - **Section 3 blanked:** in the 26 Sep REGULAR Preview run (generation be9d8e9f), the older `NON_BENCHMARK_TELEMETRY` rule blanked Section 3 because it cited portfolio stock telemetry (6 of 10 refs offending).
   - **Further Readings lost:** blanking Section 3 also dropped 2 of 3 Further Readings links, because Further Readings derive only from surviving cited sections.
   - **Wrong number:** Section 5 stated an index move incorrectly (NASDAQ 0.45% vs actual 0.53%), and no check caught it.
-  - **Not new:** both behaviors are pre-existing in Production and are not caused by D-001.
+  - **Not new:** both behaviors are pre-existing in Production and are not caused by Step 8F.
 - **Intent:** whole-section blanking throws away good content and links, and wrong numbers reach the user unchecked. Both undermine report quality.
 - **Decision:** record only; no code change now. Solve in the Market Brief pipeline redesign by fact-checking numbers against fetched data instead of blanking whole sections.
 - **Must not change (until the redesign is approved):** the existing Section 3 scope rules (`NON_BENCHMARK_TELEMETRY`, broad-market focus grounding) and the Further Readings citation rules stay as they are. No ad-hoc loosening or patching in the meantime.
@@ -54,7 +54,7 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - How can Further Readings survive when only part of a section is rejected?
 - **Supersedes:** none.
 
-## D-003 — Development process setup (repo: both)
+## Step 18 — Development process setup (repo: both)
 
 - **Date:** 2026-09-26 · **Branch:** MarketBrief `step-8-runtime-cost` (610fa07) / mb-proxy `main` · **Status:** POLICY
 - **Intent:** Establish a repeatable, auditable development workflow that keeps Kevin in control of every commit while documenting all decisions in one place. Protect both repos from accidental or surprise changes.
@@ -65,12 +65,12 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - **Node modules:** `node_modules/` is excluded from Dropbox sync in both repos. Intent: Dropbox file locks prevent npm installs.
 - **Baseline state (26 Sep 2026):**
   - MarketBrief `main` @ 610fa07: 130/130 tests passing, 14/14 syntax checks passing, `git diff --check` clean. Visible version `v2.20260921.25.F`, release commit `be5df88`.
-  - mb-proxy `main` @ 4127b19: D-001 committed on Preview; baseline pre-D-001 was 701/701 tests passing, 46/46 syntax checks.
+  - mb-proxy `main` @ 4127b19: Step 8F committed on Preview; baseline pre-Step 8F was 701/701 tests passing, 46/46 syntax checks.
 - **Must not change:** the rule that Kevin runs all repo-changing git commands himself. All other rules may be superseded if circumstances change.
 - **Rejected options:** having Claude Code auto-commit or push; logging decisions in separate files per repo; allowing Auto/Bypass modes.
 - **Supersedes:** none.
 
-## D-005 — CLOSED brief fails when Yahoo daily rows lag after the close (repo: mb-proxy)
+## Step 8I — CLOSED brief fails when Yahoo daily rows lag after the close (repo: mb-proxy)
 
 - **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost (05aed81) · **Status:** DIAGNOSING. No code change yet.
 - **Context:**
@@ -113,10 +113,10 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Note:** a CLOSED re-run now would probably pass, because Yahoo has since filled the daily rows. That would hide this bug, not validate a fix.
 - **Supersedes:** none.
 
-## D-006 — Implement D-005 Fix A: make Yahoo completed-session recovery work on real data (repo: mb-proxy)
+## Step 8I (continued) — Implement Fix A: make Yahoo completed-session recovery work on real data (repo: mb-proxy)
 
 - **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost · **Status:** IMPLEMENTED, tests and read-only live replay passing; not yet committed.
-- **Context:** D-005 diagnosed three mismatches between `normalizeIntradaySession`'s assumptions and Yahoo's real 1-minute data: (1) Yahoo sends a 391st bar stamped exactly at the close, with O=H=L=C equal to the official close, which the old code rejected outright (`OUTSIDE_EXPECTED_SESSION`); (2) thinly traded symbols have no-trade minutes where every field is null, which the old code rejected (`INVALID_INTRADAY_OHLC`); (3) daily-row open/high/low differ from the intraday bar by a small amount (opening auction vs. first trade), which the old exact-match reconciliation rejected (`DAILY_INTRADAY_OHLC_CONFLICT`) even for indices' near-identical values.
+- **Context:** the Step 8I diagnosis identified three mismatches between `normalizeIntradaySession`'s assumptions and Yahoo's real 1-minute data: (1) Yahoo sends a 391st bar stamped exactly at the close, with O=H=L=C equal to the official close, which the old code rejected outright (`OUTSIDE_EXPECTED_SESSION`); (2) thinly traded symbols have no-trade minutes where every field is null, which the old code rejected (`INVALID_INTRADAY_OHLC`); (3) daily-row open/high/low differ from the intraday bar by a small amount (opening auction vs. first trade), which the old exact-match reconciliation rejected (`DAILY_INTRADAY_OHLC_CONFLICT`) even for indices' near-identical values.
 - **Intent:** recovery must succeed on Yahoo's real data for both stocks and indices and must return the official close, while staying fail-closed on data it genuinely cannot reconcile.
 - **Decision (Kevin approved Fix A with a 0.1% reconciliation tolerance):**
   - `normalizeIntradaySession` now accepts exactly one "closing print" bar at `regularCloseTime` (any bar timestamped later still returns `OUTSIDE_EXPECTED_SESSION`, since timestamps are strictly increasing so a bar after the closing print necessarily exceeds `closeMs`). Its close becomes the session close; a missing closing print returns `MISSING_FINAL_REGULAR_OBSERVATION`.
@@ -130,7 +130,7 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Rejected options:**
   - Dropping the 16:00 bar and keeping the 15:59 close: recovers a materially wrong close (e.g. VRSK 169.39 vs the official 169.21).
   - Trusting daily open/high/low unchecked when present: would let a genuinely corrupt daily row silently override real intraday values.
-  - Exact-match reconciliation (status quo): rejects real Yahoo data for both stocks and indices, per D-005's live findings.
+  - Exact-match reconciliation (status quo): rejects real Yahoo data for both stocks and indices, per the Step 8I diagnosis findings.
 - **Implementation:** `lib/yahoo-telemetry-acquisition.js` only — `normalizeIntradaySession` rewritten (closing print, no-trade minutes); new `reconcileDailyWithIntraday` helper and `DAILY_INTRADAY_TOLERANCE` constant, called from both `applyLatestCompletedCloseFallback` branches (expected-date row and preceding-date row).
 - **Evidence/tests:**
   - `tests/yahoo-telemetry-acquisition.test.js`: `intradayResponseFor` now defaults to the real 391-bar shape (390 regular minutes + one closing print, defaulting to the same close as the regular bars so all pre-existing assertions hold unchanged); new options `closingPrint`, `closingClose`, `noTradeMinutes`, `extraBarAfterClose`, `sessionContext`. All 23 pre-existing tests in this file pass unmodified against the real shape.
@@ -139,10 +139,10 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - Full suite: 718/718 passing (707 baseline + 11 new). Syntax: 46/46. `git diff --check`: clean.
   - **Read-only live replay** (no code/env changes, no paid calls): real Yahoo daily data for 16 symbols (MSFT, NVDA, VOO, CPRI, CPRT, VEEV, VRSK, AAPL, UNH, NVO, SPYM, CRM, ^GSPC, ^DJI, ^IXIC, ^RUT) fetched live, with the 2026-09-25 row artificially degraded two ways (close-only null; all of open/high/low/close/volume null) before being handed to the service; the 1-minute intraday requests were real, live Yahoo calls. All 32 runs (16 symbols × 2 variants) recovered `SUCCESS` with `primaryCompletedSessionDate = 2026-09-25` and a close matching Yahoo's real (undegraded) daily close exactly, cross-verified directly against the live API for MSFT (516.1699829101562) and VRSK (169.2100067138672).
   - **Round 2 (UNH, NVO, SPYM, CRM), including the daily-vs-intraday gap:** all 8 runs (4 symbols × 2 variants) `SUCCESS`, `recoveredClose` equal to the real undegraded daily close in every case (UNH 376.5899963378906; NVO 38.79999923706055; SPYM 90.80000305175781; CRM 234.02000427246094). Largest daily-vs-intraday open/high/low gap per symbol: UNH 0.0000%, NVO 0.0000%, SPYM 0.0048% (high), CRM 0.0000% — all far inside the 0.1% tolerance (nearest case at ~5% of the tolerance's width, not 80%). No symbol failed and none came within 0.08% of the tolerance boundary, so `DAILY_INTRADAY_TOLERANCE` was left unchanged.
-- **Note:** the full 15-symbol My Stocks/Watchlist list from the 25 Sep failure was not available to this session; the replay used the 7 stocks and index named in D-005's findings, plus AAPL, UNH, NVO, SPYM and CRM (12 stocks, 4 indices = 16 of the 15+4 likely list). Kevin may want any still-missing symbols re-run before promotion.
-- **Open questions (unresolved from D-005, still open):** how long Yahoo equity daily rows stay incomplete after the close; the exact wording of a Fix B statement (not implemented — Fix A alone resolved the 25 Sep failure without needing Fix B, since recovery now succeeds); whether Fix B should also apply when data is present but stale.
+- **Note:** the full 15-symbol My Stocks/Watchlist list from the 25 Sep failure was not available to this session; the replay used the 7 stocks and index named in the Step 8I diagnosis findings, plus AAPL, UNH, NVO, SPYM and CRM (12 stocks, 4 indices = 16 of the 15+4 likely list). Kevin may want any still-missing symbols re-run before promotion.
+- **Open questions (unresolved from Step 8I, still open):** how long Yahoo equity daily rows stay incomplete after the close; the exact wording of a Fix B statement (not implemented — Fix A alone resolved the 25 Sep failure without needing Fix B, since recovery now succeeds); whether Fix B should also apply when data is present but stale.
 - **Pending:** Kevin's commit decision; a live CLOSED Preview run soon after 20:00 ET (08:00 SGT on a weekday) to confirm in production-shaped conditions.
-- **Supersedes:** none (extends D-005's diagnosis with the approved fix; D-005 is left unedited).
+- **Supersedes:** none (extends the Step 8I diagnosis with the approved fix; Step 8I (diagnosis) is left unedited).
 
 ## Step 8K.1 — Drop clearly unrelated active Yahoo candidates before fetching (repo: mb-proxy)
 
@@ -256,16 +256,17 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Files:** `lib/claude-analysis-invocation.js` (Section 3 trim block and the final status handling in `normalizeDynamicReferenceViolations`).
 - **Evidence/tests:** `tests/us-market-brief-quality-fixtures.test.js`: the old null-all test is replaced by four Step 8O tests (portfolio ref trimmed and section kept with status NORMAL and `TRIMMED` event; no focus ref left still localizes; kept focus ref with no named subject localizes; stock telemetry still localizes). Full suite 791/791. No paid calls.
 ## D-007 — Plain-language rewrite of the Market Brief writing instructions (repo: mb-proxy)
+## Step 8J — Plain-language rewrite of the Market Brief writing instructions (repo: mb-proxy)
 
 - **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost · **Status:** AGREED, not started.
-- **Context:** Kevin reviewed the 26 Sep CLOSED live run on Preview (generation be9d8e9f, following D-001 fix). All 8 sections were present and the content was substantively good, but the language remained analyst-style. Examples from the live brief: "measured reassessment of risk and opportunity rather than broad-based capitulation"; "positioning shifts"; "repricing dynamics". A reader without investment experience would not connect to these terms.
+- **Context:** Kevin reviewed the 26 Sep CLOSED live run on Preview (generation be9d8e9f, following the Step 8F fix). All 8 sections were present and the content was substantively good, but the language remained analyst-style. Examples from the live brief: "measured reassessment of risk and opportunity rather than broad-based capitulation"; "positioning shifts"; "repricing dynamics". A reader without investment experience would not connect to these terms.
 - **Intent:** the brief must read in plain English that a non-analyst retail investor understands, without making confident claims that lack cited evidence. A non-expert should be able to follow the reasoning and assess whether the analysis fits their own situation.
 - **Decision (prompt only, no logic changes):**
   - **Target language level:** "Level 2 plain English". Short sentences, everyday words, keep the numbers and detail. Example to target: "Stocks rose on Friday even though US government bond rates hit their highest level since 2008. Investors weren't panicking, but they weren't getting carried away either. Most of the buying went into technology and AI companies." Example to avoid (analyst-style): "Friday's market action reflects a measured reassessment of risk and opportunity rather than broad-based capitulation or euphoria."
   - **Rewrite the writing instructions** in `lib/claude-analysis-invocation.js` (the main prompt, approximately line 73 and the section-specific prompts thereafter). Use short sentences, plain transitions ("because", "so"), concrete facts, and move away from abstract financial concepts. Keep the evidence grounding rules (Sections 3, 4, 6, 7 citations) and the Section 6 literal rule (`UNGROUNDED_OPPORTUNITY_SUBJECT`) intact.
   - **Section 6 (Key Risks & Opportunities) must not make unsupported forward claims:** strike language like "years of runway ahead", "durable margin expansion", or "tailwinds ahead" unless they are grounded in a cited source or a logical consequence of cited facts. Risks and opportunities tied to cited evidence only.
-  - Carry the rewritten instructions into the Market Brief pipeline redesign (D-002 context).
-- **Must not change:** validation logic (malformed-prose checks remain), grounding rules (Sections 3/4/6 literal evidence, Section 7 empty-when-unsupported), D-001 behaviour (style residue never blocks).
+  - Carry the rewritten instructions into the Market Brief pipeline redesign (per Step 8G analysis).
+- **Must not change:** validation logic (malformed-prose checks remain), grounding rules (Sections 3/4/6 literal evidence, Section 7 empty-when-unsupported), Step 8F behaviour (style residue never blocks).
 - **Rejected options:**
   - Simpler language levels ("explaining to a friend", "assuming no finance knowledge"): these lose the precision needed for an investing decision.
   - Automated jargon replacement beyond the existing `PLAIN_ENGLISH_REPLACEMENTS`: context-dependent rewrites risk changing claims.
@@ -274,8 +275,8 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - Rewrite the main generation prompt in `lib/claude-analysis-invocation.js` (lines ~73 onwards, and section-specific prompts).
   - Add or strengthen the `PLAIN_ENGLISH_REPLACEMENTS` list with additional common analyst phrases → plain equivalents.
   - Test with the existing 26 Sep fixture (live replay or regenerate from the same input).
-  - Once D-001 and D-006 are in Production, stage D-007 and run a new PRE/REGULAR/POST/CLOSED set on Preview before promotion.
-- **Timing:** after D-001 and D-006 are promoted to Production. Can be staged and reviewed independently, but carries forward only when both prior fixes are live.
+  - Once Step 8F and Step 8I Fix A are in Production, stage Step 8J and run a new PRE/REGULAR/POST/CLOSED set on Preview before promotion.
+- **Timing:** after Step 8F and Step 8I Fix A are promoted to Production. Can be staged and reviewed independently, but carries forward only when both prior fixes are live.
 - **Open questions:** should the prompt also discourage hedging language ("may", "could", "possible") when alternatives are clearer, or is that over-specification?
 - **Supersedes:** none (complements D-001 on style and adds Section 6 unsupported-claim guidance; independent of D-006 telemetry logic).
 
@@ -325,4 +326,54 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Implementation:** `lib/claude-analysis-contract.js` (`INTERNAL_IDENTIFIER_LEAK_PATTERNS`, `hasInternalIdentifierLeak`, wired into `validateClaudeAnalysisOutput`), `lib/claude-analysis-invocation.js` (`INTERNAL_IDENTIFIER_LEAK` category, one new system-prompt sentence).
 - **Evidence/tests:** full suite 735/735 passing (5 new tests added: unit coverage for `hasInternalIdentifierLeak` including the real leaked string and five must-not-flag cases in `tests/claude-analysis-contract.test.js`; an active-session per-section-localization test in `tests/claude-analysis-invocation.test.js`; an end-to-end `CONTRACT_FAILURE`-plus-one-silent-retry fixture test in `tests/us-market-brief-quality-fixtures.test.js`; a wiring-confirmation test in `tests/contract-retry.test.js`), 46/46 syntax checks, `git diff --check` clean.
 - **Pending:** Kevin's commit decision; no live validation run performed (this is a validator/prompt change exercised entirely with fixtures, not a behavior requiring a new Preview run on its own).
+- **Supersedes:** none (complements Step 8F on style and adds Section 6 unsupported-claim guidance; independent of Step 8I Fix A telemetry logic).
+
+## Step 8J — update: plain-language rewrite implemented (repo: mb-proxy)
+
+- **Date:** 2026-09-26 · **Branch:** step-8-runtime-cost · **Status:** IMPLEMENTED (prompt only), not committed; live validation pending. Refers back to the decision entry "Step 8J" above. From 26 Sep 2026 the Master's Step Table is the single tracker and new entries are keyed by Step number.
+- **Amendments agreed 26 Sep 2026 and how they were applied:**
+  1. **Hedging is not banned.** The prompt now says: state uncertainty once, where it matters, as a concrete "if [cited fact], then [consequence]"; never stack hedges ("could potentially"); never hedge a cited fact. This answers the Step 8J open question.
+  2. **`PLAIN_ENGLISH_REPLACEMENTS` was not extended.** It rewrites Claude's output automatically (`normalizePlainEnglishOutput`), so new analyst phrases (repricing, positioning shifts, capitulation, etc.) went into the prompt guidance only. No new automatic rewriting. `PLAIN_ENGLISH_STYLE_PATTERNS`, malformed-prose checks and the style-residue diagnostic are unchanged.
+  3. **No leakable example facts.** The single tone example is marked "Style example only, do not reuse its facts or wording as content" and uses placeholders. The movement-format examples (previously real-looking Apple / S&P 500 values) are now placeholders: `[Company] fell $[amount] ([percent]%) to $[price].` A test asserts the old example values are absent from the prompt.
+  4. **Section 4 wording untouched.** No list-specific text was added, so Step 21D (Section 4 covering both lists) is not made harder.
+  5. **Section 6 forward claims.** Added: no "years of runway", "tailwinds ahead" or "durable margin expansion" unless a cited source says so or it follows directly from cited facts; otherwise omit or use "if [cited fact] continues, [consequence]". All Section 6 grounding sentences are unchanged.
+- **What changed:** `CLAUDE_ANALYSIS_SYSTEM_PROMPT` in `lib/claude-analysis-invocation.js`: main writing instruction, movement-format and uncertainty instructions, plus light plain-sentence wording in Sections 1, 5 and 6. The system prompt is about 2.4 KB (roughly 600 tokens) longer per request.
+- **Tests (wording pins updated, rules untouched):** `tests/claude-analysis-invocation.test.js` "gives Claude plain-language and locked movement presentation instructions" and `tests/us-market-brief-quality-fixtures.test.js` "plain-English style is deterministic..." pinned the old sentences and old example values, so they now pin the new wording; added "Step 8J: Section 6 forbids unsupported forward claims". No rule test was changed or weakened. Full suite 719/719.
+- **Must not change (kept):** validation logic, Sections 3/4/6 grounding, `UNGROUNDED_OPPORTUNITY_SUBJECT`, Section 7 empty when unsupported, Step 8F behaviour (style residue never blocks), one request with no retry, the 8-section structure, protected checkpoints. (Step 8F is the prior decision that made style-only jargon non-blocking.)
+- **Step 8J — citation fix:** A replay of one saved WEEKEND package gave NORMAL on 2 of 2 replays with the old prompt and DEGRADED on 2 of 2 with Step 8J. One replay lost Section 2 to `MISSING_PRINCIPAL_CATALYST`; the other lost Section 3 to `NON_FOCUS_EVIDENCE` (a recap/session reference was cited). Likely causes: the style example "Stocks rose on [day]…" and the "because / so" nudge match `hasDirectMarketCausalClaim`, which then demands a principal catalyst, and "keep every number" pulled index/recap references into Section 3. Prompt-only fix: Section 2 must cite a principal catalyst whenever it says what moved the market and whenever principal catalysts exist; Section 3 must not cite recap, session, index or weekly-summary references; the causal-pattern style example was removed; "so" is tied to a cited principal catalyst; added a 25-word sentence limit, one idea per sentence, and a banned-word list. No validator changed. The validator false positive (plain "rose on" counted as a causal claim) is unchanged and logged for Step 21B.
+- **Step 8J — readability round:** Replay on the citation-fixed prompt was NORMAL 3 of 3 but readability did not improve (22–27 words per sentence, banned words still present), so the plain-English, hedging, sentence-length and banned-word rules now form a "FINAL STYLE CHECK" block at the end of `CLAUDE_ANALYSIS_SYSTEM_PROMPT` (before the request-specific allowlists), with one placeholder-only worked example and a closing reread instruction. Prompt text and position only; no validator, grounding rule or assembly order changed.
+- **Step 8J — blank-section wording:** (request 28 Sep 2026) Step 8J made populated sections plain, but the text shown when a section has no content was still old analyst wording (a live replay showed "Supported market causality could not be established from the generated citation set."). Kevin asked for plain wording such as "Not enough data to produce an analysis." Text-only change to the message constants in `lib/claude-analysis-invocation.js`; no evidence, classification or validation logic changed. Wording is short, plain, and says there is too little evidence without implying a technical failure. Before → after:
+  - Section 1 controlled gap: "The supplied evidence did not establish a material market driver." → "Not enough data to point to a main market driver."
+  - Section 2 controlled gap: "Validated broad-market company or sector evidence was unavailable." → "Not enough data to point out specific stocks or sectors."
+  - Incomplete report gap: "The generated report did not establish complete analytical coverage." → "Not enough data to cover every part of this report."
+  - Active session, nothing survived: "No grounded analytical section survived validation for the active session." → "Not enough data to produce an analysis for the current session."
+  - Per-section fallback (two places): "The supplied evidence did not support a reliable [SECTION] section." → "Not enough data to write the [SECTION] section."
+  - causality: "Supported market causality could not be established from the generated citation set." → "Not enough data to say what moved the market."
+  - referenceIntegrity: "Supported analysis could not be validated from the generated reference set." → "Not enough data to produce an analysis."
+  - initiatingList: "Initiating-list support could not be validated from the generated citation set." → "Not enough data to comment on the stocks in this list."
+  - sectionThreeScope: "Broad-market company and sector support could not be validated from the generated Section 3 scope." → "Not enough data to point out specific stocks or sectors."
+  - opportunity: "Constructive opportunity support could not be validated from the generated citation set." → "Not enough data to point out a clear opportunity."
+  - Tests: pinned strings updated in `tests/claude-analysis-invocation.test.js`, `tests/us-market-brief-quality-fixtures.test.js` and `tests/fixtures/us-market-brief-quality.js`. Suite 722/722 before and after.
+  - Not changed: the package-side gap in `lib/us-analysis-package-orchestration.js` (same old Section 3 sentence, an evidence gap rather than a section message) and other package-assembly gaps (CNBC, Yahoo, Federal Reserve, telemetry). Those are outside the requested file. (Done in the package-side gap wording entry below.)
+- **Step 8J — package-side gap wording:** (request 29 Sep 2026, builds on the blank-section wording above) The gap strings in `lib/us-analysis-package-orchestration.js` go into the evidence package as `unresolvedGaps`, which Claude reads and can echo into the report, so they got the same plain-English treatment. Text-only; no evidence, classification or orchestration logic changed. Constant names unchanged. Before → after:
+  - Federal Reserve: "Federal Reserve monetary-policy evidence was unavailable at package assembly time." → "Could not get Federal Reserve interest-rate information for this report."
+  - CNBC news research: "CNBC market-news research was unavailable at package assembly time." → "Could not get CNBC market news for this report."
+  - CNBC recap: "CNBC completed-session recap was unavailable at package assembly time." → "Could not get a CNBC recap of the last trading day."
+  - Yahoo recap unavailable: "Yahoo Finance completed-session recap was unavailable at package assembly time." → "Could not get a Yahoo Finance recap of the last trading day."
+  - Yahoo recap retrieval: "Yahoo Finance completed-session recap validation or retrieval failed at package assembly time." → "Could not get a usable Yahoo Finance recap of the last trading day."
+  - Yahoo recap construction: "Yahoo Finance completed-session recap evidence construction failed at package assembly time." → "Could not turn the Yahoo Finance recap of the last trading day into usable evidence."
+  - Classification, no primary session: "Evidence-role classification was unavailable because no primary completed session was established." → "Not enough data to sort the news by what it explains, because the last trading day could not be pinned down."
+  - Broad-market evidence: "Validated broad-market company or sector evidence was unavailable." → "Not enough data to point out specific stocks or sectors." (same as the Section 3 wording above)
+  - Telemetry missing: "Some requested US market telemetry was unavailable; affected symbols were omitted." → "Price data was missing for some stocks, so they are left out."
+  - Telemetry stale: "Some US telemetry was omitted because its history did not reach the calendar-expected latest completed session." → "Some stocks are left out because their price data was out of date and did not include the last trading day."
+  - Persistence failed: "Snapshot persistence or readback failed; validated acquired telemetry was used without persisted confirmation." → "The saved price history could not be checked, so the freshly fetched prices are used as they are."
+  - Persistence lag: "Fresh telemetry lagged validated stored history; the newer persisted snapshot was used." → "The fresh price feed was behind the saved price history, so the newer saved prices are used."
+  - Yahoo market data: "Some Yahoo Finance market-data evidence was unavailable; affected evidence was omitted." → "Some Yahoo Finance market data was missing, so it is left out."
+  - Active Yahoo news: "Validated current-session Yahoo Finance news was unavailable; current news catalysts cannot be established." → "Not enough current Yahoo Finance news to say what is moving the market today."
+  - Classification failed: "Evidence-role classification was unavailable or invalid; no unverified causal roles were assigned." → "Could not sort the news by what it explains, so no news is presented as the cause of a move."
+  - Classification partial: "Some evidence-role classifications were omitted; affected evidence was assigned no causal role." → "Could not sort some of the news by what it explains, so those items are not presented as the cause of a move."
+  - Left unchanged (internal only, never in a report): thrown `TypeError` messages (e.g. "Canonical US exchange calendar is unavailable", "CNBC news research failed", "Evidence-role classification failed"), and diagnostic `stage` / `outcome` / `failureType` values such as `UNAVAILABLE`, `FAILURE`, `THROWN_FAILURE`.
+  - Not touched (different file): "Future-dated evidence was omitted because it was unavailable at report generation time." in `lib/analysis-package-service.js`, still analyst wording; flagged for a later request.
+  - Tests: four pinned substrings updated in `tests/us-analysis-package-orchestration.test.js`. Fixture strings in `tests/us-market-brief-quality-fixtures.test.js` and `tests/fixtures/us-market-brief-quality.js` are self-contained test data and were left alone. Suite 722/722 before and after.
+- **Pending:** Preview PRE/REGULAR/POST/CLOSED live set to check readability, no new `PLAIN_LANGUAGE_VALIDATION`, and no Section 6 forward claims. Kevin's commit decision.
 - **Supersedes:** none.

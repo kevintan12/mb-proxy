@@ -1277,7 +1277,7 @@ test('active Yahoo stops at the twelve-attempt ceiling even when the next candid
   assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
     entry.item.evidenceCategory === 'news'), false);
   assert.ok(output.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
-    gap.includes('Validated current-session Yahoo Finance news was unavailable')));
+    gap.includes('Not enough current Yahoo Finance news to say what is moving the market today.')));
 });
 
 test('ambiguous common-word tickers do not reorder unrelated Yahoo headlines', async () => {
@@ -2037,7 +2037,7 @@ test('active PRE retains conservative classifier failure fallback with current e
   assert.ok(output.marketPackages[0].evidenceContext.evidence.some(entry =>
     entry.item.title === 'Current Yahoo market development'));
   assert.ok(output.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
-    gap.includes('Evidence-role classification was unavailable')));
+    gap.includes('Could not sort the news by what it explains')));
   assert.ok(diagnostics.some(value => value.stage === 'evidenceRoleClassificationFallback'
     && value.outcome === 'CONSERVATIVE_UNCLASSIFIED'));
 });
@@ -4438,7 +4438,7 @@ test('zero telemetry fails but persistence and Yahoo evidence failures preserve 
   const persistedFallback = await persistence.assemble(request());
   assert.equal(validateClaudeAnalysisInput(persistedFallback), true);
   assert.ok(persistedFallback.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
-    gap.includes('Snapshot persistence or readback failed')));
+    gap.includes('The saved price history could not be checked')));
 
   const yahoo = harness({
     yahooEvidenceAcquisition: {async acquireEvidence() { throw new Error('Yahoo failed'); }}
@@ -4446,7 +4446,7 @@ test('zero telemetry fails but persistence and Yahoo evidence failures preserve 
   const yahooFallback = await yahoo.assemble(request());
   assert.equal(validateClaudeAnalysisInput(yahooFallback), true);
   assert.ok(yahooFallback.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
-    gap.includes('Yahoo Finance market-data evidence was unavailable')));
+    gap.includes('Some Yahoo Finance market data was missing')));
 });
 
 test('one failed symbol or evidence item leaves unrelated telemetry and references canonical', async () => {
@@ -5022,7 +5022,7 @@ test('Step 8K.1 when every candidate is dropped the limited-evidence path is unc
   assert.equal(calls.yahooCurrentNewsArticle.length, 0);
   assert.equal(calls.evidenceRoleClassification.length, 0);
   assert.ok(output.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
-    gap.includes('current-session Yahoo Finance news was unavailable')));
+    gap.includes('Not enough current Yahoo Finance news')));
 });
 
 test('Step 8K.1 dropped candidates use no fetch attempts, so the twelve-attempt cap still applies to the rest', async () => {

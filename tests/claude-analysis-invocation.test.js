@@ -20,7 +20,8 @@ const {
   NO_CURRENT_SESSION_SUMMARY,
   noCurrentSessionEvidenceOutput,
   resolveActiveFurtherReadings,
-  eligibleActiveFurtherReadingReferences
+  eligibleActiveFurtherReadingReferences,
+  hasDirectMarketCausalClaim
 } = require('../lib/claude-analysis-contract');
 const {
   CLAUDE_ANALYSIS_MODEL,
@@ -2066,24 +2067,101 @@ test('gives Claude the exact section uncertainty canonicality requirements', () 
   }
 });
 
+test('Step 8J citation fix: Section 2 and 3 citation instructions and no causal-pattern style example', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    "including plain wording such as 'rose on', 'because' or 'so', its evidenceRefs must include at least one evidenceContext.principalCatalysts reference",
+    'When evidenceContext.principalCatalysts is not empty, Section 2 must cite at least one of them.',
+    'Never add a recap, session, index or weekly-summary reference to Section 3; put index and weekly moves in Sections 1 or 5 and keep Section 3 to the focus companies and sectors'
+  ]) assert.equal(system.includes(requirement), true, requirement);
+  assert.equal(system.includes('Style example only — do not reuse its wording or facts; the placeholders in brackets are not data'), true);
+  assert.equal(system.includes('Stocks rose on'), false);
+});
+
+const STYLE_HEADING = 'FINAL STYLE CHECK — apply to every section before you finish.';
+const STYLE_LAST_LINE = 'Before finishing each section, reread it: split any sentence over 25 words into two, and replace any banned word with the plain fact.';
+const DYNAMIC_MARKER = ' Request-specific Section 3 telemetry allowlist';
+
+test('Step 8J readability round: FINAL STYLE CHECK sits after the citation rules and before the dynamic allowlists', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  assert.equal(system.split(STYLE_HEADING).length, 2);
+  const at = system.indexOf(STYLE_HEADING);
+  const staticPrompt = system.split(DYNAMIC_MARKER)[0];
+  assert.equal(staticPrompt.endsWith(STYLE_LAST_LINE), true);
+  assert.equal(at < system.indexOf(DYNAMIC_MARKER), true);
+  assert.equal(at < system.indexOf('Request-specific Section 4 reference allowlist'), true);
+  for (const citation of [
+    'When evidenceContext.principalCatalysts is not empty, Section 2 must cite at least one of them.',
+    'Never add a recap, session, index or weekly-summary reference to Section 3',
+    'Hard output constraint for Sections 6-7',
+    'Section slot s8 FURTHER READINGS must be exactly {}',
+    'MarketBrief derives top-level Further Readings and evidenceReferences from the validated sections'
+  ]) {
+    assert.equal(system.indexOf(citation) >= 0 && system.indexOf(citation) < at, true, citation);
+  }
+  // Moved sentences appear exactly once (nothing left behind at the old position).
+  for (const once of [
+    'Write in plain English that a retail investor with no finance training can follow',
+    'Never use these words or phrases: tailwind',
+    'Hedging words are allowed, but state uncertainty once',
+    'Keep every sentence under 25 words and give each sentence one idea',
+    'Style example only'
+  ]) assert.equal(system.split(once).length, 2, once);
+});
+
+test('Step 8J readability round: the worked style example cannot trigger the causal-claim validator', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  const match = system.match(/the placeholders in brackets are not data: "([^"]+)"/);
+  assert.notEqual(match, null);
+  const example = match[1];
+  assert.equal(hasDirectMarketCausalClaim(example), false);
+  for (const sentence of example.split(/(?<=.) /)) {
+    assert.equal(hasDirectMarketCausalClaim(sentence), false, sentence);
+  }
+  for (const sentence of example.split(/(?<=.) /)) {
+    assert.equal(sentence.split(/s+/).length < 25, true, sentence);
+  }
+});
+
 test('gives Claude plain-language and locked movement presentation instructions', () => {
   const system = buildClaudeAnalysisRequest(canonicalInput()).system;
   for (const requirement of [
-    'clear, normal spoken English for an informed layperson, not a professional market analyst',
-    'Prefer common words when they are equally accurate',
-    'short, direct sentences where practical',
-    'Avoid analyst-desk jargon such as cyclical participants, risk appetite, asymmetric risk-reward',
-    'If a technical or financial term is unavoidable, explain it briefly in plain language',
-    'Preserve analytical depth: simplify wording, not reasoning',
-    'Apple fell $8.24 (2.51%) to $319.97.',
-    'Apple gained $3.25 (1.00%) to $328.21.',
-    'S&P 500 fell by 29.11 points (0.38%) to 7,718.60.',
-    'S&P 500 gained 81.11 points (1.06%) to 7,747.71.',
+    'Write in plain English that a retail investor with no finance training can follow',
+    'Use short sentences and everyday words',
+    'using plain links such as "so" where a cited principal catalyst supports the link',
+    'Keep every sentence under 25 words and give each sentence one idea',
+    'Do not join two ideas with "while", "as", "with" or a semicolon',
+    'Never use these words or phrases: tailwind, headwind, durable, resilience, resilient, bifurcated, cohort, wall of worry, validates, validated, underpinned, cascaded, narrative, renaissance, sustained investor appetite',
+    'If a banned word feels needed, write the plain fact instead',
+    'Keep every number and concrete detail: simplify the words, not the reasoning',
+    'Do not use analyst phrases',
+    'cyclical participants, asymmetric risk-reward',
+    'If a technical or financial term is unavoidable, explain it in a few plain words',
+    '[Company] fell $[amount] ([percent]%) to $[price].',
+    '[Company] gained $[amount] ([percent]%) to $[price].',
+    '[Index] fell by [points] points ([percent]%) to [level].',
+    '[Index] gained [points] points ([percent]%) to [level].',
     'absolute movement first, percentage in brackets second, and resulting price or level last',
     'Do not omit absolute movement when the package supplies it',
-    'incorporate it naturally into the section prose and explain what is unknown and why it matters',
+    'Hedging words are allowed, but state uncertainty once, where it matters',
+    'if [cited fact], then [consequence]',
+    'Never stack hedges such as "could potentially" and never hedge a fact that is cited',
     'Do not write implementation-style labels such as "Uncertainty:" inside the prose',
     'continue to provide the structured uncertainties arrays separately'
+  ]) {
+    assert.equal(system.includes(requirement), true, requirement);
+  }
+  // Step 8J: example facts must not be able to leak into briefs.
+  for (const leak of ['Apple fell', 'Apple gained', '319.97', '328.21', '7,718.60', '7,747.71']) {
+    assert.equal(system.includes(leak), false, leak);
+  }
+});
+
+test('Step 8J: Section 6 forbids unsupported forward claims', () => {
+  const system = buildClaudeAnalysisRequest(canonicalInput()).system;
+  for (const requirement of [
+    'Do not make forward claims such as "years of runway", "tailwinds ahead", or "durable margin expansion"',
+    'unless a cited source says so or the claim follows directly from cited facts'
   ]) {
     assert.equal(system.includes(requirement), true, requirement);
   }
@@ -2254,7 +2332,7 @@ test('T6 ungrounded Section 6 opportunity still localizes exactly as before when
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.sections[5].content, null);
   assert.deepEqual(result.output.sections[5].uncertainties,
-    ['Constructive opportunity support could not be validated from the generated citation set.']);
+    ['Not enough data to point out a clear opportunity.']);
   const normalizationEvents = diagnostics.filter(value =>
     value.stage === 'claudeAnalysisSectionNormalization');
   assert.deepEqual(normalizationEvents.map(value => [value.sectionIndex, value.violationCategory]),
@@ -2387,7 +2465,7 @@ test('deterministically downgrades evidence-limited NORMAL output while preservi
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(output)
   });
 
-  const message = 'The supplied evidence did not support a reliable KEY RISKS & OPPORTUNITIES section.';
+  const message = 'Not enough data to write the KEY RISKS & OPPORTUNITIES section.';
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.status, 'DEGRADED');
   assert.deepEqual(result.output.sections[5], {
@@ -2418,8 +2496,8 @@ test('deterministically nulls impossible Sections 2-4 and recomputes first-use r
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.status, 'DEGRADED');
   const expected = [
-    'The supplied evidence did not establish a material market driver.',
-    'Validated broad-market company or sector evidence was unavailable.'
+    'Not enough data to point to a main market driver.',
+    'Not enough data to point out specific stocks or sectors.'
   ];
   for (const [offset, message] of expected.entries()) {
     const section = result.output.sections[offset + 1];
@@ -2449,7 +2527,7 @@ test('localizes empty broad-market focus to Section 3 without removing valid dri
     content: null,
     evidenceRefs: [],
     telemetryRefs: [],
-    uncertainties: ['Validated broad-market company or sector evidence was unavailable.']
+    uncertainties: ['Not enough data to point out specific stocks or sectors.']
   });
 });
 
