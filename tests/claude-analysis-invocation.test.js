@@ -1401,6 +1401,193 @@ test('Step 8U.6: in every state an all-ungrounded Section 6 is still emptied and
   }
 });
 
+const STEP_8U8_QUALIFIER = 'The news does not show for certain what moved the market.';
+const STEP_8U8_CAUSALITY_GAP = 'Not enough data to say what moved the market.';
+
+function withStep8U8References(output) {
+  output.evidenceReferences = [...new Set(output.sections.slice(0, 7)
+    .flatMap(section => section.evidenceRefs))];
+  return output;
+}
+
+// Sections 1 and 3-7 with descriptive text and refs that hold no principal catalyst of the needed
+// kind. Active: e1 is current Yahoo news (focus, current catalyst) and e2 the completed-session
+// catalyst, so a claim about the previous session citing only e1 names current news as its cause.
+// Completed: e1 is the Yahoo recap published after Friday's close (a later development, never a
+// catalyst) and e5 a focus item that is not a catalyst.
+function step8U8Case(marketState, ...times) {
+  const fixture = step8U2Case(marketState, ...times);
+  const active = Boolean(times[1]);
+  const input = structuredClone(fixture.input);
+  const output = structuredClone(fixture.output);
+  if (active) {
+    input.portfolioContext.myStocks = [{market: 'US', symbol: 'MSFT', telemetryRefs: [],
+      evidenceRefs: ['e1'], upcomingEvents: []}];
+    output.sections[2].content = 'Supported Microsoft analysis.';
+    output.sections[3] = {...output.sections[3], content: 'Microsoft was in focus.',
+      evidenceRefs: ['e1'], telemetryRefs: [], uncertainties: []};
+  } else {
+    input.portfolioContext.myStocks[0].evidenceRefs = ['e1', 'e2'];
+    output.sections[2] = {...output.sections[2], content: 'Health-care stocks advanced.',
+      evidenceRefs: ['e5']};
+    output.sections[3].evidenceRefs = ['e1'];
+    output.sections[5].content = 'Policy uncertainty remains a material risk to the market outlook.';
+    for (const index of [0, 4, 5, 6]) output.sections[index].evidenceRefs = ['e1'];
+  }
+  assert.equal(validateClaudeAnalysisInput(input), true, marketState);
+  return {
+    input, output: withStep8U8References(output), active,
+    causal: active ? 'Rate-cut hopes drove stocks higher in the previous session.'
+      : 'Rate-cut hopes drove stocks higher in the session.',
+    category: active ? 'MISSING_COMPLETED_SESSION_PRINCIPAL_CATALYST' : 'MISSING_PRINCIPAL_CATALYST'
+  };
+}
+
+test('Step 8U.8: in every state an uncatalyzed causal sentence in Sections 1 and 3-7 is removed and the section kept', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    for (const index of [0, 2, 3, 4, 5, 6]) {
+      const fixture = step8U8Case(marketState, ...times);
+      const context = `${marketState}: section ${index + 1}`;
+      const clean = structuredClone(fixture.output);
+      fixture.output.sections[index].content =
+        `${clean.sections[index].content} ${fixture.causal}`;
+      const errors = validateClaudeAnalysisOutput(fixture.output, fixture.input).errors;
+      if (fixture.active || index !== 0) {
+        assert.equal(errors.includes(fixture.active
+          ? `sections[${index}]: active market causality lacks the required principal catalyst`
+          : `sections[${index}]: completed-session market causality lacks a principal catalyst`),
+        true, context);
+      } else {
+        assert.equal(errors.length, 0, `${context}: completed Section 1 is not checked`);
+      }
+
+      const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+      assert.equal(result.type, 'SUCCESS', `${context}: ${result.message}`);
+      assert.equal(calls, 1, `${context}: no Step 8L retry is needed`);
+      assert.equal(result.output.status, 'NORMAL', `${context}: the trim alone does not degrade`);
+      assert.deepEqual(result.output.evidenceGaps, [], context);
+      assert.deepEqual(result.output.sections[index], {
+        ...clean.sections[index],
+        uncertainties: [...clean.sections[index].uncertainties, STEP_8U8_QUALIFIER]
+      }, context);
+      for (let other = 0; other < 7; other++) {
+        if (other !== index) {
+          assert.deepEqual(result.output.sections[other], clean.sections[other],
+            `${context}: section ${other + 1} unchanged`);
+        }
+      }
+      assert.deepEqual(diagnostics.filter(value =>
+        value.stage === 'claudeAnalysisSectionNormalization'), [{
+        stage: 'claudeAnalysisSectionNormalization', sectionIndex: index,
+        violationCategory: fixture.category, action: 'TRIMMED',
+        suppliedReferenceCount: clean.sections[index].evidenceRefs.length,
+        allowedReferenceCount: fixture.active ? 1 : 3, offendingReferenceCount: 0,
+        removedSentenceCount: 1
+      }], context);
+      assert.equal(JSON.stringify(diagnostics).includes('Rate-cut hopes'), false, context);
+      // The removed sentence named post-close (completed) or current (active) news as the cause
+      // of the completed-session move; nothing of it reaches the report.
+      assert.equal(JSON.stringify(result.output).includes('Rate-cut hopes'), false, context);
+      assert.equal(validateClaudeAnalysisOutput(result.output, fixture.input).valid, true, context);
+    }
+  }
+});
+
+test('Step 8U.8: on active days a current-session causal sentence without a current catalyst is removed', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES.filter(state => state[2])) {
+    for (const index of [0, 4, 5, 6]) {
+      const fixture = step8U8Case(marketState, ...times);
+      const context = `${marketState}: section ${index + 1}`;
+      const clean = structuredClone(fixture.output);
+      clean.sections[index].evidenceRefs = ['e2'];
+      fixture.output.sections[index].evidenceRefs = ['e2'];
+      fixture.output.sections[index].content =
+        `${clean.sections[index].content} Rate-cut hopes drove stocks higher in the session.`;
+      const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+      assert.equal(result.type, 'SUCCESS', `${context}: ${result.message}`);
+      assert.equal(calls, 1, context);
+      assert.equal(result.output.status, 'NORMAL', context);
+      assert.deepEqual(result.output.sections[index], {
+        ...clean.sections[index], uncertainties: [STEP_8U8_QUALIFIER]
+      }, context);
+      assert.deepEqual(diagnostics.filter(value =>
+        value.stage === 'claudeAnalysisSectionNormalization').map(value =>
+        [value.sectionIndex, value.violationCategory, value.action, value.removedSentenceCount]),
+      [[index, 'MISSING_CURRENT_SESSION_PRINCIPAL_CATALYST', 'TRIMMED', 1]], context);
+      assert.equal(validateClaudeAnalysisOutput(result.output, fixture.input).valid, true, context);
+    }
+  }
+});
+
+test('Step 8U.8: in every state a section with only uncatalyzed causal text is emptied, except completed Section 1', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    for (const index of [0, 2, 3, 4, 5, 6]) {
+      const fixture = step8U8Case(marketState, ...times);
+      const context = `${marketState}: section ${index + 1}`;
+      const clean = structuredClone(fixture.output);
+      // Section 3 keeps its focus subject but loses it with the causal sentence.
+      fixture.output.sections[index].content = index === 2
+        ? (fixture.active ? 'Microsoft news drove stocks higher in the previous session.'
+          : 'Health-care news drove stocks higher in the session.')
+        : fixture.causal;
+      const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+      assert.equal(result.type, 'SUCCESS', `${context}: ${result.message}`);
+      assert.equal(calls, 1, context);
+      const events = diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization');
+      if (index === 0 && !fixture.active) {
+        // Completed Section 1 must survive: it is kept exactly as written, as before this step.
+        assert.equal(result.output.status, 'NORMAL', context);
+        assert.deepEqual(result.output.sections[0], fixture.output.sections[0], context);
+        assert.deepEqual(events, [], context);
+        continue;
+      }
+      assert.equal(result.output.status, 'DEGRADED', context);
+      assert.equal(result.output.sections[index].content, null, context);
+      assert.deepEqual(result.output.sections[index].evidenceRefs, [], context);
+      if (index === 0) {
+        // Active Section 1 keeps the Step 8U.2 blank.
+        assert.deepEqual(events.map(value => [value.sectionIndex, value.violationCategory]),
+          [[0, 'OPTIONAL_SECTION_VALIDATION']], context);
+      } else {
+        assert.deepEqual(result.output.sections[index].uncertainties, [STEP_8U8_CAUSALITY_GAP],
+          context);
+        assert.equal(result.output.evidenceGaps.includes(STEP_8U8_CAUSALITY_GAP), true, context);
+        assert.deepEqual(events.map(value => [value.sectionIndex, value.violationCategory,
+          value.action]), [[index, fixture.category, undefined]], context);
+      }
+      for (let other = 0; other < 7; other++) {
+        if (other !== index) {
+          assert.equal(result.output.sections[other].content, clean.sections[other].content,
+            `${context}: section ${other + 1} survives`);
+        }
+      }
+      assert.equal(validateClaudeAnalysisOutput(result.output, fixture.input).valid, true, context);
+    }
+  }
+});
+
+test('Step 8U.8: in every state a causal sentence backed by the needed catalyst is unchanged', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    for (const index of [0, 4, 6]) {
+      const fixture = step8U8Case(marketState, ...times);
+      const context = `${marketState}: section ${index + 1}`;
+      // Active: the earlier-session claim cites the completed-session catalyst e2. Completed: it
+      // cites the principal catalyst e3 (Federal Reserve) beside the post-close recap.
+      fixture.output.sections[index].evidenceRefs = fixture.active ? ['e1', 'e2'] : ['e1', 'e3'];
+      fixture.output.sections[index].content =
+        `${fixture.output.sections[index].content} ${fixture.causal}`;
+      withStep8U8References(fixture.output);
+      assert.equal(validateClaudeAnalysisOutput(fixture.output, fixture.input).valid, true, context);
+      const {result, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+      assert.equal(result.type, 'SUCCESS', `${context}: ${result.message}`);
+      assert.equal(result.output.status, 'NORMAL', context);
+      assert.deepEqual(result.output.sections[index], fixture.output.sections[index], context);
+      assert.deepEqual(diagnostics.filter(value =>
+        value.stage === 'claudeAnalysisSectionNormalization'), [], context);
+    }
+  }
+});
+
 function step8U7Case(marketState, ...times) {
   const fixture = step8U2Case(marketState, ...times);
   if (times[1]) {
