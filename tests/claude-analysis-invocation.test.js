@@ -14,6 +14,7 @@ const {
   REPORT_SECTION_NAMES,
   EMPTY_INITIATING_LIST_CONTENT,
   createClaudeAnalysisInput,
+  validateClaudeAnalysisInput,
   validateClaudeAnalysisOutput,
   MAX_ACTIVE_FURTHER_READINGS,
   NO_CURRENT_SESSION_EVIDENCE_GAP,
@@ -750,14 +751,17 @@ test('active zero surviving sections normalize to the deterministic FAILED outco
   assert.deepEqual(result.output.furtherReadings, []);
 });
 
-test('unknown references in active optional sections and Section 1 remain hard failures', async () => {
+test('unknown references empty an active optional section, while Section 1 stays a hard failure', async () => {
   const input = activeUsInput();
   const optional = normalOutput(input, {furtherReadings: []});
   optional.sections[4].evidenceRefs = ['e999'];
-  const rejectedOptional = await invokeClaudeAnalysis({
+  // Step 8U.5: the made-up ref empties only Section 5; the report survives.
+  const localizedOptional = await invokeClaudeAnalysis({
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(optional)
   });
-  assert.equal(rejectedOptional.type, 'CONTRACT_FAILURE');
+  assert.equal(localizedOptional.type, 'SUCCESS', localizedOptional.message);
+  assert.equal(localizedOptional.output.sections[4].content, null);
+  assert.equal(localizedOptional.output.sections[0].content, optional.sections[0].content);
 
   const summary = normalOutput(input, {furtherReadings: []});
   summary.sections[0].evidenceRefs = ['e999'];
@@ -1117,6 +1121,198 @@ test('Step 8U.2: completed Section 1 must still survive, so a broken Section 1 f
   assert.equal(result.type, 'CONTRACT_FAILURE');
   assert.match(result.message, /sections\[0\]: factual content requires supplied evidence/);
   assert.equal(calls, 2);
+});
+
+const STEP_8U_STATES = [
+  ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z', '2026-09-08T11:30:00.000Z'],
+  ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+  ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z'],
+  ['CLOSED', '2026-09-04T22:00:00.000Z'],
+  ['WEEKEND', '2026-09-06T10:00:00.000Z'],
+  ['HOLIDAY', '2026-09-07T16:00:00.000Z']
+];
+
+async function invokeCounted(input, output) {
+  let calls = 0;
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key',
+    fetchImpl: async () => { calls++; return anthropicResponse(output); },
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  return {result, calls, diagnostics};
+}
+
+test('Step 8U.5: in every state a made-up ref in Section 5 empties only Section 5', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    const fixture = step8U2Case(marketState, ...times);
+    const baseline = structuredClone(fixture.output);
+    fixture.output.sections[4].evidenceRefs = ['e999'];
+    fixture.output.sections[4].telemetryRefs = ['t1', 't999'];
+    const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(calls, 1, `${marketState}: no Step 8L retry is needed`);
+    assert.equal(result.output.status, 'DEGRADED', marketState);
+    const target = result.output.sections[4];
+    assert.equal(target.content, null, marketState);
+    assert.deepEqual(target.evidenceRefs, [], marketState);
+    assert.deepEqual(target.telemetryRefs, [], marketState);
+    assert.deepEqual(target.uncertainties,
+      ['Not enough data to write the MARKET INTERPRETATION section.'], marketState);
+    assert.equal(result.output.evidenceGaps.includes(target.uncertainties[0]), true, marketState);
+    for (let index = 0; index < 7; index++) {
+      if (index === 4) continue;
+      assert.equal(result.output.sections[index].content, baseline.sections[index].content,
+        `${marketState}: section ${index + 1} survives`);
+    }
+    assert.deepEqual(result.output.furtherReadings, baseline.furtherReadings, marketState);
+    assert.equal(JSON.stringify(result.output).includes('999'), false, marketState);
+    assert.deepEqual(diagnostics.filter(value =>
+      value.violationCategory === 'UNKNOWN_SECTION_REFERENCE'), [{
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 4,
+      violationCategory: 'UNKNOWN_SECTION_REFERENCE',
+      suppliedReferenceCount: 3, allowedReferenceCount: 1, offendingReferenceCount: 2
+    }], marketState);
+    assert.equal(validateClaudeAnalysisOutput(result.output, fixture.input).valid, true, marketState);
+  }
+});
+
+test('Step 8U.5: in every state made-up refs beside a valid evidence ref are dropped and the section is kept', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    const fixture = step8U2Case(marketState, ...times);
+    const baseline = structuredClone(fixture.output);
+    const validRefs = baseline.sections[4].evidenceRefs;
+    fixture.output.sections[4].evidenceRefs = [...validRefs, 'e999'];
+    fixture.output.sections[4].telemetryRefs = ['t1', 't999'];
+    const baselineRun = await invokeCounted(fixture.input, baseline);
+    const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(calls, 1, marketState);
+    assert.deepEqual(result.output, baselineRun.result.output, `${marketState}: same as the clean reply`);
+    assert.deepEqual(result.output.sections[4].evidenceRefs, validRefs, marketState);
+    assert.deepEqual(result.output.sections[4].telemetryRefs, ['t1'], marketState);
+    assert.deepEqual(diagnostics.filter(value =>
+      value.violationCategory === 'UNKNOWN_SECTION_REFERENCE'), [{
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 4,
+      violationCategory: 'UNKNOWN_SECTION_REFERENCE',
+      suppliedReferenceCount: validRefs.length + 3,
+      allowedReferenceCount: validRefs.length + 1,
+      offendingReferenceCount: 2, action: 'TRIMMED'
+    }], marketState);
+  }
+});
+
+test('Step 8U.5: in every state a made-up ref in Section 1 or a malformed ref still fails with one retry', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    for (const [label, mutate] of [
+      ['Section 1 made-up ref', output => {
+        output.sections[0].evidenceRefs = [...output.sections[0].evidenceRefs, 'e999'];
+      }],
+      ['Section 5 malformed ref token', output => { output.sections[4].evidenceRefs = ['ref-one']; }],
+      ['Section 5 empty ref token', output => { output.sections[4].telemetryRefs = ['t1', '']; }]
+    ]) {
+      const fixture = step8U2Case(marketState, ...times);
+      mutate(fixture.output);
+      const {result, calls} = await invokeCounted(fixture.input, fixture.output);
+      assert.equal(result.type, 'CONTRACT_FAILURE', `${marketState}: ${label}`);
+      assert.match(result.message, /unknown or invalid reference/, `${marketState}: ${label}`);
+      assert.equal(calls, 2, `${marketState}: ${label} gets the one Step 8L retry`);
+    }
+  }
+});
+
+test('Step 8U.5: a made-up ref beside the empty-list Section 4 text keeps the exact text', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    const fixture = step8U2Case(marketState, ...times);
+    fixture.input.portfolioContext.myStocks = [];
+    fixture.output.sections[3] = {...fixture.output.sections[3],
+      content: EMPTY_INITIATING_LIST_CONTENT.myStocks, evidenceRefs: ['e999'], telemetryRefs: [],
+      uncertainties: []};
+    const {result} = await invokeCounted(fixture.input, fixture.output);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.deepEqual(result.output.sections[3], {name: REPORT_SECTION_NAMES[3],
+      content: EMPTY_INITIATING_LIST_CONTENT.myStocks, evidenceRefs: [], telemetryRefs: [],
+      uncertainties: []}, marketState);
+  }
+});
+
+function step8U9Case(marketState, ...times) {
+  const fixture = step8U2Case(marketState, ...times);
+  if (fixture.input.analysisRequest.generatedAt.startsWith('2026-09-08')) {
+    // Active fixtures have no portfolio; add a Watchlist company that is not in focus.
+    fixture.input = structuredClone(fixture.input);
+    fixture.input.portfolioContext.watchlist = [{
+      market: 'US', symbol: 'AAPL', telemetryRefs: [], evidenceRefs: [], upcomingEvents: []
+    }];
+  }
+  return fixture;
+}
+
+test('Step 8U.9: in every state a Section 3 sentence naming an unfocused portfolio company is removed', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    const fixture = step8U9Case(marketState, ...times);
+    const original = fixture.output.sections[2].content;
+    fixture.output.sections[2].content = `${original} Apple (AAPL) also moved.`;
+    const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(calls, 1, marketState);
+    assert.equal(result.output.sections[2].content, original, marketState);
+    assert.deepEqual(result.output.sections[2].evidenceRefs, fixture.output.sections[2].evidenceRefs,
+      marketState);
+    assert.equal(result.output.evidenceGaps.includes(
+      'Not enough data to point out specific stocks or sectors.'), false, marketState);
+    assert.deepEqual(diagnostics.filter(value =>
+      value.violationCategory === 'UNFOCUSED_PORTFOLIO_MENTION'), [{
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 2,
+      violationCategory: 'UNFOCUSED_PORTFOLIO_MENTION', action: 'TRIMMED',
+      suppliedReferenceCount: 0, allowedReferenceCount: 0, offendingReferenceCount: 0,
+      removedSentenceCount: 1
+    }], marketState);
+    assert.equal(validateClaudeAnalysisOutput(result.output, fixture.input).valid, true, marketState);
+  }
+});
+
+test('Step 8U.9: in every state Section 3 is still emptied when no focus subject would remain', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    for (const content of [
+      'Apple (AAPL) moved with the market.',
+      'Broadcom, Microsoft and Apple (AAPL) moved with the market. Shares were mixed.'
+    ]) {
+      const fixture = step8U9Case(marketState, ...times);
+      fixture.output.sections[2].content = content;
+      const {result, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+      assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+      assert.equal(result.output.status, 'DEGRADED', marketState);
+      assert.equal(result.output.sections[2].content, null, `${marketState}: ${content}`);
+      assert.deepEqual(result.output.sections[2].uncertainties,
+        ['Not enough data to point out specific stocks or sectors.'], marketState);
+      assert.equal(diagnostics.some(value => value.violationCategory === 'UNFOCUSED_PORTFOLIO_MENTION'
+        && value.action === undefined), true, marketState);
+      assert.equal(diagnostics.some(value => value.action === 'TRIMMED'
+        && value.violationCategory === 'UNFOCUSED_PORTFOLIO_MENTION'), false, marketState);
+    }
+  }
+});
+
+test('Step 8U.9: pre-normalization diagnostics count only unlinked stock telemetry in Section 3', async () => {
+  const input = structuredClone(activeUsInput());
+  input.portfolioContext.myStocks = [
+    {market: 'US', symbol: 'MSFT', telemetryRefs: ['t2'], evidenceRefs: [], upcomingEvents: []}
+  ];
+  input.marketPackages[0].telemetry.stockSnapshots.push({
+    reference: 't2',
+    snapshot: {...structuredClone(input.marketPackages[0].telemetry.benchmarkSnapshots[0].snapshot),
+      symbol: 'MSFT', instrumentName: 'Microsoft', instrumentType: 'EQUITY'}
+  });
+  assert.equal(validateClaudeAnalysisInput(input), true);
+  const output = normalOutput(input, {furtherReadings: ['e1']});
+  output.sections[2].telemetryRefs = ['t1', 't2'];
+  const {result, diagnostics} = await invokeCounted(input, output);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(result.output.sections[2].telemetryRefs, ['t1', 't2']);
+  const event = diagnostics.find(value => value.stage === 'claudeAnalysisPreNormalization'
+    && value.sectionIndex === 2);
+  assert.equal(event.violationCategories, undefined);
 });
 
 test('completed US report retains the pre-fail-soft executive-summary survival boundary', async () => {
@@ -2057,9 +2253,11 @@ test('adds the exact package benchmark refs to the request-specific Section 3 al
   const request = buildClaudeAnalysisRequest(input);
   assert.match(request.system,
     /Request-specific Section 3 telemetry allowlist: Section 3 telemetryRefs may contain only these exact benchmark refs: \["t1"\]\./);
-  assert.match(request.system, /Do not cite any other telemetry ref in Section 3\./);
+  // Step 8U.9: the line now matches Step 8R.A (linked stock telemetry is allowed) instead of
+  // forbidding all stock telemetry.
   assert.match(request.system,
-    /even when a company is both in evidenceContext\.broadMarketFocus and My Stocks or Watchlist/);
+    /Stock telemetry is allowed only for a company that is a COMPANY subject of a cited broadMarketFocus entry\. Cite no other telemetry ref in Section 3\./);
+  assert.equal(request.system.includes('This prohibition applies even when'), false);
   assert.equal(request.system.includes('"t2"'), false);
 });
 
@@ -2172,7 +2370,7 @@ test('gives Section 3 non-causal broad-market session-association instructions',
     'When Section 3 uses a session-associated broad-market evidence reference that is also in broadMarketFocus, cite that reference in Section 3 evidenceRefs',
     'Section 3 evidenceRefs may contain only broadMarketFocus references',
     'telemetryRefs may contain only benchmark telemetry references',
-    'never portfolio or watchlist stock telemetry',
+    'except as the Section 3 telemetry allowlist below permits',
     'Discuss a My Stocks or Watchlist company in Section 3 only when it is independently present as a validated COMPANY subject in broadMarketFocus',
     "cite that company's focus reference",
     'Do not copy such a reference into Section 4 merely because it is session-associated, broad-market evidence',

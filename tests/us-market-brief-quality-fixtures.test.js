@@ -1024,8 +1024,21 @@ test('does not launder unknown global references through section-local normaliza
   output.sections[3].evidenceRefs = ['e999'];
   const diagnostics = [];
   const result = await invokeFixture(input, output, diagnostics);
-  assert.equal(result.type, 'CONTRACT_FAILURE');
-  assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization'), []);
+  // Step 8U.5: each section that cited only a made-up ref is emptied, not trimmed, so neither the
+  // ref nor the text that relied on it reaches the report; the rest of the report survives.
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  for (const index of [1, 2, 3]) {
+    assert.equal(result.output.sections[index].content, null);
+    assert.deepEqual(result.output.sections[index].evidenceRefs, []);
+    assert.deepEqual(result.output.sections[index].telemetryRefs, []);
+  }
+  assert.equal(JSON.stringify(result.output).includes('e999'), false);
+  assert.equal(result.output.sections[0].content, output.sections[0].content);
+  assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization'
+    && value.violationCategory === 'UNKNOWN_SECTION_REFERENCE').map(value => value.sectionIndex),
+  [1, 2, 3]);
+  assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
 });
 
 test('preserves the deterministic empty initiating-list statement', async () => {
