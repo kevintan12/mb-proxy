@@ -1448,18 +1448,21 @@ test('Step 8U.7: in every state Section 4 drops refs from the other list and kee
   }
 });
 
-test('Step 8U.7: in every state Section 4 is still emptied when it names the other list or keeps no initiating ref', async () => {
+// Step 9B: the "names a Watchlist security" and "a ref from outside both lists" cases that this
+// test used to blank now trim; they are covered by the Step 9B tests below.
+test('Step 8U.7: in every state Section 4 is still emptied when it keeps no initiating ref or only unrelated text', async () => {
   for (const [marketState, ...times] of STEP_8U_STATES) {
     for (const [label, mutate] of [
-      ['text names a Watchlist security', (section, fixture) => {
-        section.content = `${section.content} Apple (AAPL) slipped.`;
-        section.evidenceRefs = [fixture.initiatingRef, fixture.otherRef];
-      }],
       ['only other-list refs', (section, fixture) => {
         section.evidenceRefs = [fixture.otherRef];
       }],
-      ['a ref from outside both lists', (section, fixture) => {
-        section.evidenceRefs = [fixture.initiatingRef];
+      ['only unrelated content', (section, fixture) => {
+        section.content = 'Apple (AAPL) slipped.';
+        section.evidenceRefs = [fixture.initiatingRef, fixture.otherRef];
+      }],
+      ['only unrelated content and refs', (section, fixture) => {
+        section.content = 'Apple (AAPL) slipped.';
+        section.evidenceRefs = [fixture.otherRef];
         section.telemetryRefs = ['t1'];
       }]
     ]) {
@@ -1480,6 +1483,112 @@ test('Step 8U.7: in every state Section 4 is still emptied when it names the oth
       assert.equal(events.every(value => /^NON_INITIATING_/.test(value.violationCategory)
         && value.action === undefined), true, context);
     }
+  }
+});
+
+const STEP_9B_SYMBOLS = ['MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'JPM', 'COST', 'NFLX'];
+
+function step9BCase(marketState, ...times) {
+  // Ten My Stocks securities sharing the initiating ref; the Watchlist holds AAPL (otherRef).
+  const fixture = step8U7Case(marketState, ...times);
+  const [first] = fixture.input.portfolioContext.myStocks;
+  fixture.input.portfolioContext.myStocks = [first, ...STEP_9B_SYMBOLS.slice(1).map(symbol => ({
+    market: 'US', symbol, telemetryRefs: [], evidenceRefs: [fixture.initiatingRef], upcomingEvents: []
+  }))];
+  fixture.output.sections[3].content = STEP_9B_SYMBOLS.map(symbol => `${symbol} held steady.`)
+    .join(' ');
+  return fixture;
+}
+
+test('Step 9B: in every state one unrelated stock sentence is removed and the other nine stocks are kept', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    const fixture = step9BCase(marketState, ...times);
+    assert.equal(validateClaudeAnalysisInput(fixture.input), true, marketState);
+    assert.equal(fixture.input.portfolioContext.myStocks.length, 10, marketState);
+    // The text discusses ten stocks: nine from My Stocks and one Watchlist stock (AAPL).
+    const unrelated = 'Apple (AAPL) slipped.';
+    const keptSymbols = STEP_9B_SYMBOLS.filter((symbol, index) => index !== 5);
+    const kept = keptSymbols.map(symbol => `${symbol} held steady.`);
+    const clean = structuredClone(fixture.output);
+    clean.sections[3].content = kept.join(' ');
+    fixture.output.sections[3].content = [...kept.slice(0, 5), unrelated, ...kept.slice(5)].join(' ');
+    fixture.output.sections[3].evidenceRefs = [fixture.initiatingRef, fixture.otherRef];
+    const cleanRun = await invokeCounted(fixture.input, clean);
+    assert.equal(cleanRun.result.type, 'SUCCESS', `${marketState}: ${cleanRun.result.message}`);
+    const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(calls, 1, `${marketState}: no Step 8L retry is needed`);
+    assert.equal(result.output.status, 'NORMAL', `${marketState}: the trim alone does not degrade`);
+    assert.equal(result.output.sections[3].content, kept.join(' '), marketState);
+    assert.equal(keptSymbols.length, 9, marketState);
+    for (const symbol of keptSymbols) {
+      assert.match(result.output.sections[3].content, new RegExp(`\\b${symbol}\\b`), marketState);
+    }
+    assert.doesNotMatch(result.output.sections[3].content, /AAPL|Apple/, marketState);
+    assert.deepEqual(result.output.sections[3].evidenceRefs, [fixture.initiatingRef], marketState);
+    assert.deepEqual(result.output, cleanRun.result.output, `${marketState}: same as the clean reply`);
+    assert.deepEqual(diagnostics.filter(value =>
+      value.stage === 'claudeAnalysisSectionNormalization' && value.sectionIndex === 3)
+      .map(value => [value.violationCategory, value.action, value.removedSentenceCount]), [
+      ['NON_INITIATING_EVIDENCE', 'TRIMMED', undefined],
+      ['NON_INITIATING_MENTION', 'TRIMMED', 1]
+    ], marketState);
+    assert.equal(JSON.stringify(diagnostics).includes(unrelated), false, marketState);
+    assert.equal(validateClaudeAnalysisOutput(result.output, fixture.input).valid, true, marketState);
+  }
+});
+
+test('Step 9B: in every state an index reference in Section 4 is dropped and the section is kept', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    const fixture = step8U7Case(marketState, ...times);
+    fixture.output.sections[3].content = `${fixture.output.sections[3].content} The S&P 500 edged up.`;
+    const clean = structuredClone(fixture.output);
+    fixture.output.sections[3].telemetryRefs = fixture.output.sections[3].telemetryRefs.concat('t1');
+    assert.equal(validateClaudeAnalysisOutput(fixture.output, fixture.input).errors.includes(
+      'sections[3]: telemetry references must belong to the initiating list'), true, marketState);
+    const cleanRun = await invokeCounted(fixture.input, clean);
+    assert.equal(cleanRun.result.type, 'SUCCESS', `${marketState}: ${cleanRun.result.message}`);
+    const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(calls, 1, marketState);
+    assert.equal(result.output.status, 'NORMAL', marketState);
+    assert.deepEqual(result.output.sections[3], cleanRun.result.output.sections[3], marketState);
+    assert.equal(result.output.sections[3].content, clean.sections[3].content, marketState);
+    assert.equal(result.output.sections[3].telemetryRefs.includes('t1'), false, marketState);
+    assert.deepEqual(result.output, cleanRun.result.output, `${marketState}: same as the clean reply`);
+    assert.deepEqual(diagnostics.filter(value =>
+      value.stage === 'claudeAnalysisSectionNormalization' && value.sectionIndex === 3)
+      .map(value => [value.violationCategory, value.action, value.offendingReferenceCount]),
+    [['NON_INITIATING_TELEMETRY', 'TRIMMED', 1]], marketState);
+    assert.equal(validateClaudeAnalysisOutput(result.output, fixture.input).valid, true, marketState);
+  }
+});
+
+test('Step 9B: in every state a Section 4 with only unrelated content is emptied with the Step 8J wording', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    const fixture = step9BCase(marketState, ...times);
+    const baseline = structuredClone(fixture.output);
+    fixture.output.sections[3].content = 'Apple (AAPL) slipped. AAPL may stay volatile.';
+    fixture.output.sections[3].evidenceRefs = [fixture.otherRef];
+    fixture.output.sections[3].telemetryRefs = ['t1'];
+    const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(calls, 1, marketState);
+    assert.equal(result.output.status, 'DEGRADED', marketState);
+    assert.deepEqual(result.output.sections[3], {
+      name: REPORT_SECTION_NAMES[3], content: null, evidenceRefs: [], telemetryRefs: [],
+      uncertainties: ['Not enough data to comment on the stocks in this list.']
+    }, marketState);
+    assert.equal(result.output.evidenceGaps.includes(
+      'Not enough data to comment on the stocks in this list.'), true, marketState);
+    for (let index = 0; index < 7; index++) {
+      if (index === 3) continue;
+      assert.equal(result.output.sections[index].content, baseline.sections[index].content,
+        `${marketState}: section ${index + 1} survives`);
+    }
+    assert.equal(diagnostics.filter(value =>
+      value.stage === 'claudeAnalysisSectionNormalization' && value.sectionIndex === 3)
+      .every(value => value.action === undefined), true, marketState);
   }
 });
 

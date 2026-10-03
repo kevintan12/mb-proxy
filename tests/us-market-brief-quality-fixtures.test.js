@@ -661,7 +661,7 @@ test('Section 4 provider input lists only the selected portfolio refs, including
     /Section 3 telemetryRefs may contain only these exact benchmark refs: \["t1","t2","t3","t4"\]\./);
 });
 
-test('Section 4 accepts selected refs, localizes refs from outside both lists, and (Step 8U.7) trims refs only from the other list', async () => {
+test('Section 4 accepts selected refs and (Step 9B) trims refs from the other list or from outside both lists', async () => {
   for (const initiatingList of ['myStocks', 'watchlist']) {
     const input = overlappingFocusInput();
     input.analysisRequest.initiatingList = initiatingList;
@@ -695,24 +695,14 @@ test('Section 4 accepts selected refs, localizes refs from outside both lists, a
     const sectionEvents = diagnostics.filter(event =>
       event.stage === 'claudeAnalysisSectionNormalization' && event.sectionIndex === 3
     ).map(event => [event.violationCategory, event.offendingReferenceCount, event.action]);
-    if (initiatingList === 'myStocks') {
-      // The appended t1 is a benchmark ref, outside both lists, so Section 4 is still emptied.
-      assert.equal(localized.output.status, 'DEGRADED');
-      assert.deepEqual(localized.output.sections[3], {
-        name: valid.sections[3].name, content: null, evidenceRefs: [], telemetryRefs: [],
-        uncertainties: ['Not enough data to comment on the stocks in this list.']
-      });
-      assert.deepEqual(sectionEvents, [
-        ['NON_INITIATING_EVIDENCE', 2, undefined], ['NON_INITIATING_TELEMETRY', 2, undefined]
-      ]);
-    } else {
-      // Step 8U.7: every appended ref is a My Stocks ref and the text names no My Stocks
-      // security, so only those refs are dropped.
-      assert.deepEqual(localized.output.sections[3], valid.sections[3]);
-      assert.deepEqual(sectionEvents, [
-        ['NON_INITIATING_EVIDENCE', 2, 'TRIMMED'], ['NON_INITIATING_TELEMETRY', 2, 'TRIMMED']
-      ]);
-    }
+    // Step 9B: in both lists every appended ref is dropped, including the myStocks case's t1
+    // benchmark ref from outside both lists (Step 8U.7 emptied that case), and the text names no
+    // unrelated stock, so the section is kept unchanged.
+    assert.equal(localized.output.status, 'NORMAL');
+    assert.deepEqual(localized.output.sections[3], valid.sections[3]);
+    assert.deepEqual(sectionEvents, [
+      ['NON_INITIATING_EVIDENCE', 2, 'TRIMMED'], ['NON_INITIATING_TELEMETRY', 2, 'TRIMMED']
+    ]);
   }
 });
 
@@ -777,7 +767,7 @@ test('a repaired broad-market focus package preserves valid causal and initiatin
   assert.deepEqual(input.portfolioContext.myStocks[0].evidenceRefs, ['e2']);
 });
 
-test('localizes uncited driver causality and broad-market evidence leaking into Section 4 independently', async () => {
+test('localizes uncited driver causality and (Step 9B) trims broad-market evidence leaking into Section 4 independently', async () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
   output.sections[1].evidenceRefs = ['e1', 'e5'];
@@ -795,14 +785,11 @@ test('localizes uncited driver causality and broad-market evidence leaking into 
     evidenceRefs: [], telemetryRefs: [],
     uncertainties: ['Not enough data to say what moved the market.']
   });
-  assert.deepEqual(result.output.sections[3], {
-    name: 'MY STOCKS & WATCHLIST - MATERIAL MOVEMENTS', content: null,
-    evidenceRefs: [], telemetryRefs: [],
-    uncertainties: ['Not enough data to comment on the stocks in this list.']
-  });
+  // Step 9B: the broad-market e4 ref (outside both lists) is dropped from Section 4 and the
+  // section is kept; Step 8U.7 emptied it.
+  assert.deepEqual(result.output.sections[3], {...output.sections[3], evidenceRefs: ['e2']});
   assert.deepEqual(result.output.evidenceGaps, [
-    'Not enough data to say what moved the market.',
-    'Not enough data to comment on the stocks in this list.'
+    'Not enough data to say what moved the market.'
   ]);
   assert.deepEqual(result.output.sections[1].evidenceRefs, []);
   assert.deepEqual(result.output.sections[2].evidenceRefs, ['e4', 'e5']);
@@ -815,7 +802,7 @@ test('localizes uncited driver causality and broad-market evidence leaking into 
     },
     {
       stage: 'claudeAnalysisSectionNormalization', sectionIndex: 3,
-      violationCategory: 'NON_INITIATING_EVIDENCE',
+      violationCategory: 'NON_INITIATING_EVIDENCE', action: 'TRIMMED',
       suppliedReferenceCount: 2, allowedReferenceCount: 1, offendingReferenceCount: 1
     }
   ]);
@@ -1003,7 +990,7 @@ test('Step 8U.4: completed-session duplicate telemetry refs, uncertainties and g
   assert.deepEqual(result.output.sections[0].uncertainties, ['Current coverage is limited.']);
 });
 
-test('localizes non-initiating Section 4 telemetry without filtering references into unsupported prose', async () => {
+test('Step 9B: drops non-initiating Section 4 benchmark telemetry and keeps the section text', async () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
   output.sections[3].telemetryRefs = ['t1', 't2'];
@@ -1012,16 +999,14 @@ test('localizes non-initiating Section 4 telemetry without filtering references 
   const diagnostics = [];
   const result = await invokeFixture(input, output, diagnostics);
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.equal(result.output.status, 'DEGRADED');
-  assert.equal(result.output.sections[3].content, null);
-  assert.deepEqual(result.output.sections[3].evidenceRefs, []);
-  assert.deepEqual(result.output.sections[3].telemetryRefs, []);
-  assert.deepEqual(result.output.sections[3].uncertainties,
-    ['Not enough data to comment on the stocks in this list.']);
+  // Step 9B: the t1 benchmark ref belongs to neither list, so only it is dropped (Step 8U.7
+  // emptied the section). No unsupported text is added and nothing else changes.
+  assert.equal(result.output.status, 'NORMAL');
+  assert.deepEqual(result.output.sections[3], {...output.sections[3], telemetryRefs: ['t2']});
   assert.deepEqual(result.output.sections[2].evidenceRefs, ['e4', 'e5']);
   assert.deepEqual(diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization'), [{
     stage: 'claudeAnalysisSectionNormalization', sectionIndex: 3,
-    violationCategory: 'NON_INITIATING_TELEMETRY',
+    violationCategory: 'NON_INITIATING_TELEMETRY', action: 'TRIMMED',
     suppliedReferenceCount: 2, allowedReferenceCount: 1, offendingReferenceCount: 1
   }]);
   assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
