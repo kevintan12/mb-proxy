@@ -1041,20 +1041,27 @@ test('T5 completed-session malformed splice is still blocked from reaching the u
   const output = supportedOutput(input);
   output.sections[4].content =
     'Defensive healthcare how investors are already invested in UNH has provided relative shelter.';
+  // Step 8U.2: the splice empties only Section 5 instead of failing the whole report.
   const result = await invokeFixture(input, output);
-  assert.equal(result.type, 'CONTRACT_FAILURE');
-  assert.match(result.message, /sections\[4\]: malformed plain-language prose/);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.equal(result.output.sections[4].content, null);
+  assert.deepEqual(result.output.sections[4].uncertainties,
+    ['Not enough data to write the MARKET INTERPRETATION section.']);
+  assert.equal(JSON.stringify(result.output).includes('how investors are already invested'), false);
 });
 
 test('Step 8M: an internal-identifier leak (the real live-run string) is blocked, with one silent retry', async () => {
+  // Step 8U.2: a leak elsewhere now empties one section; Section 1 must survive on completed
+  // days, so a leak there still fails the report and gets the one Step 8L retry.
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
-  output.sections[2].content =
-    `${output.sections[2].content} It examines evidenceContext.broadMarketFocus directly.`;
+  output.sections[0].content =
+    `${output.sections[0].content} It examines evidenceContext.broadMarketFocus directly.`;
   const diagnostics = [];
   const result = await invokeFixture(input, output, diagnostics);
   assert.equal(result.type, 'CONTRACT_FAILURE');
-  assert.match(result.message, /sections\[2\]: internal identifier leak/);
+  assert.match(result.message, /sections\[0\]: internal identifier leak/);
   const retries = diagnostics.filter(value => value.stage === 'contractRetry');
   assert.equal(retries.length, 1);
   assert.equal(retries[0].firstFailureType, 'CONTRACT_FAILURE');

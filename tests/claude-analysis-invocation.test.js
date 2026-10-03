@@ -987,7 +987,7 @@ test('active transport metadata is canonicalized without changing grounded analy
   assert.deepEqual(result.output.sections[0].uncertainties, ['Current coverage is limited.']);
 });
 
-test('CLOSED, WEEKEND and HOLIDAY retain completed sections and reject unsupported Section 3', async () => {
+test('CLOSED, WEEKEND and HOLIDAY retain completed sections and empty only an unsupported Section 3', async () => {
   for (const [marketState, generatedAt] of [
     ['CLOSED', '2026-09-04T22:00:00.000Z'],
     ['WEEKEND', '2026-09-06T10:00:00.000Z'],
@@ -1012,12 +1012,111 @@ test('CLOSED, WEEKEND and HOLIDAY retain completed sections and reject unsupport
     }
     const invalid = supportedCompletedUsOutput(input);
     invalid.sections[2].content = 'Generic index commentary.';
-    const rejected = await invokeClaudeAnalysis({
+    // Step 8U.2: the unsupported Section 3 is emptied; the rest of the report survives.
+    const localized = await invokeClaudeAnalysis({
       input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(invalid)
     });
-    assert.equal(rejected.type, 'CONTRACT_FAILURE', marketState);
-    assert.match(rejected.message, /stocks and sectors must mention a validated broad-market subject/);
+    assert.equal(localized.type, 'SUCCESS', `${marketState}: ${localized.message}`);
+    assert.equal(localized.output.status, 'DEGRADED');
+    assert.equal(localized.output.sections[2].content, null);
+    assert.deepEqual(localized.output.sections[2].uncertainties,
+      ['Not enough data to write the STOCKS & SECTORS IN FOCUS section.']);
+    assert.equal(localized.output.sections[0].content, invalid.sections[0].content);
+    assert.deepEqual(localized.output.furtherReadings, invalid.furtherReadings);
   }
+});
+
+function step8U2Case(marketState, generatedAt, overlayAsOf, currentPublishedAt) {
+  if (overlayAsOf) {
+    const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
+    return {input, output: normalOutput(input, {furtherReadings: ['e1']})};
+  }
+  const input = structuredClone(richCompletedUsWeekInput());
+  input.analysisRequest.generatedAt = generatedAt;
+  input.marketPackages[0].marketContext.marketState = marketState;
+  for (const snapshot of input.marketPackages[0].telemetry.benchmarkSnapshots.concat(
+    input.marketPackages[0].telemetry.stockSnapshots)) snapshot.snapshot.marketState = marketState;
+  return {input, output: supportedCompletedUsOutput(input)};
+}
+
+const STEP_8U2_BREAKERS = [
+  ['an internal-identifier leak', 4, ({output}) => {
+    output.sections[4].content =
+      `${output.sections[4].content} It examines evidenceContext.broadMarketFocus directly.`;
+  }],
+  ['a section with no evidence', 4, ({output}) => {
+    output.sections[4].evidenceRefs = [];
+  }],
+  ['a Section 3 that names no focus subject', 2, ({output}) => {
+    output.sections[2].content = 'Generic index commentary.';
+  }],
+  ['word overflow', 4, ({output}) => {
+    output.sections[4].content = Array(1300).fill('Supported analysis.').join(' ');
+  }],
+  ['the wrong empty-list text for Section 4', 3, ({input, output}) => {
+    input.portfolioContext.myStocks = [];
+    output.sections[3] = {...output.sections[3], content: 'There are no stocks to show.',
+      evidenceRefs: [], telemetryRefs: [], uncertainties: []};
+  }]
+];
+
+test('Step 8U.2: in every state group each rule break empties one section, not the report', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z', '2026-09-08T11:30:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z'],
+    ['CLOSED', '2026-09-04T22:00:00.000Z'],
+    ['WEEKEND', '2026-09-06T10:00:00.000Z'],
+    ['HOLIDAY', '2026-09-07T16:00:00.000Z']
+  ]) {
+    for (const [label, targetIndex, breakOutput] of STEP_8U2_BREAKERS) {
+      const fixture = step8U2Case(marketState, generatedAt, overlayAsOf, currentPublishedAt);
+      const baseline = structuredClone(fixture.output);
+      breakOutput(fixture);
+      const {input, output} = fixture;
+      const context = `${marketState}: ${label}`;
+      let calls = 0;
+      const diagnostics = [];
+      const result = await invokeClaudeAnalysis({
+        input, apiKey: 'test-key',
+        fetchImpl: async () => { calls++; return anthropicResponse(output); },
+        onDiagnostics: value => diagnostics.push(value)
+      });
+      assert.equal(result.type, 'SUCCESS', `${context}: ${result.message}`);
+      assert.equal(calls, 1, `${context}: no Step 8L retry is needed`);
+      const target = result.output.sections[targetIndex];
+      if (targetIndex === 3) {
+        assert.equal(target.content, EMPTY_INITIATING_LIST_CONTENT.myStocks, context);
+      } else {
+        assert.equal(result.output.status, 'DEGRADED', context);
+        assert.equal(target.content, null, context);
+        assert.deepEqual(target.uncertainties,
+          [`Not enough data to write the ${REPORT_SECTION_NAMES[targetIndex]} section.`], context);
+        assert.equal(result.output.evidenceGaps.includes(target.uncertainties[0]), true, context);
+      }
+      for (let index = 0; index < 7; index++) {
+        if (index === targetIndex) continue;
+        assert.equal(result.output.sections[index].content, baseline.sections[index].content,
+          `${context}: section ${index + 1} survives`);
+      }
+      assert.deepEqual(result.output.furtherReadings, baseline.furtherReadings, context);
+      assert.equal(diagnostics.some(value => value.stage === 'claudeAnalysisSectionNormalization'
+        && value.sectionIndex === targetIndex), true, context);
+    }
+  }
+});
+
+test('Step 8U.2: completed Section 1 must still survive, so a broken Section 1 fails with one retry', async () => {
+  const fixture = step8U2Case('WEEKEND', '2026-09-06T10:00:00.000Z');
+  fixture.output.sections[0].evidenceRefs = [];
+  let calls = 0;
+  const result = await invokeClaudeAnalysis({
+    input: fixture.input, apiKey: 'test-key',
+    fetchImpl: async () => { calls++; return anthropicResponse(fixture.output); }
+  });
+  assert.equal(result.type, 'CONTRACT_FAILURE');
+  assert.match(result.message, /sections\[0\]: factual content requires supplied evidence/);
+  assert.equal(calls, 2);
 });
 
 test('completed US report retains the pre-fail-soft executive-summary survival boundary', async () => {
