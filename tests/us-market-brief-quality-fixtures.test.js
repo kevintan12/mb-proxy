@@ -816,6 +816,56 @@ test('localizes uncited driver causality and broad-market evidence leaking into 
     ['e1', 'e2', 'e3', 'e4', 'e5']);
 });
 
+test('Step 8U.1: a completed driver claim naming only a day or date survives, while a genuine uncatalyzed cause still localizes', async () => {
+  const input = richCompletedUsWeekInput();
+
+  const survives = supportedOutput(input);
+  survives.sections[1].content = 'Stocks rose on Friday.';
+  survives.sections[1].evidenceRefs = ['e1'];
+  assert.equal(validateClaudeAnalysisOutput(survives, input).errors.includes(
+    'sections[1]: market causality requires a principal catalyst'), false);
+  const survivesDiagnostics = [];
+  const survivesResult = await invokeFixture(input, survives, survivesDiagnostics);
+  assert.equal(survivesResult.type, 'SUCCESS', survivesResult.message);
+  assert.equal(survivesResult.output.sections[1].content, 'Stocks rose on Friday.');
+  assert.deepEqual(survivesResult.output.sections[1].evidenceRefs, ['e1']);
+  assert.deepEqual(survivesDiagnostics.filter(value =>
+    value.stage === 'claudeAnalysisSectionNormalization'), []);
+
+  const blanks = supportedOutput(input);
+  blanks.sections[1].content = 'Stocks rose on the jobs report.';
+  blanks.sections[1].evidenceRefs = ['e1'];
+  assert.equal(validateClaudeAnalysisOutput(blanks, input).errors.includes(
+    'sections[1]: market causality requires a principal catalyst'), true);
+  const blanksDiagnostics = [];
+  const blanksResult = await invokeFixture(input, blanks, blanksDiagnostics);
+  assert.equal(blanksResult.type, 'SUCCESS', blanksResult.message);
+  assert.equal(blanksResult.output.status, 'DEGRADED');
+  assert.deepEqual(blanksResult.output.sections[1], {
+    name: 'KEY MARKET DRIVERS', content: null,
+    evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['Not enough data to say what moved the market.']
+  });
+  assert.deepEqual(blanksDiagnostics.filter(value =>
+    value.stage === 'claudeAnalysisSectionNormalization').map(value => value.violationCategory),
+    ['MISSING_PRINCIPAL_CATALYST']);
+});
+
+test('Step 8U.4: completed-session duplicate telemetry refs, uncertainties and gaps are canonicalized, not only in active sessions', async () => {
+  const input = richCompletedUsWeekInput();
+  const output = supportedOutput(input);
+  output.status = 'unexpected';
+  output.evidenceGaps = [null, ' ', ' Gap. ', 'Gap.'];
+  output.sections[0].telemetryRefs = ['t1', 't1'];
+  output.sections[0].uncertainties = [' Current coverage is limited. ', '', 'Current coverage is limited.'];
+  const result = await invokeFixture(input, output);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.deepEqual(result.output.evidenceGaps, ['Gap.']);
+  assert.deepEqual(result.output.sections[0].telemetryRefs, ['t1']);
+  assert.deepEqual(result.output.sections[0].uncertainties, ['Current coverage is limited.']);
+});
+
 test('localizes non-initiating Section 4 telemetry without filtering references into unsupported prose', async () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
