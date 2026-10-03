@@ -488,19 +488,37 @@ test('Step 8O Section 3 is localized when a kept focus reference has no named su
   assert.deepEqual(result.output.sections[2].evidenceRefs, []);
 });
 
-test('Step 8O Section 3 trimming does not hide stock telemetry', async () => {
+test('Step 8R.A Section 3 trims an unlinked stock telemetry ref alongside a Step 8O evidence trim', async () => {
   const input = richCompletedUsWeekInput();
   const output = supportedOutput(input);
+  const originalContent = output.sections[2].content;
   output.sections[2].evidenceRefs = ['e2', 'e4', 'e5'];
   output.sections[2].telemetryRefs = ['t1', 't2'];
   output.evidenceReferences = ['e2', 'e3', 'e4', 'e5', 'e1'];
-  const result = await invokeFixture(input, output);
+  const diagnostics = [];
+  const result = await invokeFixture(input, output, diagnostics);
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.equal(result.output.sections[2].content, null);
-  assert.deepEqual(result.output.sections[2].telemetryRefs, []);
+  assert.equal(result.output.status, 'NORMAL');
+  assert.equal(result.output.sections[2].content, originalContent);
+  assert.deepEqual(result.output.sections[2].evidenceRefs, ['e4', 'e5']);
+  assert.deepEqual(result.output.sections[2].telemetryRefs, ['t1']);
+  assert.deepEqual(result.output.sections[2].uncertainties, []);
+  const events = diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization');
+  assert.deepEqual(events, [
+    {
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 2,
+      violationCategory: 'NON_FOCUS_EVIDENCE', action: 'TRIMMED',
+      suppliedReferenceCount: 3, allowedReferenceCount: 2, offendingReferenceCount: 1
+    },
+    {
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 2,
+      violationCategory: 'NON_BENCHMARK_TELEMETRY', action: 'TRIMMED',
+      suppliedReferenceCount: 2, allowedReferenceCount: 1, offendingReferenceCount: 1
+    }
+  ]);
 });
 
-test('Section 3 accepts focus evidence and benchmark telemetry but localizes stock telemetry', async () => {
+test('Step 8R.A Section 3 trims an unlinked stock telemetry ref and keeps the section', async () => {
   const input = richCompletedUsWeekInput();
   const valid = supportedOutput(input);
   assert.equal(validateClaudeAnalysisOutput(valid, input).valid, true);
@@ -509,11 +527,20 @@ test('Section 3 accepts focus evidence and benchmark telemetry but localizes sto
   invalid.sections[2].telemetryRefs = ['t1', 't2'];
   assert.equal(validateClaudeAnalysisOutput(invalid, input).errors.includes(
     'sections[2]: telemetry references must belong to benchmark telemetry'), true);
-  const result = await invokeFixture(input, invalid);
+  const diagnostics = [];
+  const result = await invokeFixture(input, invalid, diagnostics);
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.equal(result.output.sections[2].content, null);
-  assert.deepEqual(result.output.sections[2].telemetryRefs, []);
+  assert.equal(result.output.status, 'NORMAL');
+  assert.equal(result.output.sections[2].content, invalid.sections[2].content);
+  assert.deepEqual(result.output.sections[2].telemetryRefs, ['t1']);
+  assert.deepEqual(result.output.sections[2].uncertainties, []);
   assert.deepEqual(result.output.sections[3].telemetryRefs, ['t2']);
+  const events = diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization');
+  assert.deepEqual(events, [{
+    stage: 'claudeAnalysisSectionNormalization', sectionIndex: 2,
+    violationCategory: 'NON_BENCHMARK_TELEMETRY', action: 'TRIMMED',
+    suppliedReferenceCount: 2, allowedReferenceCount: 1, offendingReferenceCount: 1
+  }]);
 });
 
 test('Section 3 overlap fixtures pass with benchmark-only telemetry and no stock telemetry', () => {
@@ -534,34 +561,50 @@ test('Section 3 overlap fixtures pass with benchmark-only telemetry and no stock
   }
 });
 
-test('Production-shaped Section 3 overlap localizes mixed stock telemetry and preserves Section 4', async () => {
+test('Production-shaped Section 3 overlap keeps fully-linked stock telemetry and preserves Section 4', async () => {
   const input = overlappingFocusInput();
   const output = overlappingFocusOutput(input, {
     content: 'Microsoft, Nvidia and Apple were broad-market companies in focus.',
     telemetryRefs: ['t1', 't2', 't5', 't6', 't7']
   });
-  assert.equal(validateClaudeAnalysisOutput(output, input).errors.includes(
-    'sections[2]: telemetry references must belong to benchmark telemetry'), true);
+  assert.equal(validateClaudeAnalysisOutput(output, input).valid, true);
   const originalFocus = structuredClone(input.marketPackages[0].evidenceContext.broadMarketFocus);
   const diagnostics = [];
   const result = await invokeFixture(input, output, diagnostics);
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.equal(result.output.status, 'DEGRADED');
-  assert.deepEqual(result.output.sections[2], {
-    name: 'STOCKS & SECTORS IN FOCUS', content: null,
-    evidenceRefs: [], telemetryRefs: [],
-    uncertainties: [
-      'Not enough data to point out specific stocks or sectors.'
-    ]
-  });
+  assert.equal(result.output.status, 'NORMAL');
+  assert.deepEqual(result.output.sections[2], output.sections[2]);
   assert.deepEqual(result.output.sections[3], output.sections[3]);
   assert.deepEqual(result.output.sections[3].telemetryRefs, ['t5']);
   assert.deepEqual(input.marketPackages[0].evidenceContext.broadMarketFocus, originalFocus);
   assert.deepEqual(diagnostics.filter(value =>
-    value.stage === 'claudeAnalysisSectionNormalization'), [{
+    value.stage === 'claudeAnalysisSectionNormalization'), []);
+  assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
+});
+
+test('Step 8R.A Section 3 keeps a linked stock telemetry ref and trims only the unlinked one', async () => {
+  const input = overlappingFocusInput();
+  input.marketPackages[0].evidenceContext.broadMarketFocus.find(entry => entry.evidenceRef === 'e2')
+    .subjects = [
+      {kind: 'COMPANY', name: 'Microsoft'},
+      {kind: 'COMPANY', name: 'Nvidia'}
+    ];
+  const output = overlappingFocusOutput(input, {
+    content: 'Microsoft and Nvidia were broad-market companies in focus.',
+    telemetryRefs: ['t1', 't2', 't5', 't6', 't7']
+  });
+  const diagnostics = [];
+  const result = await invokeFixture(input, output, diagnostics);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.equal(result.output.status, 'NORMAL');
+  assert.equal(result.output.sections[2].content, output.sections[2].content);
+  assert.deepEqual(result.output.sections[2].telemetryRefs, ['t1', 't2', 't5', 't6']);
+  assert.deepEqual(result.output.sections[2].uncertainties, []);
+  const events = diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization');
+  assert.deepEqual(events, [{
     stage: 'claudeAnalysisSectionNormalization', sectionIndex: 2,
-    violationCategory: 'NON_BENCHMARK_TELEMETRY', suppliedReferenceCount: 5,
-    allowedReferenceCount: 4, offendingReferenceCount: 3
+    violationCategory: 'NON_BENCHMARK_TELEMETRY', action: 'TRIMMED',
+    suppliedReferenceCount: 5, allowedReferenceCount: 4, offendingReferenceCount: 1
   }]);
   assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
 });
