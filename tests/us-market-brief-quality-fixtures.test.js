@@ -5,7 +5,8 @@ const {
   validateClaudeAnalysisOutput,
   normalizePlainEnglishText,
   hasAnalystDeskJargon,
-  hasMalformedPlainEnglishProse
+  hasMalformedPlainEnglishProse,
+  hasActiveDirectMarketCausalClaim
 } = require('../lib/claude-analysis-contract');
 const {
   buildClaudeAnalysisRequest,
@@ -849,6 +850,131 @@ test('Step 8U.1: a completed driver claim naming only a day or date survives, wh
   assert.deepEqual(blanksDiagnostics.filter(value =>
     value.stage === 'claudeAnalysisSectionNormalization').map(value => value.violationCategory),
     ['MISSING_PRINCIPAL_CATALYST']);
+});
+
+const UNSUPPORTED_CAUSALITY_QUALIFIER = 'The news does not show for certain what moved the market.';
+
+function sectionNormalizationEvents(diagnostics) {
+  return diagnostics.filter(value => value.stage === 'claudeAnalysisSectionNormalization');
+}
+
+test('Step 8U.3: completed CLOSED, WEEKEND and HOLIDAY Section 2 drops only the uncatalyzed causal sentence', async () => {
+  for (const [marketState, generatedAt] of [
+    ['CLOSED', '2026-09-04T22:00:00.000Z'],
+    ['WEEKEND', '2026-09-06T10:00:00.000Z'],
+    ['HOLIDAY', '2026-09-07T16:00:00.000Z']
+  ]) {
+    const input = structuredClone(richCompletedUsWeekInput());
+    input.analysisRequest.generatedAt = generatedAt;
+    input.marketPackages[0].marketContext.marketState = marketState;
+    for (const entry of input.marketPackages[0].telemetry.benchmarkSnapshots.concat(
+      input.marketPackages[0].telemetry.stockSnapshots)) entry.snapshot.marketState = marketState;
+    const output = supportedOutput(input);
+    output.sections[1].content = 'The U.S. jobs report and Federal Reserve policy context were the main '
+      + 'items in the news. Rate-cut hopes drove stocks higher on Friday. The S&P 500 closed at 6,480.12.';
+    output.sections[1].evidenceRefs = ['e1'];
+    assert.equal(validateClaudeAnalysisOutput(output, input).errors.includes(
+      'sections[1]: market causality requires a principal catalyst'), true, marketState);
+
+    const diagnostics = [];
+    const result = await invokeFixture(input, output, diagnostics);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    // A trim alone adds no evidence gap and does not degrade the report.
+    assert.equal(result.output.status, 'NORMAL', marketState);
+    assert.deepEqual(result.output.evidenceGaps, []);
+    assert.deepEqual(result.output.sections[1], {
+      name: 'KEY MARKET DRIVERS',
+      content: 'The U.S. jobs report and Federal Reserve policy context were the main items in the news. '
+        + 'The S&P 500 closed at 6,480.12.',
+      evidenceRefs: ['e1'], telemetryRefs: ['t1'],
+      uncertainties: [UNSUPPORTED_CAUSALITY_QUALIFIER]
+    });
+    for (const sectionIndex of [2, 5, 6]) {
+      assert.deepEqual(result.output.sections[sectionIndex], output.sections[sectionIndex]);
+    }
+    assert.deepEqual(result.output.furtherReadings, output.furtherReadings);
+    assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true, marketState);
+    assert.deepEqual(sectionNormalizationEvents(diagnostics), [{
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 1,
+      violationCategory: 'MISSING_PRINCIPAL_CATALYST', action: 'TRIMMED',
+      suppliedReferenceCount: 1, allowedReferenceCount: 3, offendingReferenceCount: 0,
+      removedSentenceCount: 1
+    }]);
+    assert.equal(JSON.stringify(diagnostics).includes('Rate-cut hopes'), false);
+  }
+});
+
+test('Step 8U.3: weekend with a failed CNBC recap and only post-close news keeps descriptive drivers and drops the causal sentence', async () => {
+  const input = structuredClone(richCompletedUsWeekInput());
+  const market = input.marketPackages[0];
+  input.analysisRequest.generatedAt = '2026-09-06T10:00:00.000Z';
+  market.marketContext.marketState = 'WEEKEND';
+  for (const entry of market.telemetry.benchmarkSnapshots.concat(market.telemetry.stockSnapshots)) {
+    entry.snapshot.marketState = 'WEEKEND';
+  }
+  // No CNBC recap and no Federal Reserve item: the only news is the Yahoo article published after
+  // Friday's close, which is a later development and can never be a principal catalyst.
+  market.evidenceContext.evidence = market.evidenceContext.evidence.filter(entry =>
+    entry.reference === 'e1');
+  Object.assign(market.evidenceContext, {
+    materialEvents: ['e1'], authoritativeFacts: [], principalCatalysts: [],
+    supportingEvidence: [], conflictingEvidence: [], subsequentDevelopments: ['e1'],
+    sessionAssociations: [{evidenceRef: 'e1', sessionDate: '2026-09-04'}],
+    broadMarketFocus: [], unresolvedGaps: [],
+    furtherReadings: [{evidenceRef: 'e1', sessionDate: '2026-09-04'}]
+  });
+  input.portfolioContext.myStocks[0].evidenceRefs = ['e1'];
+  assert.equal(validateClaudeAnalysisInput(input), true);
+
+  const output = supportedOutput(input, {opportunity: false});
+  for (const [index, section] of output.sections.entries()) {
+    if (index !== 2 && index !== 7) section.evidenceRefs = ['e1'];
+  }
+  const descriptive = [
+    'U.S. payrolls rose by 22,000 in August, the jobs report showed.',
+    'The S&P 500 finished the week up 0.45%.'
+  ];
+  output.sections[1].content = [descriptive[0],
+    'The jobs report drove stocks higher in the session.', descriptive[1]].join(' ');
+  assert.equal(validateClaudeAnalysisOutput(output, input).errors.includes(
+    'sections[1]: market causality requires a principal catalyst'), true);
+
+  const diagnostics = [];
+  const result = await invokeFixture(input, output, diagnostics);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  // DEGRADED only because Section 3 has no focus items, not because of the trim.
+  assert.equal(result.output.status, 'DEGRADED');
+  assert.deepEqual(result.output.evidenceGaps,
+    ['Not enough data to point out specific stocks or sectors.']);
+  assert.deepEqual(result.output.sections[1], {
+    name: 'KEY MARKET DRIVERS', content: descriptive.join(' '),
+    evidenceRefs: ['e1'], telemetryRefs: ['t1'],
+    uncertainties: [UNSUPPORTED_CAUSALITY_QUALIFIER]
+  });
+  // The post-close article is still cited, but no longer named as the cause of Friday's move.
+  assert.equal(hasActiveDirectMarketCausalClaim(result.output.sections[1].content), false);
+  assert.notEqual(result.output.sections[0].content, null);
+  assert.deepEqual(result.output.furtherReadings, ['e1']);
+  assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
+  assert.deepEqual(sectionNormalizationEvents(diagnostics).map(event =>
+    [event.sectionIndex, event.violationCategory, event.action, event.removedSentenceCount]),
+  [[1, 'MISSING_PRINCIPAL_CATALYST', 'TRIMMED', 1]]);
+
+  // Nothing valid left after the trim: the section is emptied with the Step 8J wording, as before.
+  const allCausal = structuredClone(output);
+  allCausal.sections[1].content = 'The jobs report drove stocks higher in the session. '
+    + 'Rate-cut hopes lifted the Nasdaq higher.';
+  const blankDiagnostics = [];
+  const blanked = await invokeFixture(input, allCausal, blankDiagnostics);
+  assert.equal(blanked.type, 'SUCCESS', blanked.message);
+  assert.equal(blanked.output.status, 'DEGRADED');
+  assert.deepEqual(blanked.output.sections[1], {
+    name: 'KEY MARKET DRIVERS', content: null, evidenceRefs: [], telemetryRefs: [],
+    uncertainties: ['Not enough data to say what moved the market.']
+  });
+  assert.equal(blanked.output.evidenceGaps.includes('Not enough data to say what moved the market.'), true);
+  assert.deepEqual(sectionNormalizationEvents(blankDiagnostics).map(event =>
+    [event.violationCategory, event.action]), [['MISSING_PRINCIPAL_CATALYST', undefined]]);
 });
 
 test('Step 8U.4: completed-session duplicate telemetry refs, uncertainties and gaps are canonicalized, not only in active sessions', async () => {

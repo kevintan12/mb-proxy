@@ -25,8 +25,28 @@ const {
   validateClaudeAnalysisInput,
   validateClaudeAnalysisOutput,
   createClaudeAnalysisOutput,
-  hasInternalIdentifierLeak
+  hasInternalIdentifierLeak,
+  splitReportSentences
 } = require('../lib/claude-analysis-contract');
+
+test('Step 8U.3: the trim sentence splitter keeps U.S., Inc., month abbreviations and decimals inside a sentence', () => {
+  assert.deepEqual(splitReportSentences(
+    'U.S. stocks rose 0.45% on Oct. 2. Apple Inc. gained 1.2%, J.P. Morgan said. '
+    + 'Did yields fall? Yes! The Nasdaq ended at 18,950.25'
+  ), [
+    'U.S. stocks rose 0.45% on Oct. 2.',
+    'Apple Inc. gained 1.2%, J.P. Morgan said.',
+    'Did yields fall?',
+    'Yes!',
+    'The Nasdaq ended at 18,950.25'
+  ]);
+  // An unclear boundary keeps the text together, so a trim can only remove more.
+  assert.deepEqual(splitReportSentences('Shares rose approx. five percent. Then they eased.'),
+    ['Shares rose approx. five percent.', 'Then they eased.']);
+  assert.deepEqual(splitReportSentences('One clause; another clause.'), ['One clause; another clause.']);
+  assert.deepEqual(splitReportSentences(''), []);
+  assert.deepEqual(splitReportSentences(null), []);
+});
 
 const MARKET_CONFIG = {
   US: {zone: 'America/New_York', source: 'us.yahoo-finance', news: 'us.reuters', symbol: '^GSPC'},

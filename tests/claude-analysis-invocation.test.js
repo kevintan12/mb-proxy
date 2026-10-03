@@ -1367,6 +1367,85 @@ test('prior-session causality supported only by CURRENT_SESSION evidence localiz
     === 'MISSING_COMPLETED_SESSION_PRINCIPAL_CATALYST'));
 });
 
+const ACTIVE_STATE_TIMES = [
+  ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z', '2026-09-08T11:30:00.000Z'],
+  ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+  ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
+];
+const UNSUPPORTED_CAUSALITY_QUALIFIER = 'The news does not show for certain what moved the market.';
+
+async function invokeWithSectionEvents(input, raw) {
+  const diagnostics = [];
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  return {result, events: diagnostics.filter(value =>
+    value.stage === 'claudeAnalysisSectionNormalization')};
+}
+
+test('Step 8U.3: PRE, REGULAR and POST Section 2 drops only a current-session causal sentence without a current catalyst', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of ACTIVE_STATE_TIMES) {
+    const input = activeUsInput({
+      marketState, generatedAt, overlayAsOf, currentPublishedAt, principalCatalysts: []
+    });
+    const raw = normalOutput(input);
+    raw.sections[1].content = 'Microsoft raised its outlook during the U.S. session. '
+      + 'The Microsoft outlook drove stocks higher. The S&P 500 was 1.9% above the prior close.';
+    const {result, events} = await invokeWithSectionEvents(input, raw);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(result.output.status, 'NORMAL', marketState);
+    assert.deepEqual(result.output.evidenceGaps, []);
+    assert.deepEqual(result.output.sections[1], {
+      ...raw.sections[1],
+      content: 'Microsoft raised its outlook during the U.S. session. '
+        + 'The S&P 500 was 1.9% above the prior close.',
+      uncertainties: [UNSUPPORTED_CAUSALITY_QUALIFIER]
+    });
+    // The cited current Yahoo ref stays cited, so it still reaches Further Readings.
+    assert.deepEqual(result.output.furtherReadings, ['e1']);
+    assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true, marketState);
+    assert.deepEqual(events, [{
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 1,
+      violationCategory: 'MISSING_CURRENT_SESSION_PRINCIPAL_CATALYST', action: 'TRIMMED',
+      suppliedReferenceCount: 1, allowedReferenceCount: 0, offendingReferenceCount: 0,
+      removedSentenceCount: 1
+    }]);
+  }
+});
+
+test('Step 8U.3: PRE, REGULAR and POST never keep current evidence as the cause of the earlier completed-session move', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of ACTIVE_STATE_TIMES) {
+    const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
+    const raw = normalOutput(input);
+    raw.sections[1].content = 'Microsoft raised its outlook during the U.S. session. '
+      + 'Microsoft outlook sent stocks lower at Friday\'s close.';
+    const {result, events} = await invokeWithSectionEvents(input, raw);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(result.output.status, 'NORMAL', marketState);
+    assert.equal(result.output.sections[1].content,
+      'Microsoft raised its outlook during the U.S. session.');
+    assert.deepEqual(result.output.sections[1].evidenceRefs, ['e1']);
+    assert.deepEqual(result.output.sections[1].uncertainties, [UNSUPPORTED_CAUSALITY_QUALIFIER]);
+    assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true, marketState);
+    assert.deepEqual(events.map(event => [event.violationCategory, event.action,
+      event.removedSentenceCount]),
+    [['MISSING_COMPLETED_SESSION_PRINCIPAL_CATALYST', 'TRIMMED', 1]]);
+
+    // Every sentence is an unsupported causal claim: the section is emptied as before.
+    const allCausal = normalOutput(input);
+    allCausal.sections[1].content = 'Microsoft outlook sent stocks lower at Friday\'s close.';
+    const blanked = await invokeWithSectionEvents(input, allCausal);
+    assert.equal(blanked.result.type, 'SUCCESS', blanked.result.message);
+    assert.equal(blanked.result.output.status, 'DEGRADED');
+    assert.equal(blanked.result.output.sections[1].content, null);
+    assert.deepEqual(blanked.result.output.sections[1].uncertainties,
+      ['Not enough data to say what moved the market.']);
+    assert.deepEqual(blanked.events.map(event => [event.violationCategory, event.action]),
+      [['MISSING_COMPLETED_SESSION_PRINCIPAL_CATALYST', undefined]]);
+  }
+});
+
 function canonicalInputAtRequestSize(targetBytes) {
   const minimum = canonicalInput({evidenceSummary: 'x'});
   const minimumBytes = Buffer.byteLength(JSON.stringify(buildClaudeAnalysisRequest(minimum)), 'utf8');
