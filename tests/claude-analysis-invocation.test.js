@@ -1315,6 +1315,174 @@ test('Step 8U.9: pre-normalization diagnostics count only unlinked stock telemet
   assert.equal(event.violationCategories, undefined);
 });
 
+function step8U6Case(marketState, ...times) {
+  const fixture = step8U2Case(marketState, ...times);
+  const active = Boolean(times[1]);
+  return {
+    ...fixture,
+    risk: active ? 'Higher interest rates remain a risk for stocks.'
+      : 'Policy uncertainty remains a material risk to the market outlook.',
+    focusRefs: active ? ['e1'] : ['e3', 'e5'],
+    nonFocusRefs: active ? ['e2'] : ['e3']
+  };
+}
+
+const STEP_8U6_UNGROUNDED = [
+  ['UNGROUNDED_OPPORTUNITY_SUBJECT', 'An unnamed company has a constructive opportunity.', 'focusRefs'],
+  ['UNSUPPORTED_OPPORTUNITY_CLAIM', 'An unnamed company has a constructive opportunity.', 'nonFocusRefs'],
+  ['GENERIC_OPPORTUNITY_CLAIM', 'An oversold rebound creates a buy-the-dip opportunity.', 'focusRefs']
+];
+
+test('Step 8U.6: in every state an ungrounded Section 6 opportunity sentence is removed and the risk is kept', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    for (const [category, opportunity, refsKey] of STEP_8U6_UNGROUNDED) {
+      const fixture = step8U6Case(marketState, ...times);
+      const context = `${marketState}: ${category}`;
+      fixture.output.sections[5].evidenceRefs = fixture[refsKey].slice();
+      const clean = structuredClone(fixture.output);
+      clean.sections[5].content = fixture.risk;
+      fixture.output.sections[5].content = `${fixture.risk} ${opportunity}`;
+      assert.equal(validateClaudeAnalysisOutput(fixture.output, fixture.input).valid, false, context);
+      const cleanRun = await invokeCounted(fixture.input, clean);
+      const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+      assert.equal(result.type, 'SUCCESS', `${context}: ${result.message}`);
+      assert.equal(calls, 1, `${context}: no Step 8L retry is needed`);
+      assert.equal(result.output.status, 'NORMAL', `${context}: the trim alone does not degrade`);
+      assert.equal(result.output.sections[5].content, fixture.risk, context);
+      assert.deepEqual(result.output.sections[5].evidenceRefs, fixture[refsKey], context);
+      assert.deepEqual(result.output, cleanRun.result.output, `${context}: same as the risk-only reply`);
+      assert.equal(result.output.evidenceGaps.includes(
+        'Not enough data to point out a clear opportunity.'), false, context);
+      const events = diagnostics.filter(value =>
+        value.stage === 'claudeAnalysisSectionNormalization' && value.sectionIndex === 5);
+      assert.deepEqual(events.map(value =>
+        [value.violationCategory, value.action, value.removedSentenceCount]),
+      [[category, 'TRIMMED', 1]], context);
+      assert.equal(JSON.stringify(diagnostics).includes(opportunity), false, context);
+      assert.equal(validateClaudeAnalysisOutput(result.output, fixture.input).valid, true, context);
+    }
+  }
+});
+
+test('Step 8U.6: in every state an all-ungrounded Section 6 is still emptied and a grounded one is unchanged', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    for (const [category, opportunity, refsKey] of STEP_8U6_UNGROUNDED) {
+      const fixture = step8U6Case(marketState, ...times);
+      const context = `${marketState}: ${category}`;
+      fixture.output.sections[5].evidenceRefs = fixture[refsKey].slice();
+      fixture.output.sections[5].content = `${opportunity} Another opportunity may follow.`;
+      const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+      assert.equal(result.type, 'SUCCESS', `${context}: ${result.message}`);
+      assert.equal(calls, 1, context);
+      assert.equal(result.output.status, 'DEGRADED', context);
+      assert.deepEqual(result.output.sections[5], {
+        name: REPORT_SECTION_NAMES[5], content: null, evidenceRefs: [], telemetryRefs: [],
+        uncertainties: ['Not enough data to point out a clear opportunity.']
+      }, context);
+      assert.equal(result.output.evidenceGaps.includes(
+        'Not enough data to point out a clear opportunity.'), true, context);
+      assert.deepEqual(diagnostics.filter(value =>
+        value.stage === 'claudeAnalysisSectionNormalization' && value.sectionIndex === 5)
+        .map(value => [value.violationCategory, value.action]), [[category, undefined]], context);
+    }
+
+    const grounded = step8U6Case(marketState, ...times);
+    grounded.output.sections[5].evidenceRefs = grounded.focusRefs.slice();
+    grounded.output.sections[5].content = times[1]
+      ? `Microsoft has a supported constructive opportunity. ${grounded.risk}`
+      : `Constructive Health-care developments support a sector opportunity. ${grounded.risk}`;
+    assert.equal(validateClaudeAnalysisOutput(grounded.output, grounded.input).valid, true, marketState);
+    const {result, diagnostics} = await invokeCounted(grounded.input, grounded.output);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(result.output.status, 'NORMAL', marketState);
+    assert.deepEqual(result.output.sections[5], grounded.output.sections[5], marketState);
+    assert.equal(diagnostics.some(value => value.stage === 'claudeAnalysisSectionNormalization'
+      && value.sectionIndex === 5), false, marketState);
+  }
+});
+
+function step8U7Case(marketState, ...times) {
+  const fixture = step8U2Case(marketState, ...times);
+  if (times[1]) {
+    // Active fixtures have no portfolio; My Stocks holds MSFT (e1) and the Watchlist AAPL (e2).
+    fixture.input = structuredClone(fixture.input);
+    fixture.input.portfolioContext = {
+      myStocks: [{market: 'US', symbol: 'MSFT', telemetryRefs: [], evidenceRefs: ['e1'],
+        upcomingEvents: []}],
+      watchlist: [{market: 'US', symbol: 'AAPL', telemetryRefs: [], evidenceRefs: ['e2'],
+        upcomingEvents: []}]
+    };
+    fixture.output.sections[3] = {...fixture.output.sections[3],
+      content: 'Microsoft raised its outlook.', evidenceRefs: ['e1'], telemetryRefs: [],
+      uncertainties: []};
+    return {...fixture, initiatingRef: 'e1', otherRef: 'e2'};
+  }
+  // Completed fixtures: My Stocks holds MSFT (e2, t2); give the Watchlist AAPL its own ref (e4).
+  fixture.input.portfolioContext.watchlist[0].evidenceRefs = ['e4'];
+  return {...fixture, initiatingRef: 'e2', otherRef: 'e4'};
+}
+
+test('Step 8U.7: in every state Section 4 drops refs from the other list and keeps the section', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    const fixture = step8U7Case(marketState, ...times);
+    assert.equal(validateClaudeAnalysisInput(fixture.input), true, marketState);
+    const clean = structuredClone(fixture.output);
+    fixture.output.sections[3].evidenceRefs = [fixture.initiatingRef, fixture.otherRef];
+    assert.equal(validateClaudeAnalysisOutput(fixture.output, fixture.input).errors.includes(
+      'sections[3]: evidence references must belong to the initiating list'), true, marketState);
+    const cleanRun = await invokeCounted(fixture.input, clean);
+    const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+    assert.equal(result.type, 'SUCCESS', `${marketState}: ${result.message}`);
+    assert.equal(calls, 1, `${marketState}: no Step 8L retry is needed`);
+    assert.equal(result.output.status, 'NORMAL', `${marketState}: the trim alone does not degrade`);
+    assert.deepEqual(result.output, cleanRun.result.output, `${marketState}: same as the clean reply`);
+    assert.deepEqual(result.output.sections[3].evidenceRefs, [fixture.initiatingRef], marketState);
+    assert.equal(result.output.sections[3].content, clean.sections[3].content, marketState);
+    assert.deepEqual(diagnostics.filter(value =>
+      value.stage === 'claudeAnalysisSectionNormalization' && value.sectionIndex === 3), [{
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 3,
+      violationCategory: 'NON_INITIATING_EVIDENCE', action: 'TRIMMED',
+      suppliedReferenceCount: 2, allowedReferenceCount: 1, offendingReferenceCount: 1
+    }], marketState);
+    assert.equal(validateClaudeAnalysisOutput(result.output, fixture.input).valid, true, marketState);
+  }
+});
+
+test('Step 8U.7: in every state Section 4 is still emptied when it names the other list or keeps no initiating ref', async () => {
+  for (const [marketState, ...times] of STEP_8U_STATES) {
+    for (const [label, mutate] of [
+      ['text names a Watchlist security', (section, fixture) => {
+        section.content = `${section.content} Apple (AAPL) slipped.`;
+        section.evidenceRefs = [fixture.initiatingRef, fixture.otherRef];
+      }],
+      ['only other-list refs', (section, fixture) => {
+        section.evidenceRefs = [fixture.otherRef];
+      }],
+      ['a ref from outside both lists', (section, fixture) => {
+        section.evidenceRefs = [fixture.initiatingRef];
+        section.telemetryRefs = ['t1'];
+      }]
+    ]) {
+      const fixture = step8U7Case(marketState, ...times);
+      const context = `${marketState}: ${label}`;
+      mutate(fixture.output.sections[3], fixture);
+      const {result, calls, diagnostics} = await invokeCounted(fixture.input, fixture.output);
+      assert.equal(result.type, 'SUCCESS', `${context}: ${result.message}`);
+      assert.equal(calls, 1, context);
+      assert.equal(result.output.status, 'DEGRADED', context);
+      assert.deepEqual(result.output.sections[3], {
+        name: REPORT_SECTION_NAMES[3], content: null, evidenceRefs: [], telemetryRefs: [],
+        uncertainties: ['Not enough data to comment on the stocks in this list.']
+      }, context);
+      const events = diagnostics.filter(value =>
+        value.stage === 'claudeAnalysisSectionNormalization' && value.sectionIndex === 3);
+      assert.equal(events.length > 0, true, context);
+      assert.equal(events.every(value => /^NON_INITIATING_/.test(value.violationCategory)
+        && value.action === undefined), true, context);
+    }
+  }
+});
+
 test('completed US report retains the pre-fail-soft executive-summary survival boundary', async () => {
   const input = richCompletedUsWeekInput();
   const oneSection = supportedCompletedUsOutput(input);
@@ -2696,7 +2864,7 @@ test('Step 8M: active internal-identifier leak in content or uncertainties local
   }
 });
 
-test('T6 ungrounded Section 6 opportunity still localizes exactly as before when style words are present', async () => {
+test('T6 ungrounded Section 6 opportunity is still detected when style words are present; Step 8U.6 removes only that sentence', async () => {
   const input = activeUsInput();
   const raw = styledActiveOutput(input);
   raw.sections[5].content = `Apple offers an opportunity. ${STYLE_ONLY_SENTENCE}`;
@@ -2706,13 +2874,16 @@ test('T6 ungrounded Section 6 opportunity still localizes exactly as before when
     onDiagnostics: value => diagnostics.push(value)
   });
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.equal(result.output.sections[5].content, null);
-  assert.deepEqual(result.output.sections[5].uncertainties,
-    ['Not enough data to point out a clear opportunity.']);
+  // Step 8U.6: the ungrounded opportunity sentence is removed; the style-only risk sentence stays.
+  assert.equal(result.output.sections[5].content, STYLE_ONLY_SENTENCE);
+  assert.deepEqual(result.output.sections[5].evidenceRefs, raw.sections[5].evidenceRefs);
+  assert.equal(result.output.evidenceGaps.includes(
+    'Not enough data to point out a clear opportunity.'), false);
   const normalizationEvents = diagnostics.filter(value =>
     value.stage === 'claudeAnalysisSectionNormalization');
-  assert.deepEqual(normalizationEvents.map(value => [value.sectionIndex, value.violationCategory]),
-    [[5, 'UNGROUNDED_OPPORTUNITY_SUBJECT']]);
+  assert.deepEqual(normalizationEvents.map(value =>
+    [value.sectionIndex, value.violationCategory, value.action]),
+  [[5, 'UNGROUNDED_OPPORTUNITY_SUBJECT', 'TRIMMED']]);
   for (const index of [1, 2, 4, 6]) {
     assert.equal(result.output.sections[index].content, raw.sections[index].content);
   }

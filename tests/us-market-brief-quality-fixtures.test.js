@@ -661,7 +661,7 @@ test('Section 4 provider input lists only the selected portfolio refs, including
     /Section 3 telemetryRefs may contain only these exact benchmark refs: \["t1","t2","t3","t4"\]\./);
 });
 
-test('Section 4 accepts selected refs and still localizes two appended refs from outside either initiating list', async () => {
+test('Section 4 accepts selected refs, localizes refs from outside both lists, and (Step 8U.7) trims refs only from the other list', async () => {
   for (const initiatingList of ['myStocks', 'watchlist']) {
     const input = overlappingFocusInput();
     input.analysisRequest.initiatingList = initiatingList;
@@ -692,16 +692,27 @@ test('Section 4 accepts selected refs and still localizes two appended refs from
     const diagnostics = [];
     const localized = await invokeFixture(input, mixed, diagnostics);
     assert.equal(localized.type, 'SUCCESS', localized.message);
-    assert.equal(localized.output.status, 'DEGRADED');
-    assert.deepEqual(localized.output.sections[3], {
-      name: valid.sections[3].name, content: null, evidenceRefs: [], telemetryRefs: [],
-      uncertainties: ['Not enough data to comment on the stocks in this list.']
-    });
-    assert.deepEqual(diagnostics.filter(event =>
+    const sectionEvents = diagnostics.filter(event =>
       event.stage === 'claudeAnalysisSectionNormalization' && event.sectionIndex === 3
-    ).map(event => [event.violationCategory, event.offendingReferenceCount]), [
-      ['NON_INITIATING_EVIDENCE', 2], ['NON_INITIATING_TELEMETRY', 2]
-    ]);
+    ).map(event => [event.violationCategory, event.offendingReferenceCount, event.action]);
+    if (initiatingList === 'myStocks') {
+      // The appended t1 is a benchmark ref, outside both lists, so Section 4 is still emptied.
+      assert.equal(localized.output.status, 'DEGRADED');
+      assert.deepEqual(localized.output.sections[3], {
+        name: valid.sections[3].name, content: null, evidenceRefs: [], telemetryRefs: [],
+        uncertainties: ['Not enough data to comment on the stocks in this list.']
+      });
+      assert.deepEqual(sectionEvents, [
+        ['NON_INITIATING_EVIDENCE', 2, undefined], ['NON_INITIATING_TELEMETRY', 2, undefined]
+      ]);
+    } else {
+      // Step 8U.7: every appended ref is a My Stocks ref and the text names no My Stocks
+      // security, so only those refs are dropped.
+      assert.deepEqual(localized.output.sections[3], valid.sections[3]);
+      assert.deepEqual(sectionEvents, [
+        ['NON_INITIATING_EVIDENCE', 2, 'TRIMMED'], ['NON_INITIATING_TELEMETRY', 2, 'TRIMMED']
+      ]);
+    }
   }
 });
 

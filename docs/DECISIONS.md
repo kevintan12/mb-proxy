@@ -480,3 +480,39 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - Changed, because they pinned the old prompt wording: "adds the exact package benchmark refs to the request-specific Section 3 allowlist" and "gives Section 3 non-causal broad-market session-association instructions".
 - **Pending:** Kevin's commit decision; Preview runs should show `UNFOCUSED_PORTFOLIO_MENTION` `TRIMMED` events where Section 3 used to be emptied.
 - **Supersedes:** none.
+
+## Step 8U.6 — Section 6 removes ungrounded opportunity sentences and keeps the risks (repo: mb-proxy)
+
+- **Date:** 2026-10-03 · **Branch:** step-8t-integration · **Status:** IMPLEMENTED, tests passing; not yet committed; live validation pending.
+- **Context:** the Step 8U review found that when the Section 6 opportunity matcher rejected an opportunity (`GENERIC_OPPORTUNITY_CLAIM`, `UNSUPPORTED_OPPORTUNITY_CLAIM` or `UNGROUNDED_OPPORTUNITY_SUBJECT`), the whole of Section 6 was emptied in every state, including valid, cited risk sentences.
+- **Decision (approved by Kevin, 2026-10-03, reversing an earlier must-not-change note):**
+  - The matcher (`sectionSixOpportunityViolations`, `hasOpportunityClaim`, `hasGenericOpportunityFiller`) stays exactly as strict as before. It still decides whether the opportunity is grounded.
+  - When it rejects the opportunity, only the sentences that make an opportunity claim are removed, using the Step 8U.3 sentence splitter. The risk sentences and the section's refs are kept.
+  - If no sentence would remain, or the section cites no evidence ref, the section is emptied as before with the Step 8J wording "Not enough data to point out a clear opportunity." and that gap.
+  - Same behaviour in PRE, REGULAR, POST, CLOSED, WEEKEND and HOLIDAY. No qualifier and no evidence gap are added, so like Step 8O the trim alone does not set DEGRADED. The kept text is re-checked by the Step 8U.2 normaliser and the final validator.
+- **Implementation:** `lib/claude-analysis-invocation.js`, the Section 6 block in `normalizeDynamicReferenceViolations`. The event keeps the same `violationCategory` (and `violationSubtype`) and adds `action: 'TRIMMED'`, `offendingReferenceCount: 0` and `removedSentenceCount` when trimmed (counts only, no prose).
+- **Request size:** no change (system prompt 19,700 bytes; full request on the rich completed fixture 31,893 bytes, same as HEAD).
+- **Must not change (kept):** the literal Section 6 opportunity matcher; Section 7 empty when unsupported; protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f`; the Step 8L one-retry rule; the CNBC path (untouched); the frozen 8-section structure; Section 3 grounding.
+- **Evidence/tests:** full suite 836/836, 47/47 syntax checks, `git diff --check` clean. No paid calls; all fixtures use a mocked writer.
+  - New (`tests/claude-analysis-invocation.test.js`, each in PRE, REGULAR, POST, CLOSED, WEEKEND and HOLIDAY, for all three categories): a risk sentence plus an ungrounded opportunity sentence keeps only the risk, stays NORMAL, uses one writer call and equals the risk-only reply; a Section 6 made only of ungrounded opportunity sentences is still emptied; a grounded opportunity is unchanged.
+  - Changed: "T6 ungrounded Section 6 opportunity still localizes exactly as before when style words are present" (Step 8F). It asserted the old blanking. It now asserts the opportunity is still detected as `UNGROUNDED_OPPORTUNITY_SUBJECT`, and that only that sentence is removed while the style-only sentence stays.
+- **Pending:** Kevin's commit decision; Preview runs should show Section 6 `TRIMMED` events where Section 6 used to be emptied.
+- **Supersedes:** the Section 6 part of the must-not-change notes in Step 8F ("Section 3/4/6 grounding (including the literal UNGROUNDED_OPPORTUNITY_SUBJECT rule)") and Step 8O ("Section 6 literal opportunity grounding"), but only for the result of a rejection (blank → sentence trim). The literal matcher itself is not superseded.
+
+## Step 8U.7 — Section 4 drops other-list references instead of blanking, when it is safe (repo: mb-proxy)
+
+- **Date:** 2026-10-03 · **Branch:** step-8t-integration · **Status:** IMPLEMENTED, tests passing; not yet committed; live validation pending.
+- **Context:** the Step 8U review found that any reference outside the initiating list in Section 4 (`NON_INITIATING_EVIDENCE` / `NON_INITIATING_TELEMETRY`) emptied the whole section in every state, even when the text was only about the initiating list and a valid initiating-list ref remained.
+- **Decision (approved by Kevin, 2026-10-03, reversing an earlier must-not-change note):**
+  - The other-list refs are dropped and Section 4 is kept only when all of these hold: every offending ref belongs to a security in the other list (My Stocks vs Watchlist; a security in both counts as initiating); at least one initiating-list evidence ref remains; and the text names no security from the other list (its symbol, case-sensitive whole word, or its instrument name from the package's stock telemetry).
+  - Otherwise the section is emptied as before with "Not enough data to comment on the stocks in this list." and that gap. That includes a ref from outside both lists (for example a benchmark telemetry ref or broad-market news), which is the conservative reading.
+  - Same behaviour in every state. No gap is added on a trim, so the trim alone does not set DEGRADED.
+- **Implementation:** `lib/claude-analysis-invocation.js`, the Section 4 block in `normalizeDynamicReferenceViolations`; the existing `NON_INITIATING_*` events gain `action: 'TRIMMED'` when trimmed (counts only). `containsWholeTerm` is now exported from `lib/claude-analysis-contract.js` (unchanged) so the same name matching as Section 3 is reused.
+- **Known limit:** a company named only by a plain name (for example "Apple") with no stock telemetry in the package can't be recognised as an other-list security. That is the same limit the Section 3 portfolio-mention check has.
+- **Request size:** no change (same figures as Step 8U.6).
+- **Must not change (kept):** Section 4 covers only the initiating list, and its refs must belong to it in the final report; the empty-list "No securities…" text; protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f`; the Step 8L one-retry rule; the CNBC path (untouched); the frozen 8-section structure; Section 7 empty when unsupported.
+- **Evidence/tests:** same run as Step 8U.6 (836/836, 47/47, `git diff --check` clean).
+  - New (`tests/claude-analysis-invocation.test.js`, each in PRE, REGULAR, POST, CLOSED, WEEKEND and HOLIDAY): an appended Watchlist evidence ref is dropped, Section 4 stays NORMAL, uses one writer call and equals the clean reply. Section 4 is still emptied when the text names a Watchlist security (AAPL), when only other-list refs are cited, or when a ref from outside both lists is cited.
+  - Changed: "Section 4 accepts selected refs and still localizes two appended refs from outside either initiating list" in `tests/us-market-brief-quality-fixtures.test.js`. Its myStocks case still empties (the appended `t1` is a benchmark ref, outside both lists). Its watchlist case appended only My Stocks refs to text that names no My Stocks security, so it now trims. The test was renamed and asserts both outcomes.
+- **Pending:** Kevin's commit decision; Preview runs should show `NON_INITIATING_*` `TRIMMED` events where Section 4 used to be emptied.
+- **Supersedes:** the Section 4 part of the Step 8O must-not-change note ("Section 4 initiating-list isolation and its null-all behavior"), for null-all behaviour only. Initiating-list isolation is kept. It also supersedes the Section 4 part of "Section 3/4/6 grounding" in Step 8F to the same extent.
