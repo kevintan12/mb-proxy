@@ -682,3 +682,38 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Must not change (kept):** every checker message string; the cleanup stage's rule order; the CNBC acquisition path; `?rev=` tokens; Neon.
 - **Pending:** Kevin's commit decision. Step 9D.5b (one cleanup loop) and 9D.6, each to be checked against both matrix files and the registry guards as they land.
 - **Supersedes:** none.
+
+## Step 9D.5b — The cleanup stage runs as one loop over the shared rule list (repo: mb-proxy)
+
+- **Date:** 2026-10-08 · **Branch:** step-9d-shared-section-module · **Status:** IMPLEMENTED, tests passing; not yet committed.
+- **Context:** the second half of the Step 9D.5 split. Step 9D.5a gave every rule one shared detector. This step turns the cleanup stage's eleven inline rule blocks into one loop over an order the shared module owns. The risk is limited to event order.
+- **Decision:** behaviour-neutral. Same report text, same events in the same order, same event wording, same checker messages, same writer request bytes.
+- **Implementation:**
+  - `lib/section-rules.js`: `SECTION_RULE_CLEANUP_ORDER` lists the eleven registry rule ids in today's order: rules 12, 13, 14, 15 (Section 2), then 16 (Sections 1 and 3–7), then 18, 19, 20, 21 (Section 3), then 22, then 24. `runSectionRules(handlers)` runs one handler per id in that order. It throws if a handler is missing or names a rule outside the order, so a rule can't be skipped or run out of turn.
+  - `lib/claude-analysis-invocation.js`: `normalizeDynamicReferenceViolations` now calls `runSectionRules` with one handler per registry id. Each handler body is the earlier inline block, moved verbatim and only re-indented: ignoring whitespace, the diff is just the handler wrappers. Each rule keeps its own preconditions and events, and reads the working sections as the earlier rules left them. The working state (sections, gaps, events, reference sets) stays in the function, as before.
+  - Kept exactly as before:
+    - Section 1 is never emptied by the unknown-reference rule, which runs before this stage.
+    - Rule 16 never empties Section 1.
+    - Both preserved inconsistencies (Step 9D.1, Step 9D.4).
+    - The active-day-only checker categories on last-resort events.
+    - Everything outside this stage: the unknown-reference, plain-English, metadata and evidence-limited steps before it, and the last-resort and nothing-survived steps after it.
+- **Tests:** new `tests/section-rules-order.test.js` (8 tests).
+  - The order list maps to rules 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 24, and each is a registry cleanup rule.
+  - `runSectionRules` runs handlers in order and refuses a missing or unknown handler.
+  - Six multi-rule cases pin the full event sequence in all six states:
+    - every cleanup rule firing at once, across sections and on the same section;
+    - Section 2's rules 14 then 15 on one section;
+    - rule 12 emptying Section 2 first;
+    - Section 3's rule 19 trim before rule 21's final-blank events;
+    - Section 4 emptied before Section 6;
+    - last-resort events in section order, with the active-only detail.
+  - The six sequence tests pass unchanged against 4e26b05 (the two tests of the new runner can't run there). Swapping rules 22 and 24 in the order makes three of the tests fail.
+- **Evidence:** full suite 919/919 (911 + 8). Syntax 48/48 on `api/` and `lib/`. `git diff --check` clean. The Step 9D.1 matrix, 9D.2 settings, 9D.3 ladder, 9D.4 causal, 9D.5a matrix-extra and registry tests pass unedited, including the writer-request-size guard (19,700 / 31,893 bytes). No existing test file changed. No paid calls.
+- **Free real-reply comparison (scratch only, not committed):** 4e26b05 (built with read-only `git show`) against the new code, with a stand-in writer. Final report, retry count, events in order, and checker errors on both the reply and the final report were compared byte for byte.
+  - All 22 saved replies in the Replay Packages folder were each matched to their package by `generatedAt`, across 5 packages (WEEKEND 2026-09-27 and 2026-10-03, CLOSED 2026-09-29, PRE 8K5 2026-10-01, PRE thin 2026-09-28). This includes the WEEKEND-1600 NEW, NEW-2, INT and 8T runs and PRE-8K5 OLD and NEW.
+  - Plus 500 variants built from each package's own saved sentences and references, and 2,400 random broken replies across all six states.
+  - Total 2,922 cases, 0 differences.
+  - Caveat: the saved files are final reports, not raw writer replies, so each was used as the reply.
+- **Must not change (kept):** the cleanup rule order; every event field and wording; every checker message; the CNBC acquisition path; `?rev=` tokens; Neon.
+- **Pending:** Kevin's commit decision. Step 9D.6 (market-neutral switches), not built.
+- **Supersedes:** none.
