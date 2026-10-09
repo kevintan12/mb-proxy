@@ -1650,7 +1650,8 @@ test('PRE, REGULAR and POST conservatively complete an omitted CURRENT_SESSION c
 test('stale and future Yahoo news never become CURRENT_SESSION evidence', async () => {
   const generatedAt = '2026-09-08T15:00:00.000Z';
   const candidates = [
-    ['Stale market story', 'stale', '2026-09-04T19:00:00.000Z'],
+    // Step 9F.1c: one hour before the reading window start (last close 2026-09-04T20:00Z minus 24 h).
+    ['Stale market story', 'stale', '2026-09-03T19:00:00.000Z'],
     ['Future market story', 'future', '2026-09-08T15:00:00.001Z'],
     ['Current market story', 'current', '2026-09-08T14:30:00.000Z'],
     ['Missing-time market story', 'missing-time', null],
@@ -5252,7 +5253,7 @@ test('Step 8K candidate audit records the decision for each rejection type', asy
         const value = step8kUsableArticle(candidate);
         return {...value, articleContent: {...value.articleContent, publishedAt: null}};
       }
-      if (candidate.headline === byName('before').headline) return step8kUsableArticle(candidate, '2026-09-04T19:00:00.000Z');
+      if (candidate.headline === byName('before').headline) return step8kUsableArticle(candidate, '2026-09-03T19:00:00.000Z');
       if (candidate.headline === byName('after').headline) return step8kUsableArticle(candidate, '2026-09-08T15:30:00.000Z');
       if (candidate.headline === byName('duplicate').headline) {
         const value = step8kUsableArticle(byName('admitted'));
@@ -5272,9 +5273,9 @@ test('Step 8K candidate audit records the decision for each rejection type', asy
     ['EXTRACTION_FAILED', 'NO_ARTICLE_BODY_CONTAINER_OR_TEXT']);
   assert.equal(decision('notime').decision, 'REJECTED_NO_PUBLICATION_TIME');
   assert.deepEqual([decision('before').decision, decision('before').publishedAt],
-    ['REJECTED_BEFORE_WINDOW', '2026-09-04T19:00:00.000Z']);
+    ['REJECTED_BEFORE_READING_WINDOW', '2026-09-03T19:00:00.000Z']);
   assert.deepEqual([decision('after').decision, decision('after').publishedAt],
-    ['REJECTED_AFTER_WINDOW', '2026-09-08T15:30:00.000Z']);
+    ['REJECTED_AFTER_READING_WINDOW', '2026-09-08T15:30:00.000Z']);
   assert.equal(decision('admitted').decision, 'ADMITTED');
   assert.equal(decision('duplicate').decision, 'REJECTED_DUPLICATE');
   assert.equal(decision('last').decision, 'SKIPPED_MAX_ATTEMPTS');
@@ -5316,48 +5317,53 @@ test('Step 8K completed-session runs emit no candidate audit event', async () =>
     && value.outcome === 'SKIPPED_COMPLETED_SESSION'));
 });
 
-// ---- Step 8K.5: stale-by-label filter, twelve attempts, and the tier reorder ----
-test('Step 8K.5 a candidate whose label proves it is older than the window start plus four hours is skipped before fetching', async () => {
-  // REGULAR run at 2026-09-08T15:00Z; the window starts 2026-09-04T20:00Z (91 h earlier); tolerance 4 h, so 95 h is the boundary.
+// ---- Step 8K.5: label ordering (Step 9F.1c), twelve attempts, and the tier reorder ----
+test('Step 9F.1c a candidate whose label says it is older than the reading window start plus four hours is tried last, not skipped', async () => {
+  // REGULAR run at 2026-09-08T15:00Z; the reading window starts 2026-09-03T20:00Z (115 h earlier); tolerance 4 h, so 119 h is the boundary.
   const labelled = (name, ageLabel) => step8kCandidate(`Neutral ${name} story`, ageLabel ? {ageLabel} : {});
   const candidates = [
-    labelled('fresh', '3h ago'), labelled('boundary', '95h ago'), labelled('stalehours', '96h ago'),
-    labelled('staledays', '5d ago'), labelled('yesterday', 'yesterday'), labelled('nolabel', null),
+    labelled('fresh', '3h ago'), labelled('boundary', '119h ago'), labelled('stalehours', '120h ago'),
+    labelled('staledays', '6d ago'), labelled('yesterday', 'yesterday'), labelled('nolabel', null),
     labelled('weeks', '3 weeks ago'), labelled('minutes', '12 min ago')
   ];
   const {audit, calls, diagnostics} = await step8kActiveRun({candidates});
-  const decisionOf = name => audit.find(entry => entry.headline === `Neutral ${name} story`).decision;
-  assert.equal(decisionOf('stalehours'), 'SKIPPED_STALE_BY_LABEL');
-  assert.equal(decisionOf('staledays'), 'SKIPPED_STALE_BY_LABEL');
-  for (const name of ['fresh', 'boundary', 'yesterday', 'nolabel', 'weeks', 'minutes']) {
-    assert.equal(decisionOf(name), 'EXTRACTION_FAILED', name);
+  const entryOf = name => audit.find(entry => entry.headline === `Neutral ${name} story`);
+  for (const name of ['fresh', 'boundary', 'stalehours', 'staledays', 'yesterday', 'nolabel', 'weeks', 'minutes']) {
+    assert.equal(entryOf(name).decision, 'EXTRACTION_FAILED', name);
   }
-  assert.equal(calls.yahooCurrentNewsArticle.length, 6);
-  assert.equal(audit.find(entry => entry.headline === 'Neutral fresh story').ageLabel, '3h ago');
-  assert.equal(audit.find(entry => entry.headline === 'Neutral nolabel story').ageLabel, null);
+  assert.equal(entryOf('stalehours').labelOld, true);
+  assert.equal(entryOf('staledays').labelOld, true);
+  assert.equal(entryOf('boundary').labelOld, undefined);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(candidate => candidate.headline),
+    ['fresh', 'boundary', 'yesterday', 'nolabel', 'weeks', 'minutes', 'stalehours', 'staledays']
+      .map(name => `Neutral ${name} story`));
+  assert.equal(entryOf('fresh').ageLabel, '3h ago');
+  assert.equal(entryOf('nolabel').ageLabel, null);
   const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
   assert.equal(acquisition.staleByLabelCount, 2);
-  assert.equal(acquisition.articleFetchAttemptCount, 6);
+  assert.equal(acquisition.articleFetchAttemptCount, 8);
 });
 
-test('Step 8K.5 stale-by-label candidates use no fetch attempts', async () => {
+test('Step 9F.1c label-old candidates go behind fresh ones and the twelve-attempt cap still applies', async () => {
   const stale = Array.from({length: 14}, (_, index) => step8kCandidate(`Neutral old story ${index + 1}`, {ageLabel: '6d ago'}));
   const fresh = Array.from({length: 14}, (_, index) => step8kCandidate(`Neutral new story ${index + 1}`, {ageLabel: '2h ago'}));
   const {audit, calls} = await step8kActiveRun({candidates: stale.concat(fresh)});
   assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
-  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_STALE_BY_LABEL').length, 14);
-  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 2);
+  assert.ok(calls.yahooCurrentNewsArticle.every(candidate => candidate.headline.startsWith('Neutral new story')));
+  assert.equal(audit.filter(entry => entry.labelOld === true).length, 14);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 16);
 });
 
-test('Step 8K.5 an unusable or missing label never causes a skip', async () => {
+test('Step 9F.1c an unusable or missing label never moves a candidate', async () => {
   const unusable = ['', '   ', 'just now', '5 ago', 'ago 5d', '5 fortnights ago', '99999d ago'];
   const candidates = unusable.map((ageLabel, index) => step8kCandidate(`Neutral odd label story ${index + 1}`, {ageLabel}));
-  const {audit} = await step8kActiveRun({candidates: candidates.concat(
+  const {audit, calls} = await step8kActiveRun({candidates: [
     step8kCandidate('Neutral huge label story', {ageLabel: '9999d ago'})
-  )});
-  // "9999d ago" parses (four digits) and is stale; every other label is unusable and is fetched.
-  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_STALE_BY_LABEL').length, 1);
-  assert.equal(audit.filter(entry => entry.decision === 'EXTRACTION_FAILED').length, unusable.length);
+  ].concat(candidates)});
+  // "9999d ago" parses (four digits) and is label-old, so it is tried last; nothing is skipped.
+  assert.equal(audit.filter(entry => entry.labelOld === true).length, 1);
+  assert.equal(audit.filter(entry => entry.decision === 'EXTRACTION_FAILED').length, unusable.length + 1);
+  assert.equal(calls.yahooCurrentNewsArticle.at(-1).headline, 'Neutral huge label story');
 });
 
 test('Step 8K.5 tier order: portfolio, then wire market wrap, then most-active only, then other macro', async () => {
@@ -5422,4 +5428,112 @@ test('Step 8K.5 a blog partner still loses to a most-active headline in the same
     mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
   });
   assert.deepEqual(audit.map(entry => entry.headline), [active.headline, blogA.headline, blogB.headline]);
+});
+
+// ---- Step 9F.1c: Yahoo admission by publish time inside the reading window ----
+// Old session window start: PRE/REGULAR 2026-09-04T20:00Z (Labor Day 09-07 skipped), POST
+// 2026-09-08T20:00Z. Reading window start is the last close minus 24 h.
+const STEP_9F1C_ROWS = [
+  {state: 'PRE', trigger: '2026-09-08T11:30:00.000Z', overlayAsOf: '2026-09-08T11:25:00.000Z',
+    oldStart: '2026-09-04T20:00:00.000Z', readingStart: '2026-09-03T20:00:00.000Z'},
+  {state: 'REGULAR', trigger: '2026-09-08T15:00:00.000Z', overlayAsOf: '2026-09-08T14:55:00.000Z',
+    oldStart: '2026-09-04T20:00:00.000Z', readingStart: '2026-09-03T20:00:00.000Z'},
+  {state: 'POST', trigger: '2026-09-08T21:00:00.000Z', overlayAsOf: '2026-09-08T20:55:00.000Z',
+    oldStart: '2026-09-08T20:00:00.000Z', readingStart: '2026-09-07T20:00:00.000Z'}
+];
+
+for (const row of STEP_9F1C_ROWS) {
+  test(`Step 9F.1c ${row.state} Yahoo articles are in or out by publish time inside the reading window`, async () => {
+    const at = offsetMs => new Date(Date.parse(row.readingStart) + offsetMs).toISOString();
+    const triggerMs = Date.parse(row.trigger);
+    // A label one hour past the old skip line (old window age + 4 h tolerance), so the
+    // old code skipped it unfetched; it is still under the new reading-window line.
+    const oldSkipHours = Math.ceil((triggerMs - Date.parse(row.oldStart)) / 3600000) + 5;
+    const articles = [
+      {name: 'atstart', publishedAt: at(0), expected: 'ADMITTED'},
+      {name: 'justinside', publishedAt: at(60000), expected: 'ADMITTED'},
+      {name: 'justoutside', publishedAt: at(-60000), expected: 'REJECTED_BEFORE_READING_WINDOW'},
+      {name: 'beforeoldstart', publishedAt: new Date(Date.parse(row.oldStart) - 3600000).toISOString(),
+        expected: 'ADMITTED'},
+      {name: 'future', publishedAt: new Date(triggerMs + 1).toISOString(), expected: 'REJECTED_AFTER_READING_WINDOW'},
+      {name: 'notime', publishedAt: null, expected: 'REJECTED_NO_PUBLICATION_TIME'},
+      {name: 'labelskip', publishedAt: new Date(triggerMs - 1800000).toISOString(),
+        ageLabel: `${oldSkipHours}h ago`, expected: 'ADMITTED'},
+      {name: 'labelwrong', publishedAt: new Date(triggerMs - 1800000).toISOString(),
+        ageLabel: '9d ago', expected: 'ADMITTED', labelOld: true}
+    ];
+    const byHeadline = new Map(articles.map(article => [`Neutral ${article.name} story`, article]));
+    const candidates = articles.map(article => step8kCandidate(`Neutral ${article.name} story`,
+      article.ageLabel ? {ageLabel: article.ageLabel} : {}));
+    const diagnostics = [];
+    const fetched = [];
+    const {service} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, row.state, {overlayAsOf: row.overlayAsOf});
+        }
+      }),
+      yahooMostActiveAcquisition: {
+        async acquireMostActive() { return {ok: true, type: 'SUCCESS', candidates: []}; }
+      },
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) {
+          fetched.push(candidate.headline);
+          return step8kUsableArticle(candidate, byHeadline.get(candidate.headline).publishedAt);
+        }
+      },
+      now: () => new Date(row.trigger),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    await service.assemble(request());
+    const auditEvents = diagnostics.filter(value => value.stage === 'activeYahooCandidateAudit');
+    const audit = auditEvents.flatMap(event => event.candidates);
+    assert.equal(auditEvents[0].readingWindowStartsAt, row.readingStart);
+    assert.equal(auditEvents[0].windowStartsAtInclusive, row.oldStart);
+    for (const article of articles) {
+      const entry = audit.find(value => value.headline === `Neutral ${article.name} story`);
+      assert.equal(entry.decision, article.expected, `${row.state} ${article.name}`);
+      assert.equal(entry.labelOld, article.labelOld, `${row.state} ${article.name} label order`);
+    }
+    // Every candidate is downloaded once; the label-old one goes last.
+    assert.equal(fetched.length, articles.length);
+    assert.equal(fetched.at(-1), 'Neutral labelwrong story');
+    const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+    assert.equal(acquisition.acquiredCurrentSessionCount, 5);
+    assert.equal(acquisition.missingOrMalformedPublicationTimeCount, 1);
+    assert.equal(acquisition.beforeSessionWindowCount, 1);
+    assert.equal(acquisition.afterSessionWindowCount, 1);
+    assert.equal(acquisition.staleByLabelCount, 1);
+    for (const event of auditEvents) {
+      assert.ok(Buffer.byteLength(JSON.stringify({...event, generationId: '0'.repeat(36)}), 'utf8') <= 3400);
+    }
+  });
+}
+
+test('Step 9F.1c the reading extension setting moves the Yahoo admission line, clamped', async () => {
+  const saved = process.env.READING_EXTENSION_HOURS;
+  const decisionAt = async (hours, publishedAt) => {
+    if (hours === undefined) delete process.env.READING_EXTENSION_HOURS;
+    else process.env.READING_EXTENSION_HOURS = hours;
+    const candidate = step8kCandidate('Neutral extension story');
+    const {audit} = await step8kActiveRun({
+      candidates: [candidate], acquire: value => step8kUsableArticle(value, publishedAt)
+    });
+    return audit[0].decision;
+  };
+  try {
+    // REGULAR at 2026-09-08T15:00Z; last close 2026-09-04T20:00Z.
+    assert.equal(await decisionAt('0', '2026-09-04T19:59:00.000Z'), 'REJECTED_BEFORE_READING_WINDOW');
+    assert.equal(await decisionAt('0', '2026-09-04T20:00:00.000Z'), 'ADMITTED');
+    assert.equal(await decisionAt('48', '2026-09-02T20:01:00.000Z'), 'ADMITTED');
+    assert.equal(await decisionAt('9999', '2026-09-01T20:01:00.000Z'), 'ADMITTED');
+    assert.equal(await decisionAt('9999', '2026-09-01T19:59:00.000Z'), 'REJECTED_BEFORE_READING_WINDOW');
+    assert.equal(await decisionAt('junk', '2026-09-03T19:59:00.000Z'), 'REJECTED_BEFORE_READING_WINDOW');
+  } finally {
+    if (saved === undefined) delete process.env.READING_EXTENSION_HOURS;
+    else process.env.READING_EXTENSION_HOURS = saved;
+  }
 });
