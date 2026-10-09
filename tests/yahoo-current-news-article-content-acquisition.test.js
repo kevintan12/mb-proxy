@@ -288,3 +288,13 @@ test('Step 8K.5 accepts the singular /article/ path and still rejects /live/ and
     assert.equal((await service.acquireArticleContent({url, headline})).type, 'INVALID_INPUT', url);
   }
 });
+
+test('Step 9F.1d: an unsuccessful reply carries its status so 429/5xx can be told from 404', async () => {
+  for (const status of [404, 429, 503]) {
+    const service = createYahooCurrentNewsArticleContentAcquisitionService({
+      fetchImpl: async () => response('', {status})
+    });
+    const result = await service.acquireArticleContent({url: candidateUrl, headline});
+    assert.deepEqual([result.type, result.httpStatus], ['HTTP_FAILURE', status]);
+  }
+});

@@ -56,7 +56,10 @@ for (const row of ROWS) {
 }
 
 test('Step 9F.1a reading window: environment variables override defaults, bad ones are made safe, attempts stay 3', () => {
-  assert.deepEqual({...readingSettings({env: {}})}, {readingExtensionHours: 24, articleKb: 16, downloadAttempts: 3});
+  assert.deepEqual({...readingSettings({env: {}})},
+    {readingExtensionHours: 24, articleKb: 16, downloadAttempts: 3, readingBudgetSeconds: 30});
+  // Step 9F.1d: the reading budget is fixed in code; no environment override.
+  assert.equal(readingSettings({env: {READING_BUDGET_SECONDS: '300'}}).readingBudgetSeconds, 30);
   assert.equal(readingSettings({env: {READING_EXTENSION_HOURS: '48'}}).readingExtensionHours, 48);
   assert.equal(readingSettings({env: {READING_EXTENSION_HOURS: '9999'}}).readingExtensionHours, 72);
   assert.equal(readingSettings({env: {READING_EXTENSION_HOURS: 'silly'}}).readingExtensionHours, 24);

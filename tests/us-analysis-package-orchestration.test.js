@@ -4894,7 +4894,7 @@ function step8kUsableArticle(candidate, publishedAt = '2026-09-08T14:30:00.000Z'
 }
 
 async function step8kActiveRun({candidates, myStocks = [], watchlist = [], mostActive = [], acquire = null,
-  discoveryExtra = {}}) {
+  discoveryExtra = {}, clock = {}}) {
   const diagnostics = [];
   const {service, calls} = harness({
     createTelemetryAcquisition: () => ({
@@ -4916,6 +4916,8 @@ async function step8kActiveRun({candidates, myStocks = [], watchlist = [], mostA
       }
     },
     now: () => new Date('2026-09-08T15:00:00.000Z'),
+    sleep: async () => {},
+    ...clock,
     onDiagnostics: value => diagnostics.push(value)
   });
   const output = await service.assemble(request('US', {myStocks, watchlist}));
@@ -5262,13 +5264,16 @@ test('Step 8K candidate audit records the decision for each rejection type', asy
       return step8kUsableArticle(candidate);
     }
   });
-  assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  // Step 9F.1d: the timeout is downloaded 3 times, but the cap counts articles tried.
+  assert.equal(new Set(calls.yahooCurrentNewsArticle.map(call => call.url)).size,
+    ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS + 2);
   const byHeadline = new Map(audit.map(entry => [entry.headline, entry]));
   const decision = name => byHeadline.get(`Neutral ${name} story`);
-  assert.deepEqual([decision('exception').decision, decision('exception').failureType],
-    ['FETCH_FAILED', 'EXCEPTION']);
-  assert.deepEqual([decision('timeout').decision, decision('timeout').failureType],
-    ['FETCH_FAILED', 'TIMEOUT']);
+  assert.deepEqual([decision('exception').decision, decision('exception').failureType,
+    decision('exception').attempts], ['FETCH_FAILED', 'EXCEPTION', 1]);
+  assert.deepEqual([decision('timeout').decision, decision('timeout').failureType,
+    decision('timeout').attempts], ['FETCH_FAILED', 'TIMEOUT', 3]);
   assert.deepEqual([decision('extraction').decision, decision('extraction').failureType],
     ['EXTRACTION_FAILED', 'NO_ARTICLE_BODY_CONTAINER_OR_TEXT']);
   assert.equal(decision('notime').decision, 'REJECTED_NO_PUBLICATION_TIME');
@@ -5536,4 +5541,93 @@ test('Step 9F.1c the reading extension setting moves the Yahoo admission line, c
     if (saved === undefined) delete process.env.READING_EXTENSION_HOURS;
     else process.env.READING_EXTENSION_HOURS = saved;
   }
+});
+
+// ---- Step 9F.1d: up to 3 download attempts per article and a 30 second reading budget ----
+function step9f1dSummary(diagnostics) {
+  return diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+}
+
+const STEP_9F1D_ROWS = [
+  {name: 'fails once then succeeds', fails: ['TIMEOUT'], decision: 'ADMITTED', attempts: 2},
+  {name: 'fails twice then succeeds', fails: ['RETRIEVAL_FAILURE', 'HTTP_FAILURE_503'], decision: 'ADMITTED', attempts: 3},
+  {name: 'fails three times', fails: ['TIMEOUT', 'RESPONSE_READ_FAILURE', 'HTTP_FAILURE_429'],
+    decision: 'FETCH_FAILED', attempts: 3},
+  {name: '404 page not found', fails: ['HTTP_FAILURE_404'], decision: 'FETCH_FAILED', attempts: 1},
+  {name: 'unreadable page', fails: ['NO_USABLE_ARTICLE'], decision: 'EXTRACTION_FAILED', attempts: 1}
+];
+
+for (const row of STEP_9F1D_ROWS) {
+  test(`Step 9F.1d Yahoo article download: ${row.name}`, async () => {
+    const candidate = step8kCandidate('Neutral retry story');
+    let calls = 0;
+    const pauses = [];
+    const {audit, diagnostics} = await step8kActiveRun({
+      candidates: [candidate],
+      clock: {sleep: async ms => { pauses.push(ms); }},
+      acquire: async () => {
+        const type = row.fails[calls++];
+        if (!type) return step8kUsableArticle(candidate);
+        const [base, status] = type.startsWith('HTTP_FAILURE_') ? ['HTTP_FAILURE', Number(type.slice(13))] : [type];
+        return {ok: false, type: base, articleContent: null, ...(status ? {httpStatus: status} : {})};
+      }
+    });
+    assert.equal(calls, row.attempts);
+    assert.deepEqual([audit[0].decision, audit[0].attempts], [row.decision, row.attempts]);
+    assert.deepEqual(pauses, [250, 750].slice(0, row.attempts - 1));
+    const summary = step9f1dSummary(diagnostics);
+    assert.deepEqual([summary.articleFetchAttemptCount, summary.downloadAttemptCount, summary.readingBudgetStopped],
+      [1, row.attempts, false]);
+  });
+}
+
+test('Step 9F.1d retries do not use up the twelve-article cap', async () => {
+  const candidates = Array.from({length: 13}, (_, index) => step8kCandidate(`Neutral capped story ${index}`));
+  const seen = new Map();
+  const {audit, diagnostics, calls} = await step8kActiveRun({
+    candidates,
+    acquire: async candidate => {
+      const count = (seen.get(candidate.url) || 0) + 1;
+      seen.set(candidate.url, count);
+      return count === 1 ? {ok: false, type: 'TIMEOUT', articleContent: null}
+        : {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
+    }
+  });
+  assert.equal(seen.size, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS * 2);
+  assert.equal(audit.filter(entry => entry.attempts === 2).length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(audit.at(-1).decision, 'SKIPPED_MAX_ATTEMPTS');
+  assert.equal(audit.at(-1).attempts, undefined);
+  const summary = step9f1dSummary(diagnostics);
+  assert.deepEqual([summary.articleFetchAttemptCount, summary.downloadAttemptCount, summary.readingBudgetStopped],
+    [12, 24, false]);
+});
+
+test('Step 9F.1d the 30 second reading budget stops further reading partway', async () => {
+  // Every download times out after 4 s of fake time. Article 1: 0-13 s (3 attempts),
+  // article 2: 13-26 s (3 attempts), article 3 starts at 26 s, ends at 30 s, and its
+  // retry is not started. Articles 4 and 5 are not tried because of the budget.
+  let now = 0;
+  const pauses = [];
+  const candidates = Array.from({length: 5}, (_, index) => step8kCandidate(`Neutral slow story ${index}`));
+  const {audit, diagnostics, calls} = await step8kActiveRun({
+    candidates,
+    clock: {monotonicNow: () => now, sleep: async ms => { pauses.push(ms); now += ms; }},
+    acquire: async () => {
+      now += 4000;
+      return {ok: false, type: 'TIMEOUT', articleContent: null};
+    }
+  });
+  assert.equal(calls.yahooCurrentNewsArticle.length, 7);
+  assert.deepEqual(pauses, [250, 750, 250, 750]);
+  assert.deepEqual(audit.map(entry => [entry.decision, entry.attempts, entry.retriesStoppedByBudget]), [
+    ['FETCH_FAILED', 3, undefined],
+    ['FETCH_FAILED', 3, undefined],
+    ['FETCH_FAILED', 1, true],
+    ['SKIPPED_READING_BUDGET', undefined, undefined],
+    ['SKIPPED_READING_BUDGET', undefined, undefined]
+  ]);
+  const summary = step9f1dSummary(diagnostics);
+  assert.deepEqual([summary.articleFetchAttemptCount, summary.downloadAttemptCount, summary.readingBudgetStopped],
+    [3, 7, true]);
 });
