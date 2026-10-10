@@ -178,11 +178,8 @@ test('diagnoses bounded Yahoo retrieval, size, JSON-LD and timestamp failures wi
     {
       expectedResult: 'INVALID_METADATA', expectedDiagnostic: 'INVALID_DATE_PUBLISHED',
       fetchImpl: async () => response(html(article({datePublished: 'invalid'})))
-    },
-    {
-      expectedResult: 'INVALID_METADATA', expectedDiagnostic: 'INVALID_DATE_MODIFIED_FORMAT',
-      fetchImpl: async () => response(html(article({dateModified: 'invalid'})))
     }
+    // Step 9F.1g: an unreadable update time is no longer a failure.
   ];
   for (const item of cases) {
     const diagnostics = [];
@@ -240,18 +237,8 @@ test('subtypes generic metadata failures without changing acquisition results or
         article({publisher: {name: 'Yahoo Finance'}}),
         article({publisher: {name: 'Other Private Publisher'}})
       ]
-    },
-    {
-      expectedDiagnostic: 'DATE_MODIFIED_CONFLICT',
-      articleValue: [
-        article(),
-        article({dateModified: '2026-09-09T17:01:00-04:00'})
-      ]
-    },
-    {
-      expectedDiagnostic: 'DATE_MODIFIED_MISMATCH',
-      articleValue: article({dateModified: '2026-09-09T16:59:00-04:00'})
     }
+    // Step 9F.1g: update-time conflicts and mismatches are no longer failures.
   ];
   for (const item of cases) {
     const diagnostics = [];
@@ -349,8 +336,8 @@ test('requires exact frozen discovery and validation objects before fetch', asyn
     {...input(), validation: frozenValidation({headline: ' Stock market today'})},
     {...input(), validation: frozenValidation({url: canonicalUrl.replace('/markets/', '/news/')})},
     {...input(), validation: frozenValidation({targetSessionDate: '2026-09-08'})},
-    {...input(), validation: frozenValidation({datePublished: '2026-09-10T20:30:00.000Z'})},
-    {...input(), validation: frozenValidation({dateModified: '2026-09-09T20:29:59.000Z'})}
+    {...input(), validation: frozenValidation({datePublished: '2026-09-10T20:30:00.000Z'})}
+    // Step 9F.1g: a validation update time before publication no longer refuses input.
   ];
   for (const value of cases) {
     assert.deepEqual(await acquire(value), {
@@ -363,7 +350,8 @@ test('requires exact frozen discovery and validation objects before fetch', asyn
   assert.equal(calls, 0);
 });
 
-test('rejects invalid Yahoo URL ownership and recap scope before fetch', async () => {
+// Step 9F.1g: the host is still checked; any finance.yahoo.com path is in scope.
+test('rejects invalid Yahoo URL ownership before fetch', async () => {
   let calls = 0;
   const acquire = service(async () => { calls++; }).acquireArticleContent;
   const invalidUrls = [
@@ -371,8 +359,7 @@ test('rejects invalid Yahoo URL ownership and recap scope before fetch', async (
     'https://evilfinance.yahoo.com/markets/live/stock-market-today-example.html',
     'https://finance.yahoo.com.evil.test/markets/live/stock-market-today-example.html',
     'https://user@finance.yahoo.com/markets/live/stock-market-today-example.html',
-    'https://finance.yahoo.com:444/markets/live/stock-market-today-example.html',
-    'https://finance.yahoo.com/news/unrelated.html'
+    'https://finance.yahoo.com:444/markets/live/stock-market-today-example.html'
   ];
   for (const url of invalidUrls) {
     const result = await acquire({
@@ -438,7 +425,7 @@ test('reconciles Sep 10-style publisher and dateModified from a compatible bodyl
   assert.doesNotMatch(result.articleContent.articleText, /not part of the root/);
 });
 
-test('allows identical compatible-root metadata but rejects publisher and dateModified conflicts', async () => {
+test('allows identical compatible-root metadata, rejects publisher conflicts, records no update time on update conflicts', async () => {
   const matching = await service(async () => response(html([
     article({articleBody: undefined}),
     article({'@type': 'LiveBlogPosting', articleBody: 'Selected root body.'})
@@ -464,7 +451,9 @@ test('allows identical compatible-root metadata but rejects publisher and dateMo
       articleBody: 'Selected root body.'
     })
   ]))).acquireArticleContent(input());
-  assert.equal(modifiedConflict.type, 'INVALID_METADATA');
+  // Step 9F.1g: the update time never decides acceptance; conflicting values give none.
+  assert.equal(modifiedConflict.type, 'SUCCESS');
+  assert.equal(modifiedConflict.articleContent.updatedAt, null);
 });
 
 test('inherits metadata only from identity-compatible roots', async () => {
@@ -770,17 +759,23 @@ test('uses JSON-LD articleBody only and rejects missing or blank bodies', async 
   }
 });
 
-test('requires publication identity and valid non-regressing optional modification timestamps', async () => {
-  const cases = [
+// Step 9F.1g: publication identity still decides; the update time is only recorded.
+test('requires publication identity; the update time is recorded, never decisive', async () => {
+  for (const value of [
     article({datePublished: '2026-09-09T16:31:00-04:00'}),
-    article({datePublished: 'not-a-date'}),
-    article({dateModified: '2026-09-09T16:59:00-04:00'}),
-    article({dateModified: 'not-a-date'}),
-    article({dateModified: undefined})
-  ];
-  for (const value of cases) {
+    article({datePublished: 'not-a-date'})
+  ]) {
     const result = await service(async () => response(html(value))).acquireArticleContent(input());
     assert.equal(result.type, 'INVALID_METADATA');
+  }
+  for (const [value, updatedAt] of [
+    [article({dateModified: '2026-09-09T16:59:00-04:00'}), '2026-09-09T20:59:00.000Z'],
+    [article({dateModified: 'not-a-date'}), null],
+    [article({dateModified: undefined}), null]
+  ]) {
+    const result = await service(async () => response(html(value))).acquireArticleContent(input());
+    assert.equal(result.type, 'SUCCESS');
+    assert.equal(result.articleContent.updatedAt, updatedAt);
   }
   const absent = article();
   delete absent.dateModified;
@@ -790,7 +785,8 @@ test('requires publication identity and valid non-regressing optional modificati
   assert.equal(accepted.articleContent.updatedAt, null);
 });
 
-test('treats validated dateModified as a nullable non-regressing lower bound', async () => {
+// Step 9F.1g: the checked page's update time is no longer a lower bound.
+test('records the article update time whatever the checked page reported', async () => {
   const cases = [
     {
       name: 'equal',
@@ -810,7 +806,8 @@ test('treats validated dateModified as a nullable non-regressing lower bound', a
       name: 'earlier',
       validationDateModified: '2026-09-09T21:00:00.000Z',
       acquisitionDateModified: '2026-09-09T16:59:00-04:00',
-      expectedType: 'INVALID_METADATA'
+      expectedType: 'SUCCESS',
+      expectedUpdatedAt: '2026-09-09T20:59:00.000Z'
     },
     {
       name: 'null to value',
@@ -837,10 +834,11 @@ test('treats validated dateModified as a nullable non-regressing lower bound', a
   delete missingModified.dateModified;
   const removed = await service(async () => response(html(missingModified)))
     .acquireArticleContent(input());
-  assert.equal(removed.type, 'INVALID_METADATA');
+  assert.equal(removed.type, 'SUCCESS');
+  assert.equal(removed.articleContent.updatedAt, null);
 });
 
-test('ignores reversed acquisition dateModified only when validation had no update', async () => {
+test('ignores a reversed article update time whatever the checked page reported', async () => {
   const diagnostics = [];
   const result = await service(async () => response(html(article({
     dateModified: '2026-09-09T16:29:59-04:00'
@@ -862,8 +860,9 @@ test('ignores reversed acquisition dateModified only when validation had no upda
     dateModified: '2026-09-09T16:29:59-04:00'
   }))), {onDiagnostics(value) { diagnostics.push(value); }})
     .acquireArticleContent(input());
-  assert.equal(withValidatedUpdate.type, 'INVALID_METADATA');
-  assert.equal(diagnostics[1].failureType, 'DATE_MODIFIED_BEFORE_PUBLISHED');
+  assert.equal(withValidatedUpdate.type, 'SUCCESS');
+  assert.equal(withValidatedUpdate.articleContent.updatedAt, null);
+  assert.equal(diagnostics[1].outcome, 'SUCCESS');
 });
 
 test('keeps the first article-text bytes and enforces the normalized-result bound atomically', async () => {

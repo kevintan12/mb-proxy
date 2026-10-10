@@ -173,19 +173,25 @@ test('rejects invalid source, publisher, URL, title, text, timestamps and target
   }
 });
 
-test('requires an explicit canonical horizon containing publication and update times', () => {
+// Step 9F.1g: the horizon must contain the publish time; the update time does not decide.
+test('requires an explicit canonical horizon containing the publication time', () => {
   const article = articleContent({updatedAt: '2026-09-09T21:00:00.000Z'});
   const cases = [
     undefined,
     {...horizon(), classification: 'UNKNOWN'},
     {...horizon(), startsAtExclusive: 'invalid'},
-    {...horizon(), endsAtInclusive: '2026-09-09T20:02:00.000Z'},
-    {...horizon(), endsAtInclusive: '2026-09-09T20:30:00.000Z'}
+    {...horizon(), endsAtInclusive: '2026-09-09T20:02:00.000Z'}
   ];
   for (const value of cases) {
     const result = service().constructEvidence({articleContent: article, horizon: value});
     assert.equal(result.type, 'INPUT_FAILURE');
   }
+  const updatedAfterHorizon = service().constructEvidence({
+    articleContent: article,
+    horizon: {...horizon(), endsAtInclusive: '2026-09-09T20:30:00.000Z'}
+  });
+  assert.equal(updatedAfterHorizon.type, 'SUCCESS');
+  assert.equal(updatedAfterHorizon.constructedEvidence.updatedAt, '2026-09-09T21:00:00.000Z');
 });
 
 test('enforces UTF-8 headline, publisher, evidence-text and result bounds atomically', () => {

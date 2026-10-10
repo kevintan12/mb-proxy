@@ -2948,7 +2948,7 @@ test('real Yahoo validation, article acquisition and evidence construction reach
     '@type': 'LiveBlogPosting', headline: title, datePublished: publishedAt,
     dateModified: updatedAt, url,
     publisher: {'@type': 'Organization', name: 'Yahoo Finance'},
-    articleBody: 'The US stock market finished the September 4 session higher.'
+    articleBody: 'The US stock market finished the September 4 session higher. The S&P 500 rose 0.4% and the Nasdaq gained 0.6%.'
   })}</script>`;
   const requests = [];
   const fetchImpl = async requestedUrl => {
@@ -3005,7 +3005,7 @@ test('later second-fetch Yahoo dateModified becomes authoritative through eviden
     '@type': 'LiveBlogPosting', headline: title, datePublished: publishedAt,
     dateModified: updatedAt, url,
     publisher: {'@type': 'Organization', name: 'Yahoo Finance'},
-    articleBody: 'The US stock market finished the September 4 session higher.'
+    articleBody: 'The US stock market finished the September 4 session higher. The S&P 500 rose 0.4% and the Nasdaq gained 0.6%.'
   })}</script>`;
   let pageFetches = 0;
   let constructedArticle = null;
@@ -3057,19 +3057,22 @@ test('later second-fetch Yahoo dateModified becomes authoritative through eviden
   assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), false);
 });
 
-test('advanced Yahoo updatedAt must remain inside the same canonical evidence horizon', async () => {
+// Step 9F.1g: the publish time alone decides the horizon; a later update does not move or reject the recap.
+test('advanced Yahoo updatedAt does not move the recap out of its publish-time horizon', async () => {
   const cases = [
     {
       name: 'completed publication with post-close update',
       publishedAt: '2026-09-04T19:45:00.000Z',
       validatedUpdatedAt: '2026-09-04T19:50:00.000Z',
-      acquiredUpdatedAt: '2026-09-04T20:20:00.000Z'
+      acquiredUpdatedAt: '2026-09-04T20:20:00.000Z',
+      horizon: 'COMPLETED_SESSION'
     },
     {
       name: 'update after final generatedAt',
       publishedAt: '2026-09-04T20:03:54.000Z',
       validatedUpdatedAt: '2026-09-04T20:10:00.000Z',
-      acquiredUpdatedAt: '2026-09-06T10:00:00.001Z'
+      acquiredUpdatedAt: '2026-09-06T10:00:00.001Z',
+      horizon: 'SUBSEQUENT_DEVELOPMENT'
     }
   ];
   for (const item of cases) {
@@ -3089,23 +3092,29 @@ test('advanced Yahoo updatedAt must remain inside the same canonical evidence ho
           return {ok: true, type: 'SUCCESS', articleContent: article};
         }
       },
+      yahooRecapEvidenceConstruction: {
+        constructEvidence(value) {
+          horizons.push(value.horizon.classification);
+          return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+        }
+      },
       onDiagnostics(value) { diagnostics.push(value); }
     });
+    const horizons = [];
     const output = await service.assemble(request());
     const context = output.marketPackages[0].evidenceContext;
     assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.yahoo-finance'
-      && entry.item.evidenceCategory === 'news'), false, item.name);
-    assert.deepEqual(context.sessionAssociations, [], item.name);
-    assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), true,
+      && entry.item.evidenceCategory === 'news'), true, item.name);
+    assert.deepEqual(horizons, [item.horizon], item.name);
+    assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), false,
       item.name);
-    assert.deepEqual(diagnostics.find(value => value.stage === 'yahooRecapIntegration'), {
-      stage: 'yahooRecapIntegration', outcome: 'FAILURE', researchType: 'VALIDATED',
-      failureType: 'HORIZON_MISMATCH', candidateRank: null
-    }, item.name);
+    assert.equal(diagnostics.some(value => value.stage === 'yahooRecapIntegration'), false,
+      item.name);
   }
 });
 
-test('Yahoo orchestration accepts an added update timestamp but rejects a removed one', async () => {
+// Step 9F.1g: the update time is not compared, so a removed one is accepted too.
+test('Yahoo orchestration accepts an added or a removed update timestamp', async () => {
   const publishedAt = '2026-09-04T20:03:54.000Z';
   const acquiredUpdatedAt = '2026-09-04T20:20:00.000Z';
   const addedArticle = yahooRecapArticle({publishedAt, updatedAt: acquiredUpdatedAt});
@@ -3144,20 +3153,25 @@ test('Yahoo orchestration accepts an added update timestamp but rejects a remove
         })};
       }
     },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) {
+        return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+      }
+    },
     onDiagnostics(value) { diagnostics.push(value); }
   });
   const removedOutput = await removed.service.assemble(request());
   assert.equal(removedOutput.marketPackages[0].evidenceContext.evidence.some(entry =>
-    entry.item.sourceId === 'us.yahoo-finance' && entry.item.evidenceCategory === 'news'), false);
-  assert.deepEqual(diagnostics.find(value => value.stage === 'yahooRecapIntegration'), {
-    stage: 'yahooRecapIntegration', outcome: 'FAILURE', researchType: 'VALIDATED',
-    failureType: 'ARTICLE_CONTRACT_FAILURE', candidateRank: null
-  });
+    entry.item.sourceId === 'us.yahoo-finance' && entry.item.evidenceCategory === 'news'), true);
+  assert.equal(diagnostics.some(value => value.stage === 'yahooRecapIntegration'), false);
 });
 
+// Step 9F.1g: a 503 is retried by the shared helper (3 attempts, fake pauses).
 test('real Yahoo article retrieval failure remains optional after validated research', async () => {
   let fetches = 0;
+  const pauses = [];
   const {service} = harness({
+    sleep: async ms => { pauses.push(ms); },
     yahooRecapResearch: {
       async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }
     },
@@ -3171,13 +3185,105 @@ test('real Yahoo article retrieval failure remains optional after validated rese
   });
   const output = await service.assemble(request());
   const context = output.marketPackages[0].evidenceContext;
-  assert.equal(fetches, 1);
+  assert.equal(fetches, 3);
+  assert.deepEqual(pauses, [250, 750]);
   assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.yahoo-finance'
     && entry.item.evidenceCategory === 'news'), false);
   assert.deepEqual(context.furtherReadings, []);
   assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), true);
   assert.equal(context.unresolvedGaps.includes(CNBC_RECAP_UNAVAILABLE_GAP), true);
   assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+// Step 9F.1g: a recap whose address is not on the old pattern is accepted by its
+// content and reaches Further Readings through the real services.
+function step9f1gRecapPage(url) {
+  return `<link rel="canonical" href="${url}"><script type="application/ld+json">${JSON.stringify({
+    '@type': 'NewsArticle', headline: 'Stocks close higher on September 4',
+    datePublished: '2026-09-04T20:03:54Z', dateModified: '2026-09-04T20:20:00Z', url,
+    publisher: {'@type': 'Organization', name: 'Yahoo Finance'},
+    articleBody: 'US stocks rose. The Dow added 0.5%, the S&P 500 gained 0.7% and the Nasdaq climbed 1.2%.'
+  })}</script>`;
+}
+
+function step9f1gRecapHarness(url, pageStatuses, extra = {}) {
+  const pageRequests = [];
+  const statuses = pageStatuses.slice();
+  const fetchImpl = async requestedUrl => {
+    if (requestedUrl === 'https://api.anthropic.com/v1/messages') {
+      return {
+        ok: true, status: 200, headers: {get: () => null},
+        async json() {
+          return {content: [{type: 'web_search_tool_result', content: [{
+            type: 'web_search_result', title: 'Stocks close higher', url
+          }]}]};
+        }
+      };
+    }
+    pageRequests.push(requestedUrl);
+    const status = statuses.length > 0 ? statuses.shift() : 200;
+    return {
+      ok: status === 200, status, url,
+      headers: {get: name => name === 'content-type' ? 'text/html; charset=utf-8' : null},
+      async text() { return status === 200 ? step9f1gRecapPage(url) : ''; }
+    };
+  };
+  const {service} = harness({
+    yahooRecapResearch: createYahooRecapResearchRuntime({apiKey: 'test-key', fetchImpl}),
+    yahooRecapArticleContentAcquisition: createYahooRecapArticleContentAcquisitionService({fetchImpl}),
+    yahooRecapEvidenceConstruction: createYahooRecapEvidenceConstructionService({
+      evidenceConstructionBounds: {
+        maxHeadlineBytes: 512, maxPublisherNameBytes: 256,
+        maxEvidenceTextBytes: 8192, maxResultBytes: 12288
+      }
+    }),
+    ...extra
+  });
+  return {service, pageRequests};
+}
+
+test('Step 9F.1g: a recap at a new-style address is accepted by content and reaches Further Readings', async () => {
+  const url = 'https://finance.yahoo.com/markets/stocks/articles/stocks-close-higher-september-4.html';
+  const {service, pageRequests} = step9f1gRecapHarness(url, []);
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.deepEqual(pageRequests, [url, url]);
+  assert.equal(context.evidence[1].item.canonicalUrl, url);
+  assert.equal(context.evidence[1].item.publishedAt, '2026-09-04T20:03:54.000Z');
+  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04'}]);
+  assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), false);
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('Step 9F.1g: the recap article download uses the shared retries', async () => {
+  const url = 'https://finance.yahoo.com/markets/live/stock-market-today-september-4.html';
+  // The first page request is the page check; the rest are the article download.
+  const rows = [
+    {name: 'article fails once then succeeds', statuses: [200, 503], articleAttempts: 2,
+      pauses: [250], admitted: true},
+    {name: 'article fails twice then succeeds', statuses: [200, 503, 503], articleAttempts: 3,
+      pauses: [250, 750], admitted: true},
+    {name: 'article not found: one attempt only', statuses: [200, 404], articleAttempts: 1,
+      pauses: [], admitted: false}
+  ];
+  for (const row of rows) {
+    const pauses = [];
+    const diagnostics = [];
+    const {service, pageRequests} = step9f1gRecapHarness(url, row.statuses, {
+      sleep: async ms => { pauses.push(ms); },
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const output = await service.assemble(request());
+    const context = output.marketPackages[0].evidenceContext;
+    assert.equal(pageRequests.length, 1 + row.articleAttempts, row.name);
+    assert.deepEqual(pauses, row.pauses, row.name);
+    assert.deepEqual(diagnostics.find(value => value.stage === 'yahooRecapArticleDownload'), {
+      stage: 'yahooRecapArticleDownload', attempts: row.articleAttempts, retriesStoppedByBudget: false
+    }, row.name);
+    assert.equal(context.evidence.some(entry => entry.item.canonicalUrl === url), row.admitted, row.name);
+    assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), !row.admitted,
+      row.name);
+  }
 });
 
 test('places a recap published inside the completed-session boundary in supporting evidence', async () => {
