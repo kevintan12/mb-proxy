@@ -166,11 +166,13 @@ test('enforces raw response, extracted article and normalized result bounds', as
   }).acquireArticleContent({url: candidateUrl, headline});
   assert.equal(raw.type, 'RESPONSE_TOO_LARGE');
 
+  // Step 9F.1f: a longer article is kept with its first maxArticleTextBytes.
   const text = await createYahooCurrentNewsArticleContentAcquisitionService({
     maxArticleTextBytes: 10,
     fetchImpl: async () => response(page({body: '<p>This body is longer than ten bytes.</p>'}))
   }).acquireArticleContent({url: candidateUrl, headline});
-  assert.equal(text.type, 'ARTICLE_TEXT_TOO_LARGE');
+  assert.equal(text.type, 'SUCCESS');
+  assert.equal(text.articleContent.articleText, 'This body');
 
   const normalized = await createYahooCurrentNewsArticleContentAcquisitionService({
     maxResultBytes: 20,

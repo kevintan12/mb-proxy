@@ -76,20 +76,21 @@ test('runtime composition includes bounded CNBC and Yahoo recap research but not
 });
 
 test('runtime owns the exact deeply immutable Yahoo recap package bounds', () => {
+  // Step 9F.1f: 16 KB text (the article size setting's default) and a 20 KB result.
   assert.deepEqual(YAHOO_RECAP_PACKAGE_PRODUCTION_BOUNDS, {
     articleContentBounds: {
       timeoutMs: 4000,
       maxResponseBytes: 1572864,
       maxHeadlineBytes: 512,
       maxPublisherNameBytes: 256,
-      maxArticleTextBytes: 8192,
-      maxResultBytes: 12288
+      maxArticleTextBytes: 16384,
+      maxResultBytes: 20480
     },
     evidenceConstructionBounds: {
       maxHeadlineBytes: 512,
       maxPublisherNameBytes: 256,
-      maxEvidenceTextBytes: 8192,
-      maxResultBytes: 12288
+      maxEvidenceTextBytes: 16384,
+      maxResultBytes: 20480
     }
   });
   assert.equal(Object.isFrozen(YAHOO_RECAP_PACKAGE_PRODUCTION_BOUNDS), true);

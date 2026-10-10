@@ -1228,6 +1228,129 @@ test('active Yahoo classifier preflight counts previously admitted current artic
   assert.equal(acquisition.acquiredCurrentSessionCount, 1);
 });
 
+// Step 9F.1f: six 16 KB articles. The classifier reads only the first 8 KB of each,
+// so all six fit its 64 KB request; the package keeps the full 16 KB for the writer.
+function step9F1fArticles(count = 6) {
+  return Array.from({length: count}, (_, index) => {
+    const lead = `Story ${index + 1}: stocks moved as investors weighed rates. `;
+    let text = lead;
+    while (Buffer.byteLength(text, 'utf8') < 16 * 1024) text += `More detail ${index + 1}. `;
+    return {
+      title: `Sixteen kilobyte Yahoo story ${index + 1}`,
+      canonicalUrl: `https://finance.yahoo.com/news/sixteen-kilobyte-yahoo-story-${index + 1}.html`,
+      publishedAt: `2026-09-08T14:${String(10 + index).padStart(2, '0')}:00.000Z`,
+      summary: text.slice(0, 16 * 1024).trim()
+    };
+  });
+}
+
+function step9F1fHarness(articles, federalCollection = null) {
+  const diagnostics = [];
+  const harnessed = harness({
+    createTelemetryAcquisition: () => ({async acquireSnapshot({symbol}) {
+      return snapshotWithState(symbol, 'REGULAR', {hasOverlay: false});
+    }}),
+    ...(federalCollection ? {federalReserveEvidenceAcquisition: {
+      async acquireEvidence() { return federalCollection; }
+    }} : {}),
+    yahooLatestNewsDiscovery: {async discoverLatestNews() {
+      return {ok: true, type: 'SUCCESS', candidates: articles.map(article => ({
+        headline: article.title, url: article.canonicalUrl, uuid: null, publisher: 'Yahoo Finance'
+      }))};
+    }},
+    yahooCurrentNewsArticleContentAcquisition: {async acquireArticleContent(candidate) {
+      const article = articles.find(entry => entry.canonicalUrl === candidate.url);
+      return {ok: true, type: 'SUCCESS', articleContent: {
+        sourceId: 'us.yahoo-finance', canonicalUrl: article.canonicalUrl,
+        headline: article.title, publisher: 'Yahoo Finance',
+        publishedAt: article.publishedAt, updatedAt: null, articleText: article.summary
+      }};
+    }},
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  return {...harnessed, diagnostics};
+}
+
+test('Step 9F.1f: six 16 KB articles all reach the classifier, which reads only the first 8 KB of each', async () => {
+  const articles = step9F1fArticles();
+  const {service, calls, diagnostics} = step9F1fHarness(articles);
+  const output = await service.assemble(request());
+  const acquisition = diagnostics.find(entry => entry.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.acquiredCurrentSessionCount, 6);
+  assert.equal(acquisition.classifierPreflightRejectedCount, 0);
+  const handoff = diagnostics.find(entry => entry.stage === 'activeYahooEvidenceHandoff');
+  assert.equal(handoff.admittedCurrentSessionCount, 6);
+  const classifierInput = calls.evidenceRoleClassification[0];
+  const current = classifierInput.evidence.filter(entry => entry.horizon === 'CURRENT_SESSION');
+  assert.equal(current.length, 6);
+  // The full texts would not fit the classifier; the cut texts do.
+  assert.ok(current.reduce((sum, entry) => sum + Buffer.byteLength(entry.item.summary, 'utf8'), 0)
+    > CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  const request8 = buildClaudeEvidenceRoleClassificationRequest(classifierInput);
+  assert.ok(Buffer.byteLength(JSON.stringify(request8), 'utf8')
+    <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  const sent = JSON.parse(request8.messages[0].content).evidence
+    .filter(entry => entry.horizon === 'CURRENT_SESSION');
+  sent.forEach((entry, index) => {
+    const full = articles[index].summary;
+    assert.equal(Buffer.byteLength(entry.item.summary, 'utf8') <= 8 * 1024, true);
+    assert.equal(full.startsWith(entry.item.summary), true);
+    assert.ok(Buffer.byteLength(entry.item.summary, 'utf8') > 8 * 1024 - 32);
+  });
+  // The package (what the writer reads) keeps every full 16 KB text.
+  for (const article of articles) {
+    const entry = output.marketPackages[0].evidenceContext.evidence
+      .find(item => item.item.canonicalUrl === article.canonicalUrl);
+    assert.equal(entry.item.summary, article.summary);
+  }
+});
+
+test('Step 9F.1f: an article that would push the classifier over its cap is flagged, not silently dropped', async () => {
+  const articles = step9F1fArticles();
+  const benchmark = snapshotWithState('^RUT', 'REGULAR', {hasOverlay: false});
+  function classifierBytes(federalSummaryBytes, count) {
+    const base = [yahooEvidence('^RUT').items[0], ...manyFedEvidence(20, federalSummaryBytes).items];
+    const current = articles.slice(0, count).map(article => createEvidenceItem({
+      sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+      title: article.title, summary: article.summary, canonicalUrl: article.canonicalUrl,
+      publishedAt: article.publishedAt, symbols: [], publisher: 'Yahoo Finance'
+    }));
+    const items = base.concat(current);
+    const collection = createEvidenceCollection({market: 'US', items});
+    return Buffer.byteLength(JSON.stringify(buildClaudeEvidenceRoleClassificationRequest({
+      marketContext: {
+        market: 'US', exchangeTimezone: 'America/New_York', marketState: 'REGULAR',
+        primaryCompletedSessionDate: '2026-09-04'
+      },
+      benchmarkTelemetry: [{reference: 't1', snapshot: benchmark}],
+      evidence: collection.items.map((item, index) => ({
+        reference: `e${index + 1}`,
+        horizon: index >= base.length ? 'CURRENT_SESSION' : 'COMPLETED_SESSION',
+        requiresBroadMarketSubjects: index >= base.length,
+        item
+      }))
+    })), 'utf8');
+  }
+  let low = 0;
+  let high = 4000;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (classifierBytes(middle, 5) <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) low = middle;
+    else high = middle - 1;
+  }
+  assert.ok(classifierBytes(low, 6) > CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  const {service, diagnostics} = step9F1fHarness(articles, manyFedEvidence(20, low));
+  await service.assemble(request());
+  const acquisition = diagnostics.find(entry => entry.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.acquiredCurrentSessionCount, 5);
+  assert.equal(acquisition.classifierPreflightRejectedCount, 1);
+  const audit = diagnostics.filter(entry => entry.stage === 'activeYahooCandidateAudit')
+    .flatMap(entry => entry.candidates);
+  assert.deepEqual(audit.map(entry => entry.decision),
+    ['ADMITTED', 'ADMITTED', 'ADMITTED', 'ADMITTED', 'ADMITTED', 'REJECTED_CLASSIFIER_PREFLIGHT']);
+});
+
 test('active Yahoo stops at the twelve-attempt ceiling even when the next candidate would be usable', async () => {
   const diagnostics = [];
   const candidates = Array.from({length: ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS + 2}, (_, index) => ({

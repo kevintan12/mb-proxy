@@ -627,10 +627,13 @@ test('keeps root-only behavior and applies existing article/result bounds after 
       articleBody: 'CPI, month-on-month (+0.4% expected, +0.1% previously).'
     }]
   });
+  // Step 9F.1f: the body is cut to make room and the CPI excerpt stays whole.
   const textOverflow = await service(async () => response(html(enriched)))
     .acquireArticleContent(input());
-  assert.equal(textOverflow.type, 'ARTICLE_TEXT_TOO_LARGE');
-  assert.equal(textOverflow.articleContent, null);
+  const excerpt = ' CPI, month-on-month (+0.4% expected, +0.1% previously).';
+  assert.equal(textOverflow.type, 'SUCCESS');
+  assert.equal(textOverflow.articleContent.articleText,
+    `${'x'.repeat(bounds.maxArticleTextBytes - Buffer.byteLength(excerpt))}${excerpt}`);
 
   const resultOverflow = await service(async () => response(html(article({
     '@type': 'LiveBlogPosting',
@@ -863,12 +866,13 @@ test('ignores reversed acquisition dateModified only when validation had no upda
   assert.equal(diagnostics[1].failureType, 'DATE_MODIFIED_BEFORE_PUBLISHED');
 });
 
-test('enforces article-text and normalized-result bounds atomically without truncation', async () => {
+test('keeps the first article-text bytes and enforces the normalized-result bound atomically', async () => {
+  // Step 9F.1f: a longer recap is kept with its first maxArticleTextBytes, not rejected.
   const articleText = 'x'.repeat(8193);
   const tooMuchText = await service(async () => response(html(article({articleBody: articleText}))))
     .acquireArticleContent(input());
-  assert.equal(tooMuchText.type, 'ARTICLE_TEXT_TOO_LARGE');
-  assert.equal(tooMuchText.articleContent, null);
+  assert.equal(tooMuchText.type, 'SUCCESS');
+  assert.equal(tooMuchText.articleContent.articleText, 'x'.repeat(8192));
 
   const tooMuchResult = await service(async () => response())
     .acquireArticleContent({...input(), bounds: {...bounds, maxResultBytes: 10}});
