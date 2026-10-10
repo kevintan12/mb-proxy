@@ -55,15 +55,26 @@ for (const row of ROWS) {
   });
 }
 
-test('Step 9F.1a reading window: environment variables override defaults, bad ones are made safe, attempts stay 3', () => {
+test('Step 9F.1a reading window: environment variables override defaults, bad ones are made safe', () => {
   assert.deepEqual({...readingSettings({env: {}})},
     {readingExtensionHours: 24, articleKb: 16, downloadAttempts: 3, readingBudgetSeconds: 30});
-  // Step 9F.1d: the reading budget is fixed in code; no environment override.
-  assert.equal(readingSettings({env: {READING_BUDGET_SECONDS: '300'}}).readingBudgetSeconds, 30);
   assert.equal(readingSettings({env: {READING_EXTENSION_HOURS: '48'}}).readingExtensionHours, 48);
   assert.equal(readingSettings({env: {READING_EXTENSION_HOURS: '9999'}}).readingExtensionHours, 72);
   assert.equal(readingSettings({env: {READING_EXTENSION_HOURS: 'silly'}}).readingExtensionHours, 24);
   assert.equal(readingSettings({env: {ARTICLE_KB: ''}}).articleKb, 16);
-  assert.equal(readingSettings({env: {READING_EXTENSION_HOURS: '5', DOWNLOAD_ATTEMPTS: '9'}}).downloadAttempts, 3);
   assert.equal(DOWNLOAD_ATTEMPTS, 3);
+});
+
+// Step 9F.2a: Kevin's 10 Oct 2026 rule makes every budget, window and retry
+// count an Admin setting, superseding Step 9F.1d/9F.1e's "Fixed, no
+// environment override" rule for the reading budget and download attempts.
+test('Step 9F.2a reading window: the reading budget and download attempts are now honoured and clamped', () => {
+  assert.equal(readingSettings({env: {READING_BUDGET_SECONDS: '45'}}).readingBudgetSeconds, 45);
+  assert.equal(readingSettings({env: {READING_BUDGET_SECONDS: '5'}}).readingBudgetSeconds, 10);
+  assert.equal(readingSettings({env: {READING_BUDGET_SECONDS: '300'}}).readingBudgetSeconds, 60);
+  assert.equal(readingSettings({env: {READING_BUDGET_SECONDS: 'silly'}}).readingBudgetSeconds, 30);
+  assert.equal(readingSettings({env: {DOWNLOAD_ATTEMPTS: '4'}}).downloadAttempts, 4);
+  assert.equal(readingSettings({env: {DOWNLOAD_ATTEMPTS: '0'}}).downloadAttempts, 1);
+  assert.equal(readingSettings({env: {DOWNLOAD_ATTEMPTS: '9'}}).downloadAttempts, 5);
+  assert.equal(readingSettings({env: {DOWNLOAD_ATTEMPTS: 'silly'}}).downloadAttempts, 3);
 });

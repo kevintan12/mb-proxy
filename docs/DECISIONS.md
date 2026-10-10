@@ -899,3 +899,81 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Could not share:** nothing new — the exclusion list lives in the same shared module as every other word list, matched at the same single site.
 - **Must not change:** everything listed under Step 9F.2c.1's "Must not change", plus: the exclusion check must stay scoped to the `AMD` term only, and must only suppress that one term's match, never drop the whole headline or suppress any other macro term in the same headline.
 - **Supersedes:** nothing — this narrows the Step 9F.2c.1 `AMD` addition's false-positive surface; the addition itself stands.
+
+## Step 9F.2a — One settings table with Admin tags (repo: mb-proxy)
+
+- **Date:** 2026-10-11 · **Branch:** step-9f2-scoring-budget · **Status:** IMPLEMENTED, tests passing; not yet committed.
+- **Kevin's rule:** every number that is a limit, slot count, point value, time window, retry count or budget lives in one settings table with a default, a safe range and an Admin/Fixed tag, so Step 9G can move the table into Neon and Step 9H can add an Admin page without rebuilding anything. Values already live today keep today's value and today's behaviour; new settings for the Step 9F.2 ranking/budget redesign are registered but not wired into the pipeline.
+- **Clarified during planning (10 Oct 2026 decision):** the Yahoo reading budget and the recap budget become Admin-tagged (env-overridable, 10-60 s, default 30 s) instead of Fixed, and download attempts per Yahoo article download also becomes Admin (1-5, default 3). This supersedes the part of Step 9F.1d/9F.1e's "must not change: the 30 s budget" that meant no environment override; the value itself (30 s / 3 attempts) is unchanged by default. The retry pause lengths and the classifier 8 KB cut stay Fixed. The Yahoo recap page's own 4 s timeout and 1.5 MB response cap (Step 9F.1g's separate protection) are moved into the table but kept Fixed, so that protection stands untouched.
+- **Decision:**
+  1. One new shared module with no per-market or per-state copies, `lib/settings-registry.js`: `SETTINGS_REGISTRY` (every setting's default, safe range, Admin/Fixed tag, env var, description and whether it is wired), `clampSetting` (moved here from `lib/reading-window.js`, one implementation), `clampBooleanSetting` (on/off settings), and the one reader, `settingValue(name, {env})`: applies an environment-variable override for Admin settings only, clamps numeric ones to the safe range, and falls back to the default when the value is missing, not a number, or the setting is Fixed. The module depends on nothing else in the repo, so `lib/section-rules.js` and `lib/reading-window.js` can both read from it with no require cycle.
+  2. Existing values wired to read from the table, same default, same behaviour unless the new environment variable is actually set: `readingExtensionHours`/`articleKb` (`lib/section-rules.js` `READING_SETTINGS`, unchanged env vars `READING_EXTENSION_HOURS`/`ARTICLE_KB`); `yahooReadingBudgetSeconds`/`downloadAttempts` (`lib/reading-window.js`, now Admin, env vars `READING_BUDGET_SECONDS`/`DOWNLOAD_ATTEMPTS` -- the names the 9F.1d/9F.1e tests already referenced as ignored, now honoured); `recapReadingBudgetSeconds` (`lib/us-analysis-package-orchestration.js` recap retry options, now its own setting instead of reusing the Yahoo news budget call); `recapMaxCandidates` (`lib/yahoo-recap-acceptance.js` `YAHOO_RECAP_MAX_CANDIDATES`); `yahooMaxArticleAttempts`/`yahooMaxAdmittedArticles`/`yahooStaleLabelToleranceHours` (`lib/us-analysis-package-orchestration.js`); `pageTimeoutMs` (the `DEFAULT_TIMEOUT_MS = 4000` duplicated across `lib/federal-reserve-monetary-policy-evidence-acquisition.js`, `lib/yahoo-current-news-article-content-acquisition.js`, `lib/yahoo-latest-news-discovery.js` non-US path, `lib/yahoo-market-data-evidence-acquisition.js`, `lib/yahoo-most-active-acquisition.js`); `usListingTimeoutMs`/`usListingMaxResponseBytes`/`usListingMaxCandidates`/`nonUsListingMaxResponseBytes`/`nonUsListingMaxCandidates`/`mergedListingMaxCandidates` (`lib/yahoo-latest-news-discovery.js`); `mostActiveMaxResponseBytes`/`mostActiveMaxCandidates` (`lib/yahoo-most-active-acquisition.js`); `writerRequestLimitBytes`/`classifierRequestLimitBytes` (`lib/claude-analysis-invocation.js`/`lib/claude-evidence-role-classification.js`); `yahooRecapPageTimeoutMs`/`yahooRecapMaxResponseBytes` (`lib/analysis-package-runtime.js`, Fixed, per the protection above). `downloadWithRetries` (`lib/reading-window.js`) gained an optional `attempts` parameter (default still `DOWNLOAD_ATTEMPTS` = 3) so every untouched caller is unaffected; the Yahoo news reading (`lib/yahoo-news-reading.js`) and Yahoo recap (`lib/us-analysis-package-orchestration.js`) call sites now pass the live `downloadAttempts` value so an override actually takes effect end to end. The fixed 2-pause retry list (`DOWNLOAD_RETRY_PAUSES_MS`) reuses its last pause for any attempt past 3, since attempts is now Admin up to 5.
+  3. `lib/claude-news-materiality-selection.js`'s own 64 KB request cap is CNBC-related (feeds `lib/claude-bounded-cnbc-market-news-discovery.js`) and is left untouched, registered only (`cnbcMaterialityRequestLimitBytes`).
+  4. New, unwired settings registered for the Step 9F.2 ranking/budget redesign: planned wider budgets, slots, spillover, per-source switches, ranking points and recency bonuses/thresholds (full list in the register below). None of these is read by any pipeline code in this step. A pure cross-check function, `checkArticleBudgetFits({articleTextBudgetBytes, nonArticleOverheadBytes, writerRequestLimitBytes})`, returns whether the planned article budget would fit the planned writer limit once lowered to fit; not called from any pipeline code, unit-tested only.
+  5. The headline word lists (`lib/headline-lists.js`) and the CNBC bounds (`lib/cnbc-news-research-runtime.js`, `lib/cnbc-recap-research-runtime.js`) are registered as reference entries pointing at their real location rather than duplicated into the table (no second source of truth); neither file is edited. CNBC acquisition code and its shared timing functions (`deriveCnbcResearchHorizons`) are untouched by rule.
+- **Settings register:**
+
+  | Name | Default | Safe range | Tag | Wired | Where it lived before |
+  |---|---|---|---|---|---|
+  | readingExtensionHours | 24 h | 0-72 | Admin | Yes | lib/section-rules.js READING_SETTINGS |
+  | articleKb | 16 KB | 2-32 | Admin | Yes | lib/section-rules.js READING_SETTINGS |
+  | yahooReadingBudgetSeconds | 30 s | 10-60 | Admin | Yes | lib/section-rules.js READING_SETTINGS.readingBudgetSeconds (was Fixed) |
+  | recapReadingBudgetSeconds | 30 s | 10-60 | Admin | Yes | lib/us-analysis-package-orchestration.js (reused the Yahoo budget call) |
+  | downloadAttempts | 3 | 1-5 | Admin | Yes | lib/reading-window.js DOWNLOAD_ATTEMPTS (was Fixed) |
+  | downloadRetryPausesMs | [250, 750] ms | n/a | Fixed | Yes | lib/reading-window.js DOWNLOAD_RETRY_PAUSES_MS |
+  | classifierArticleBytes | 8 KB | n/a | Fixed | Yes | lib/reading-window.js CLASSIFIER_ARTICLE_BYTES |
+  | recapMaxCandidates | 3 | 1-5 | Admin | Yes | lib/yahoo-recap-acceptance.js YAHOO_RECAP_MAX_CANDIDATES |
+  | yahooMaxArticleAttempts | 12 | 6-20 | Admin | Yes | lib/us-analysis-package-orchestration.js ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS |
+  | yahooMaxAdmittedArticles | 6 | 0-10 | Admin | Yes | lib/us-analysis-package-orchestration.js ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES |
+  | yahooStaleLabelToleranceHours | 4 h | 0-12 | Admin | Yes | lib/us-analysis-package-orchestration.js ACTIVE_YAHOO_STALE_LABEL_TOLERANCE_MS |
+  | pageTimeoutMs | 4000 ms | 2000-8000 | Admin | Yes | DEFAULT_TIMEOUT_MS, duplicated across 5 Yahoo/Fed acquisition files |
+  | usListingTimeoutMs | 6000 ms | 2000-10000 | Admin | Yes | lib/yahoo-latest-news-discovery.js US_DEFAULT_TIMEOUT_MS |
+  | nonUsListingMaxResponseBytes | 1024 KB | 256-4096 KB | Admin | Yes | lib/yahoo-latest-news-discovery.js MAX_RESPONSE_BYTES |
+  | nonUsListingMaxCandidates | 30 | 5-100 | Admin | Yes | lib/yahoo-latest-news-discovery.js MAX_CANDIDATES |
+  | usListingMaxResponseBytes | 2048 KB | 256-8192 KB | Admin | Yes | lib/yahoo-latest-news-discovery.js US_MAX_RESPONSE_BYTES |
+  | usListingMaxCandidates | 60 | 10-200 | Admin | Yes | lib/yahoo-latest-news-discovery.js US_MAX_CANDIDATES |
+  | mergedListingMaxCandidates | 90 | 10-300 | Admin | Yes | lib/yahoo-latest-news-discovery.js MERGED_MAX_CANDIDATES |
+  | mostActiveMaxResponseBytes | 256 KB | 64-1024 KB | Admin | Yes | lib/yahoo-most-active-acquisition.js MAX_RESPONSE_BYTES |
+  | mostActiveMaxCandidates | 10 | 1-30 | Admin | Yes | lib/yahoo-most-active-acquisition.js MAX_CANDIDATES |
+  | writerRequestLimitBytes | 128 KB | 64-256 KB | Admin | Yes | lib/claude-analysis-invocation.js CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES |
+  | classifierRequestLimitBytes | 64 KB | 32-128 KB | Admin | Yes | lib/claude-evidence-role-classification.js ...PROVISIONAL_MAX_REQUEST_BYTES |
+  | yahooRecapPageTimeoutMs | 4000 ms | n/a | Fixed | Yes | lib/analysis-package-runtime.js yahooRecapPackageBounds.timeoutMs (protected, Step 9F.1g) |
+  | yahooRecapMaxResponseBytes | 1.5 MB | n/a | Fixed | Yes | lib/analysis-package-runtime.js yahooRecapPackageBounds.maxResponseBytes (protected, Step 9F.1g) |
+  | articleTextBudgetBytesPlanned | 150 KB | 32-200 KB | Admin | No | new |
+  | writerRequestLimitBytesPlanned | 500 KB | 192-600 KB | Admin | No | new |
+  | classifierRequestLimitBytesPlanned | 300 KB | 64-400 KB | Admin | No | new |
+  | nonArticleOverheadBytesPlanned | 100 KB | 32-200 KB | Admin | No | new (cross-check only) |
+  | yahooSlots | 7 | 0-10 | Admin | No | new |
+  | cnbcSlots | 3 | 0-6 | Admin | No | new |
+  | portfolioSlots | 2 | 0-4 | Admin | No | new |
+  | cnbcMaxArticleAttempts | 6 | 3-12 | Admin | No | new (CNBC code untouched; moves in 9F.6) |
+  | spareAdmits | 3 | 0-5 | Admin | No | new |
+  | slotSpilloverEnabled | on | n/a | Admin | No | new |
+  | yahooSourceEnabled | on | n/a | Admin | No | new |
+  | cnbcSourceEnabled | on | n/a | Admin | No | new |
+  | portfolioSourceEnabled | on | n/a | Admin | No | new |
+  | rankingPointsUsMacro | 20 | 0-40 | Admin | No | new |
+  | rankingPointsMostActive | 12 | 0-40 | Admin | No | new |
+  | rankingPointsPortfolio | 8 | 0-40 | Admin | No | new |
+  | rankingPointsWirePublishers | 5 | 0-40 | Admin | No | new |
+  | rankingPointsIncludeWords | 5 | 0-40 | Admin | No | new |
+  | rankingPointsAsiaEurope | 3 | 0-40 | Admin | No | new |
+  | rankingPointsBenchmarkOrGeneric | 1 | 0-40 | Admin | No | new |
+  | recencyBonusUnder6h | 4 | 0-8 | Admin | No | new |
+  | recencyBonus6to24h | 2 | 0-8 | Admin | No | new |
+  | recencyBonusOver24h | 0 | 0-8 | Admin | No | new |
+  | recencyThresholdHoursNear | 6 h | 1-12 | Admin | No | new |
+  | recencyThresholdHoursFar | 24 h | 6-72 | Admin | No | new |
+  | headlineListUsMacroTerms / headlineListDropTerms / headlineListLastRankedTerms / headlineListTier3aTerms / headlineListWirePartners / headlineListAmdExclusionPhrases | (pointer) | n/a | Admin | No | lib/headline-lists.js, each list by name |
+  | cnbcMaxCandidates | 20 | n/a | Admin | No | lib/cnbc-news-research-runtime.js (left in place; moves in 9F.6) |
+  | cnbcPageTimeoutMs | 4000 ms | n/a | Admin | No | lib/cnbc-news-research-runtime.js / cnbc-recap-research-runtime.js (left in place) |
+  | cnbcMaxResponseBytes | 1280 KB | n/a | Admin | No | lib/cnbc-news-research-runtime.js (left in place) |
+  | cnbcMaxArticleTextBytes | 8 KB | n/a | Admin | No | lib/cnbc-news-research-runtime.js (left in place) |
+  | cnbcMaxEvidenceTextBytes | 8 KB | n/a | Admin | No | lib/cnbc-news-research-runtime.js (left in place) |
+  | cnbcMaterialityRequestLimitBytes | 64 KB | n/a | Admin | No | lib/claude-news-materiality-selection.js (CNBC-related, left in place) |
+
+- **Free comparison:** no network, no paid calls. The full stand-in-page Replay-Packages harness used in prior 9F.1 steps was not rebuilt for this step, because every change here is mechanical (a literal number replaced by a call that returns the identical literal by default; no control-flow logic touched). Verification instead: (1) a line-by-line diff of every touched file confirms only the constant-definition line changed in each case; (2) the new `tests/settings-registry.test.js` asserts every wired setting's registry default equals its pre-change literal (`WIRED_TODAY_VALUES` table); (3) the full pre-existing suite (1026 tests, many of which pin exact byte caps, candidate counts and timeouts against the saved Replay Packages and other fixtures, e.g. the Step 8K.3 test asserting US cap 60 / Singapore cap 30 / merged cap 90) passes unchanged with no updates needed. If Kevin wants the full scratch stand-in-page comparison run anyway before promotion, it can be built the same way as the 9F.1g one.
+- **Tests:** full suite 1099/1099 (1026 before; 73 new: 61 settings-registry rows/tables in `tests/settings-registry.test.js` covering every Admin numeric and boolean setting's default/clamp/override, Fixed/reference entries ignoring the environment, the wired-today-values table, the not-wired-yet table, and the cross-check function; 2 rewritten reading-window tests replacing the "env var ignored" assertions with "env var honoured and clamped" for the reading budget and download attempts; the rest are the per-setting generated rows). Syntax 60/60 (new `lib/settings-registry.js`). `git diff --check` clean (only LF/CRLF line-ending notices on two files, no real issue).
+- **Could not share:** CNBC's own timeout/size constants stay separate by instruction, not merged into `pageTimeoutMs` or any shared Yahoo setting. The Yahoo news budget and the recap budget are now two independent settings instead of one shared call, so they can be tuned separately later. The headline word lists and CNBC bounds stay in their own files; the register only points at them.
+- **Must not change:** everything listed under Step 9F.2c.1b's "Must not change"; plus the Yahoo recap page's own 4 s timeout and 1.5 MB cap (now Fixed in the registry, same protection as before); CNBC acquisition and its shared timing functions; no new setting from this step is read by any pipeline code; the 12/6/4h active-session caps and tolerance keep today's values; Neon storage; every `?rev=` token.
+- **Supersedes:** the part of Step 9F.1d/9F.1e's "must not change: the 30 s budget" that meant no environment override, for `yahooReadingBudgetSeconds`, `recapReadingBudgetSeconds` and `downloadAttempts` only (Kevin's 10 Oct 2026 decision). The 30 s/3-attempt default values themselves are not superseded.
