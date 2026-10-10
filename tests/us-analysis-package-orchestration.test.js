@@ -5908,6 +5908,34 @@ test('Step 9F.2c.1 the approved drop-list additions are dropped, but still prote
   ]);
 });
 
+// ---- Step 9F.2c.1b: "AMD" the eye disease must not match the AMD macro term ----
+const STEP_9F2C1B_ROWS = [
+  {headline: 'Kodiak Sciences (KOD) Climbs Nearly 3x on Promising Wet AMD Trial', macro: false},
+  {headline: 'Dry AMD drug wins approval, shares jump', macro: false},
+  {headline: 'Study of age-related macular degeneration shows promise', macro: false},
+  {headline: 'AMD stock jumps on new data center chip', macro: true},
+  {headline: 'Nvidia, Broadcom, and AMD Investors Need to Have Oct. 15 Circled on Their Calendars', macro: true},
+  {headline: 'HPE stock closes at record high on growing networking orders, $1.2 billion AMD Helios order', macro: true},
+  {headline: 'Wet AMD trial results, plus Nvidia earnings preview', macro: true}
+];
+
+test('Step 9F.2c.1b "AMD" the eye disease does not match the AMD macro term, but real chip stories still do', async () => {
+  // Match on the first 80 characters: the audit truncates long headlines, and
+  // two of these rows exceed that length.
+  const candidates = STEP_9F2C1B_ROWS.map(row => step8kCandidate(row.headline));
+  const {audit} = await step8kActiveRun({candidates});
+  for (const row of STEP_9F2C1B_ROWS) {
+    const key = row.headline.slice(0, 80);
+    const entry = audit.find(e => e.headline === key);
+    assert.ok(entry, row.headline);
+    if (row.macro) {
+      assert.equal(entry.tier, 2, row.headline);
+    } else {
+      assert.notEqual(entry.tier, 2, row.headline);
+    }
+  }
+});
+
 // ---- Step 9F.1c: Yahoo admission by publish time inside the reading window ----
 // Old session window start: PRE/REGULAR 2026-09-04T20:00Z (Labor Day 09-07 skipped), POST
 // 2026-09-08T20:00Z. Reading window start is the last close minus 24 h.
