@@ -1085,16 +1085,21 @@ test('classifier-preflight rejection continues to the next package-admissible ac
       }))
     })), 'utf8');
   }
+  // Step 9F.2b: the classifier limit is now 300 KB, so 20 filler items (the old
+  // 64 KB boundary's count) can no longer reach it even at the fixed 8 KB
+  // per-article classifier cut (20 * 8 KB = 160 KB). 45 items keeps the search
+  // boundary comfortably under that cut (45 * 8 KB = 360 KB > 300 KB), so the
+  // search still finds its boundary before truncation flattens the curve.
   let low = 0;
-  let high = 4000;
+  let high = 8192;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    const federalItems = manyFedEvidence(20, middle).items;
+    const federalItems = manyFedEvidence(45, middle).items;
     if (activeClassifierBytes(federalItems, smallCandidate)
         <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) low = middle;
     else high = middle - 1;
   }
-  const federalCollection = manyFedEvidence(20, low);
+  const federalCollection = manyFedEvidence(45, low);
   assert.ok(activeClassifierBytes(federalCollection.items, smallCandidate)
     <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
   assert.ok(activeClassifierBytes(federalCollection.items, largeCandidate)
@@ -1161,8 +1166,10 @@ test('active Yahoo classifier preflight counts previously admitted current artic
     publishedAt: '2026-09-08T14:31:00.000Z', symbols: [], publisher: 'Yahoo Finance'
   });
   function requestBytes(federalSummaryBytes, currentItems) {
+    // Step 9F.2b: 45 federal filler items (see the sibling preflight test above
+    // for why 20 can no longer reach the new 300 KB classifier limit).
     const base = [yahooEvidence('^RUT').items[0],
-      ...manyFedEvidence(20, federalSummaryBytes).items];
+      ...manyFedEvidence(45, federalSummaryBytes).items];
     const items = base.concat(currentItems);
     const collection = createEvidenceCollection({market: 'US', items});
     return Buffer.byteLength(JSON.stringify(buildClaudeEvidenceRoleClassificationRequest({
@@ -1180,7 +1187,7 @@ test('active Yahoo classifier preflight counts previously admitted current artic
     })), 'utf8');
   }
   let low = 0;
-  let high = 4000;
+  let high = 8192;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
     if (requestBytes(middle, [first])
@@ -1200,7 +1207,7 @@ test('active Yahoo classifier preflight counts previously admitted current artic
   const {service, calls} = harness({
     createTelemetryAcquisition: () => ({async acquireSnapshot() { return benchmark; }}),
     federalReserveEvidenceAcquisition: {async acquireEvidence() {
-      return manyFedEvidence(20, low);
+      return manyFedEvidence(45, low);
     }},
     yahooLatestNewsDiscovery: {async discoverLatestNews() {
       return {ok: true, type: 'SUCCESS', candidates};
@@ -1284,9 +1291,9 @@ test('Step 9F.1f: six 16 KB articles all reach the classifier, which reads only 
   const classifierInput = calls.evidenceRoleClassification[0];
   const current = classifierInput.evidence.filter(entry => entry.horizon === 'CURRENT_SESSION');
   assert.equal(current.length, 6);
-  // The full texts would not fit the classifier; the cut texts do.
-  assert.ok(current.reduce((sum, entry) => sum + Buffer.byteLength(entry.item.summary, 'utf8'), 0)
-    > CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  // Step 9F.2b: six full 16 KB texts (96 KB) now fit comfortably under the new
+  // 300 KB limit on their own; the fixed 8 KB classifier cut (Step 9F.1f,
+  // unchanged by this step) still applies regardless, as the assertions below confirm.
   const request8 = buildClaudeEvidenceRoleClassificationRequest(classifierInput);
   assert.ok(Buffer.byteLength(JSON.stringify(request8), 'utf8')
     <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
@@ -1310,7 +1317,11 @@ test('Step 9F.1f: an article that would push the classifier over its cap is flag
   const articles = step9F1fArticles();
   const benchmark = snapshotWithState('^RUT', 'REGULAR', {hasOverlay: false});
   function classifierBytes(federalSummaryBytes, count) {
-    const base = [yahooEvidence('^RUT').items[0], ...manyFedEvidence(20, federalSummaryBytes).items];
+    // Step 9F.2b: 40 federal filler items (see the preflight tests above for why
+    // 20 can no longer reach the new 300 KB classifier limit) -- kept low enough
+    // that 40 federal + 1 Yahoo completed + up to 6 current items stays within
+    // the 50-item classifier cap.
+    const base = [yahooEvidence('^RUT').items[0], ...manyFedEvidence(40, federalSummaryBytes).items];
     const current = articles.slice(0, count).map(article => createEvidenceItem({
       sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
       title: article.title, summary: article.summary, canonicalUrl: article.canonicalUrl,
@@ -1333,14 +1344,14 @@ test('Step 9F.1f: an article that would push the classifier over its cap is flag
     })), 'utf8');
   }
   let low = 0;
-  let high = 4000;
+  let high = 8192;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
     if (classifierBytes(middle, 5) <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) low = middle;
     else high = middle - 1;
   }
   assert.ok(classifierBytes(low, 6) > CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
-  const {service, diagnostics} = step9F1fHarness(articles, manyFedEvidence(20, low));
+  const {service, diagnostics} = step9F1fHarness(articles, manyFedEvidence(40, low));
   await service.assemble(request());
   const acquisition = diagnostics.find(entry => entry.stage === 'activeYahooAcquisition');
   assert.equal(acquisition.acquiredCurrentSessionCount, 5);
@@ -4260,7 +4271,7 @@ test('admits provisional CNBC evidence only while the 50-item classifier bound r
   assert.equal(context.unresolvedGaps.includes(BROAD_MARKET_EVIDENCE_UNAVAILABLE_GAP), false);
 });
 
-test('keeps oversized provisional CNBC evidence optional at the 64 KiB classifier preflight', async () => {
+test('keeps oversized provisional CNBC evidence optional at the classifier preflight', async () => {
   const benchmark = snapshot('^RUT');
   const yahooItem = yahooEvidence('^RUT').items[0];
   const provisional = cnbcResearchSuccess(
@@ -4284,18 +4295,20 @@ test('keeps oversized provisional CNBC evidence optional at the 64 KiB classifie
     });
     return Buffer.byteLength(JSON.stringify(requestBody), 'utf8');
   }
+  // Step 9F.2b: 45 federal filler items (see the active-session preflight tests
+  // above for why 20 can no longer reach the new 300 KB classifier limit).
   let low = 0;
-  let high = 4000;
+  let high = 8192;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    const items = [yahooItem, ...manyFedEvidence(20, middle).items];
+    const items = [yahooItem, ...manyFedEvidence(45, middle).items];
     if (classifierBytes(items) <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) {
       low = middle;
     } else {
       high = middle - 1;
     }
   }
-  const fedCollection = manyFedEvidence(20, low);
+  const fedCollection = manyFedEvidence(45, low);
   const baseItems = [yahooItem, ...fedCollection.items];
   assert.equal(classifierBytes(baseItems)
     <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES, true);

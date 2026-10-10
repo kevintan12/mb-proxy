@@ -110,8 +110,8 @@ const WIRED_TODAY_VALUES = {
   mergedListingMaxCandidates: 90,
   mostActiveMaxResponseBytes: 256 * KB,
   mostActiveMaxCandidates: 10,
-  writerRequestLimitBytes: 128 * KB,
-  classifierRequestLimitBytes: 64 * KB,
+  writerRequestLimitBytes: 500 * KB,
+  classifierRequestLimitBytes: 300 * KB,
   yahooRecapPageTimeoutMs: 4000,
   yahooRecapMaxResponseBytes: 1572864
 };
@@ -155,4 +155,15 @@ test('Step 9F.2a settings registry: checkArticleBudgetFits', () => {
     articleTextBudgetBytes: 80 * KB, nonArticleOverheadBytes: 20 * KB, writerRequestLimitBytes: 100 * KB
   });
   assert.deepEqual(exact, {fits: true, budgetBytes: 80 * KB, warning: null});
+});
+
+// Step 9F.2b: the planned article budget (150 KB) plus the planned overhead
+// (100 KB) against the now-live writer limit (500 KB) -- still fits with room
+// to spare, so neither planned default needs changing for this step.
+test("Step 9F.2b: checkArticleBudgetFits still fits at today's live writer limit", () => {
+  const fits = checkArticleBudgetFits({
+    articleTextBudgetBytes: 150 * KB, nonArticleOverheadBytes: 100 * KB,
+    writerRequestLimitBytes: SETTINGS_REGISTRY.writerRequestLimitBytes.default
+  });
+  assert.deepEqual(fits, {fits: true, budgetBytes: 150 * KB, warning: null});
 });

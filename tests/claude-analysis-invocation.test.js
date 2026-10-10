@@ -2159,6 +2159,14 @@ test('accepts the provisional request-size boundary and rejects one byte above w
     trimmedArticleCount: 0,
     trimmed: []
   }, {
+    // Step 9F.2b: the request-size summary, emitted right before the hard check.
+    stage: 'requestSizeSummary', call: 'writer',
+    requestBytes: CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES + 1,
+    limitBytes: CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES,
+    percentOfLimit: 100,
+    trimmedBytes: 0,
+    trimmedArticleCount: 0
+  }, {
     model: CLAUDE_ANALYSIS_MODEL,
     completeRequestBodyBytes: CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES + 1,
     limitBytes: CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES,

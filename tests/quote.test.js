@@ -437,10 +437,13 @@ test('structured Claude route returns validated analysis with one server-owned r
     assert.deepEqual(res.body, {result: output});
     assert.equal(JSON.stringify(requestBody).includes('generationId'), false);
     assert.equal(JSON.stringify(res.body).includes('generationId'), false);
-    assert.equal(logs.length, 4);
+    // Step 9F.2b: one new 'requestSizeSummary' log line per writer call, logged
+    // before the request is sent -- so it is first, ahead of the post-response
+    // normalization stages.
+    assert.equal(logs.length, 5);
     assert.deepEqual(logs.map(([, value]) => JSON.parse(value).stage || 'invocation'), [
-      'claudeAnalysisStructureNormalization', 'claudeAnalysisPreNormalization',
-      'claudeAnalysisPreNormalization', 'invocation'
+      'requestSizeSummary', 'claudeAnalysisStructureNormalization',
+      'claudeAnalysisPreNormalization', 'claudeAnalysisPreNormalization', 'invocation'
     ]);
     for (const [prefix, value] of logs) {
       assert.equal(prefix, '[claude-analysis.invocation]');
@@ -474,7 +477,8 @@ test('structured Claude diagnostics omit absent or invalid generation IDs', asyn
       assert.equal(res.statusCode, 200);
       assert.equal(JSON.stringify(res.body).includes('generationId'), false);
     }
-    assert.equal(logs.length, 20);
+    // Step 9F.2b: one new 'requestSizeSummary' log line per writer call (5 logs x 5 calls).
+    assert.equal(logs.length, 25);
     for (const [prefix, value] of logs) {
       assert.equal(prefix, '[claude-analysis.invocation]');
       assert.equal(Object.hasOwn(JSON.parse(value), 'generationId'), false);
@@ -529,7 +533,9 @@ test('structured Claude route returns a distinct oversized-request failure', asy
   const previousKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = 'test-key';
   const input = JSON.parse(JSON.stringify(claudeAnalysisInput()));
-  input.marketPackages[0].evidenceContext.evidence[0].item.summary = 'x'.repeat(140000);
+  // Step 9F.2b: the writer limit is now 500 KB, so the oversized summary must
+  // clear that, not the old 128 KB limit.
+  input.marketPackages[0].evidenceContext.evidence[0].item.summary = 'x'.repeat(600000);
   let calls = 0;
   global.fetch = async () => { calls++; };
   try {
