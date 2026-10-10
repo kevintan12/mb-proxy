@@ -701,11 +701,14 @@ test('Step 8L: classifier first-try success makes one call and logs no retry', a
 });
 
 test('blocks oversized requests before fetch', async () => {
-  const largeItem = evidence(1, {summary: 'x'.repeat(CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES)});
+  // Step 9F.1f: the classifier reads only the first 8 KB of each article, so one
+  // huge article no longer overflows; nine 8 KB articles still do.
+  const largeItems = Array.from({length: 9}, (_, index) =>
+    evidence(index + 1, {summary: 'x'.repeat(CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES)}));
   let fetchCount = 0;
   const diagnostics = [];
   const result = await invokeClaudeEvidenceRoleClassification({
-    input: input(['COMPLETED_SESSION'], [largeItem]), apiKey: 'secret',
+    input: input(largeItems.map(() => 'COMPLETED_SESSION'), largeItems), apiKey: 'secret',
     fetchImpl: async () => { fetchCount++; }, onDiagnostics: value => diagnostics.push(value)
   });
   assert.equal(result.type, 'REQUEST_TOO_LARGE');

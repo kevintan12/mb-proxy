@@ -51,7 +51,10 @@ test('Step 9D.6: the US market settings row reproduces today\'s values exactly',
     activeStates: US_ACTIVE_SESSION_STATES,
     completedStates: US_COMPLETED_SESSION_STATES,
     benchmarkNames: ['s&p 500', 'nasdaq', 'dow'],
-    locale: 'en-US'
+    locale: 'en-US',
+    readingExtensionHours: {default: 24, min: 0, max: 72},
+    articleKb: {default: 16, min: 2, max: 32},
+    readingBudgetSeconds: 30
   });
 });
 
@@ -102,8 +105,13 @@ test('Step 9D.6: normalizeSectionText and namesCitedFocusSubject default to the 
 // ---------------------------------------------------------------------------
 
 test('Step 9D.6: Singapore and Hong Kong settings rows stay disabled', () => {
-  assert.deepEqual(marketSettings('SG'), {sectionRulesEnabled: false});
-  assert.deepEqual(marketSettings('HK'), {sectionRulesEnabled: false});
+  const reading = {
+    readingExtensionHours: {default: 24, min: 0, max: 72},
+    articleKb: {default: 16, min: 2, max: 32},
+    readingBudgetSeconds: 30
+  };
+  assert.deepEqual(marketSettings('SG'), {sectionRulesEnabled: false, ...reading});
+  assert.deepEqual(marketSettings('HK'), {sectionRulesEnabled: false, ...reading});
   for (const state of ['PRE', 'REGULAR', 'POST', 'CLOSED', 'WEEKEND', 'HOLIDAY', 'LUNCH', 'OPEN', 'anything']) {
     assert.deepEqual(reportSettings('SG', state), {sectionRulesEnabled: false}, state);
     assert.deepEqual(reportSettings('HK', state), {sectionRulesEnabled: false}, state);

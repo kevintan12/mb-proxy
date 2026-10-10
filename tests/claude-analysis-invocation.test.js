@@ -32,6 +32,7 @@ const {
   CLAUDE_ANALYSIS_RESULT_TYPES,
   CLAUDE_ANALYSIS_PROVIDER_JSON_SCHEMA,
   buildClaudeAnalysisRequest,
+  fitWriterArticleBudget,
   invokeClaudeAnalysis
 } = require('../lib/claude-analysis-invocation');
 const {projectClaudeAnalysisInput} = require('../lib/claude-model-input-projection');
@@ -2146,7 +2147,18 @@ test('accepts the provisional request-size boundary and rejects one byte above w
   assert.equal(oversized.message, 'Claude request exceeds provisional size limit');
   assert.equal(oversized.upstreamStatus, null);
   assert.equal(oversizedFetches, 0);
+  // Step 9F.1f: the writer budget flags first that there is no Yahoo article to trim.
   assert.deepEqual(diagnostics, [{
+    stage: 'writerArticleBudget',
+    outcome: 'DOES_NOT_FIT_AT_FLOOR',
+    limitBytes: CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES,
+    floorBytes: 4096,
+    requestBytesBefore: CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES + 1,
+    requestBytesAfter: CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES + 1,
+    yahooArticleCount: 0,
+    trimmedArticleCount: 0,
+    trimmed: []
+  }, {
     model: CLAUDE_ANALYSIS_MODEL,
     completeRequestBodyBytes: CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES + 1,
     limitBytes: CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES,
@@ -3770,4 +3782,149 @@ test('treats successfully read malformed Anthropic envelopes as contract failure
     });
     assert.equal(result.type, 'CONTRACT_FAILURE');
   }
+});
+
+// ---------------------------------------------------------------------------
+// Step 9F.1f (temporary until Step 9F.2): writer article budget. Over the writer
+// cap, Yahoo news texts are trimmed longest first to a 4 KB floor; nothing is
+// dropped and no other source is trimmed.
+// ---------------------------------------------------------------------------
+
+function step9F1fText(seed, bytes) {
+  let text = seed;
+  while (Buffer.byteLength(text, 'utf8') < bytes) text += ' Markets weighed rates and earnings.';
+  return text.slice(0, bytes).trim();
+}
+
+function step9F1fWriterInput({yahooBytes, fillerBytes, focusSubjectAt = null}) {
+  const yahoo = yahooBytes.map((bytes, index) => createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: `Yahoo budget story ${index + 1}`,
+    summary: index === 0 && focusSubjectAt !== null
+      ? `${step9F1fText('Opening text.', focusSubjectAt)} Nvidia shares rose. ${step9F1fText('Closing text.', bytes - focusSubjectAt - 21)}`
+      : step9F1fText(`Story ${index + 1} text.`, bytes),
+    canonicalUrl: `https://finance.yahoo.com/news/yahoo-budget-story-${index + 1}.html`,
+    publishedAt: `2026-09-08T14:${String(20 + index).padStart(2, '0')}:00.000Z`,
+    symbols: [], publisher: 'Yahoo Finance'
+  }));
+  const filler = createEvidenceItem({
+    sourceId: 'us.reuters', market: 'US', evidenceCategory: 'news',
+    title: 'Reuters filler story', summary: step9F1fText('Reuters filler.', fillerBytes),
+    canonicalUrl: 'https://www.reuters.com/markets/us/filler-story',
+    publishedAt: '2026-09-04T18:00:00.000Z', symbols: []
+  });
+  return activeUsInput({
+    additionalItems: [...yahoo, filler],
+    ...(focusSubjectAt !== null ? {
+      materialEvents: ['e1', 'e2', 'e3'],
+      broadMarketFocus: [
+        {evidenceRef: 'e1', subjects: [{kind: 'COMPANY', name: 'Microsoft'}]},
+        {evidenceRef: 'e3', subjects: [{kind: 'COMPANY', name: 'Nvidia'}]}
+      ]
+    } : {})
+  });
+}
+
+function step9F1fRequestBytes(input) {
+  return Buffer.byteLength(JSON.stringify(buildClaudeAnalysisRequest(input)), 'utf8');
+}
+
+function step9F1fItems(input) {
+  return new Map(input.marketPackages[0].evidenceContext.evidence
+    .map(entry => [entry.reference, entry.item]));
+}
+
+function step9F1fOverCapInput(options, overBy) {
+  const probe = step9F1fWriterInput({...options, fillerBytes: 100});
+  const fillerBytes = CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES - step9F1fRequestBytes(probe) + overBy;
+  const input = step9F1fWriterInput({...options, fillerBytes});
+  assert.ok(step9F1fRequestBytes(input) > CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES);
+  return input;
+}
+
+test('Step 9F.1f writer budget: under the cap the input is returned unchanged with no event', () => {
+  const input = step9F1fWriterInput({yahooBytes: [16384, 8000], fillerBytes: 1000});
+  const diagnostics = [];
+  assert.equal(fitWriterArticleBudget(input, value => diagnostics.push(value)), input);
+  assert.deepEqual(diagnostics, []);
+});
+
+test('Step 9F.1f writer budget: trims Yahoo articles longest first, keeps every article, floor 4 KB, other sources untouched', () => {
+  const input = step9F1fOverCapInput({yahooBytes: [16384, 12000, 9000, 6000, 3000, 2000]}, 15000);
+  const diagnostics = [];
+  const fitted = fitWriterArticleBudget(input, value => diagnostics.push(value));
+  assert.ok(step9F1fRequestBytes(fitted) <= CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES);
+  const before = step9F1fItems(input);
+  const after = step9F1fItems(fitted);
+  assert.deepEqual([...after.keys()], [...before.keys()]);
+  const trimmedRefs = [];
+  for (const [reference, item] of before) {
+    const now = after.get(reference);
+    assert.equal(item.summary.startsWith(now.summary), true, reference);
+    if (item.sourceId !== 'us.yahoo-finance') assert.equal(now.summary, item.summary, reference);
+    if (now.summary !== item.summary) {
+      trimmedRefs.push(reference);
+      assert.ok(Buffer.byteLength(now.summary, 'utf8') >= 4096, reference);
+    }
+  }
+  // Longest first: the three longest Yahoo stories are cut, the rest kept whole.
+  assert.deepEqual(trimmedRefs, ['e3', 'e4', 'e5']);
+  const event = diagnostics.find(value => value.stage === 'writerArticleBudget');
+  assert.equal(event.outcome, 'TRIMMED');
+  assert.equal(event.yahooArticleCount, 7);
+  assert.equal(event.trimmedArticleCount, 3);
+  assert.deepEqual(event.trimmed.map(entry => entry.evidenceRef), ['e3', 'e4', 'e5']);
+  for (const entry of event.trimmed) {
+    assert.equal(entry.fromBytes, Buffer.byteLength(before.get(entry.evidenceRef).summary, 'utf8'));
+    assert.equal(entry.toBytes, Buffer.byteLength(after.get(entry.evidenceRef).summary, 'utf8'));
+  }
+  const lengths = event.trimmed.map(entry => entry.toBytes);
+  assert.ok(Math.max(...lengths) - Math.min(...lengths) <= 2);
+  assert.ok(Math.min(...lengths) >= 6000 - 2);
+  assert.equal(event.requestBytesAfter, step9F1fRequestBytes(fitted));
+  assert.equal(JSON.stringify(event).includes('Markets weighed'), false);
+});
+
+test('Step 9F.1f writer budget: an article is never cut before the focus subject it grounds', () => {
+  const input = step9F1fOverCapInput({yahooBytes: [16384, 16384, 16384], focusSubjectAt: 10000}, 30000);
+  const fitted = fitWriterArticleBudget(input, () => {});
+  assert.ok(step9F1fRequestBytes(fitted) <= CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES);
+  const focused = step9F1fItems(fitted).get('e3').summary;
+  assert.equal(focused.includes('Nvidia'), true);
+  assert.ok(Buffer.byteLength(focused, 'utf8') < 16384);
+  assert.ok(Buffer.byteLength(step9F1fItems(fitted).get('e4').summary, 'utf8')
+    < Buffer.byteLength(focused, 'utf8'));
+  assert.equal(validateClaudeAnalysisInput(fitted), true);
+});
+
+test('Step 9F.1f writer budget: when even the 4 KB floor does not fit it is flagged and the writer is not called', async () => {
+  const input = step9F1fOverCapInput({yahooBytes: [16384, 9000, 3000]}, 40000);
+  const diagnostics = [];
+  let fetches = 0;
+  const result = await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async () => { fetches++; }
+  });
+  assert.equal(result.type, 'REQUEST_TOO_LARGE');
+  assert.equal(fetches, 0);
+  const event = diagnostics.find(value => value.stage === 'writerArticleBudget');
+  assert.equal(event.outcome, 'DOES_NOT_FIT_AT_FLOOR');
+  assert.deepEqual(event.trimmed.map(entry => entry.evidenceRef), ['e3', 'e4']);
+  for (const entry of event.trimmed) assert.ok(entry.toBytes <= 4096 && entry.toBytes >= 4094);
+  assert.ok(event.requestBytesAfter > CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES);
+  assert.equal(diagnostics.some(value => value.providerInvocationSkipped === true), true);
+});
+
+test('Step 9F.1f writer budget: an over-cap request is sent trimmed, under the cap', async () => {
+  const input = step9F1fOverCapInput({yahooBytes: [16384, 12000, 9000]}, 10000);
+  let sentBytes = null;
+  await invokeClaudeAnalysis({
+    input, apiKey: 'test-key', onDiagnostics: () => {},
+    fetchImpl: async (url, options) => {
+      sentBytes = Buffer.byteLength(options.body, 'utf8');
+      throw new Error('stop after capture');
+    }
+  });
+  assert.ok(sentBytes !== null);
+  assert.ok(sentBytes <= CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES);
 });

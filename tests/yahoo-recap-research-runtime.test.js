@@ -50,6 +50,7 @@ function yahooHtml(overrides = {}, url = recapUrl) {
     datePublished: '2026-09-09T20:30:00Z',
     dateModified: '2026-09-09T21:00:00Z',
     mainEntityOfPage: {'@type': 'WebPage', '@id': url},
+    articleBody: 'The S&P 500 rose 0.4%, the Dow added 0.2% and the Nasdaq gained 0.6%.',
     ...overrides
   };
   return `<link rel="canonical" href="${url}">`
@@ -459,21 +460,29 @@ test('emits sanitized rank-ordered candidate validation outcomes', async () => {
     normalizedYahooUrl: staleUrl,
     path: '/markets/live/stock-market-today-stale.html',
     outcome: 'NOT_VALIDATED',
-    failureType: null
+    failureType: null,
+    oldAddressStyle: true,
+    attempts: 1,
+    rejectionReason: 'WRONG_PUBLISH_DATE'
   }, {
     stage: 'yahooRecapSessionCandidateValidation',
     rank: 2,
     normalizedYahooUrl: targetUrl,
     path: '/markets/live/stock-market-today-target.html',
     outcome: 'VALIDATED',
-    failureType: null
+    failureType: null,
+    oldAddressStyle: true,
+    attempts: 1,
+    rejectionReason: null
   }]);
   assert.equal(JSON.stringify(attempts).includes('articleBody'), false);
 });
 
-test('session retrieval failures remain sanitized and stage-distinct with one page attempt', async () => {
+// Step 9F.1g: a 503 is a temporary failure, so the page is tried 3 times (fake pauses).
+test('session retrieval failures remain sanitized and stage-distinct after the shared retries', async () => {
   let discoveryCalls = 0;
   let pageCalls = 0;
+  const pauses = [];
   const result = await runtime(async url => {
     if (url === 'https://api.anthropic.com/v1/messages') {
       discoveryCalls++;
@@ -481,7 +490,7 @@ test('session retrieval failures remain sanitized and stage-distinct with one pa
     }
     pageCalls++;
     return yahooResponse('', {ok: false, status: 503});
-  }).discoverAndValidateRecap({targetSessionDate});
+  }).discoverAndValidateRecap({targetSessionDate}, {sleep: async ms => { pauses.push(ms); }});
   assert.deepEqual(result, {
     ok: false,
     type: 'SESSION_VALIDATION_FAILURE',
@@ -489,7 +498,8 @@ test('session retrieval failures remain sanitized and stage-distinct with one pa
     message: 'Yahoo recap session validation failed'
   });
   assert.equal(discoveryCalls, 1);
-  assert.equal(pageCalls, 1);
+  assert.equal(pageCalls, 3);
+  assert.deepEqual(pauses, [250, 750]);
 });
 
 test('composes only discovery and validation without candidate, evidence, package, or final synthesis integration', () => {
