@@ -758,7 +758,7 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
 test('active Yahoo retains a narrow first article and later broad-market articles for classification', async () => {
   const candidates = [
     'Local retailer updates one store',
-    'Nvidia chip orders lift semiconductor shares',
+    'Chipmaker orders lift semiconductor shares',
     'Banks gain as lending outlook improves',
     'Fourth current-session story for classification',
     'Fifth current-session story for classification',
@@ -790,13 +790,13 @@ test('active Yahoo retains a narrow first article and later broad-market article
     evidenceRoleClassification: {async classifyEvidenceRoles(input) {
       calls.evidenceRoleClassification.push(input);
       return {ok: true, type: 'SUCCESS', output: {classifications: input.evidence.map(entry => {
-        const nvidia = entry.item.title === candidates[1].headline;
+        const chipmaker = entry.item.title === candidates[1].headline;
         const banks = entry.item.title === candidates[2].headline;
         return {
           reference: entry.reference,
-          materiality: nvidia || banks ? 'HIGH' : 'LOW',
-          roles: nvidia || banks ? ['MATERIAL_EVENT'] : [],
-          subjects: nvidia ? [{kind: 'COMPANY', name: 'Nvidia'}]
+          materiality: chipmaker || banks ? 'HIGH' : 'LOW',
+          roles: chipmaker || banks ? ['MATERIAL_EVENT'] : [],
+          subjects: chipmaker ? [{kind: 'COMPANY', name: 'Chipmaker'}]
             : banks ? [{kind: 'SECTOR', name: 'Banks'}] : []
         };
       })}};
@@ -5411,7 +5411,7 @@ test('Step 8K.1 tier 4a candidates are dropped before fetching and stay in the a
 });
 
 test('Step 8K.1 tier 4b China and India headlines are kept, fetched and ranked last', async () => {
-  const china = step8kCandidate('China May Reopen Nvidia AI Market');
+  const china = step8kCandidate('China May Reopen Chip Export Market');
   const india = step8kCandidate('India growth outlook improves');
   const neutral = step8kCandidate('Neutral story number 1');
   const dropped = step8kCandidate('Singapore stocks rally');
@@ -5831,31 +5831,32 @@ test('Step 8K.5 a wire partner without a tier 2 term does not jump ahead of a mo
     [[mostActiveOnly.headline, '1b'], [wireNoMacro.headline, '3b']]);
 });
 
-test('Step 8K.5 a wire market wrap outranks a single-company piece from a blog partner', async () => {
-  const blog = step8kCandidate('Intel: is the stock a buy at these levels', {publisher: 'Simply Wall St.'});
+test('Step 8K.5 a wire market wrap outranks a same-tier single-company piece regardless of publisher', async () => {
+  const otherPublisher = step8kCandidate('Intel: is the stock a buy at these levels', {publisher: 'Simply Wall St.'});
   const wrap = step8kCandidate('Stocks fall as Treasury yields climb', {publisher: 'Associated Press'});
   const {audit} = await step8kActiveRun({
-    candidates: [blog, wrap],
+    candidates: [otherPublisher, wrap],
     mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
   });
   assert.deepEqual(audit.map(entry => [entry.headline, entry.subTier]),
-    [[wrap.headline, '2w'], [blog.headline, '1b']]);
+    [[wrap.headline, '2w'], [otherPublisher.headline, '1b']]);
 });
 
-test('Step 8K.5 blog-style partners rank last inside their tier and are never dropped', async () => {
-  const blogFirst = step8kCandidate('Neutral gardening story one', {publisher: 'Simply Wall St.'});
+test('Step 9F.2c.1 publishers other than wire partners (including Simply Wall St, Motley Fool, Insider Monkey) no longer affect ranking order', async () => {
+  const simplyWallSt = step8kCandidate('Neutral gardening story one', {publisher: 'Simply Wall St.'});
   const motley = step8kCandidate('Neutral gardening story two', {publisher: 'The Motley Fool'});
   const insider = step8kCandidate('Neutral gardening story three', {publisher: 'Insider Monkey'});
   const regular = step8kCandidate('Neutral gardening story four');
   const otherRegular = step8kCandidate('Neutral gardening story five', {publisher: 'Barchart'});
-  const {audit, calls} = await step8kActiveRun({candidates: [blogFirst, motley, regular, insider, otherRegular]});
+  const {audit, calls} = await step8kActiveRun({candidates: [simplyWallSt, motley, regular, insider, otherRegular]});
+  // Page order is preserved exactly as given, with no publisher-based reordering.
   assert.deepEqual(audit.map(entry => entry.headline),
-    [regular.headline, otherRegular.headline, blogFirst.headline, motley.headline, insider.headline]);
+    [simplyWallSt.headline, motley.headline, regular.headline, insider.headline, otherRegular.headline]);
   assert.equal(calls.yahooCurrentNewsArticle.length, 5);
   assert.ok(audit.every(entry => entry.decision === 'EXTRACTION_FAILED'));
 });
 
-test('Step 8K.5 a blog partner still loses to a most-active headline in the same tier and keeps page order among blogs', async () => {
+test('Step 9F.2c.1 a wire partner still earns its tier 2w bucket but a non-wire publisher never does', async () => {
   const blogA = step8kCandidate('Intel valuation looks stretched', {publisher: 'Motley Fool'});
   const active = step8kCandidate('Intel unveils a new chip line');
   const blogB = step8kCandidate('Intel dividend prospects', {publisher: 'Motley Fool'});
@@ -5863,7 +5864,48 @@ test('Step 8K.5 a blog partner still loses to a most-active headline in the same
     candidates: [blogA, active, blogB],
     mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
   });
-  assert.deepEqual(audit.map(entry => entry.headline), [active.headline, blogA.headline, blogB.headline]);
+  // All three match the Intel identity (tier 1b); with no publisher split, page order decides.
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.subTier]),
+    [[blogA.headline, '1b'], [active.headline, '1b'], [blogB.headline, '1b']]);
+});
+
+// ---- Step 9F.2c.1: 3 Oct 2026 approved word-list additions, whole-word matching ----
+test('Step 9F.2c.1 the approved macro-list additions (AI, gold, bonds and similar) rank as tier 2', async () => {
+  const table = [
+    'AI Valuation Correction Could Trigger Wider Market Sell-Off, Margin Calls, Warns',
+    'Ray Dalio warns AI bubble is nearing a breaking point as debt and rates rise',
+    "Michael Burry Is Betting Against Artificial Intelligence (AI). Here's the Case for...",
+    'Oracle stock falls on more debt to fund AI chip buying, OpenAI revenue disclosure',
+    'Gold edges higher as bond yields ease'
+  ];
+  const candidates = table.map(headline => step8kCandidate(headline));
+  const {audit} = await step8kActiveRun({candidates});
+  // All five are expected tier 2, so they keep page order in the audit (ties are
+  // broken by page order); compare by position rather than by headline, since the
+  // audit truncates long headlines to 80 characters.
+  assert.deepEqual(audit.map(entry => entry.tier), table.map(() => 2));
+});
+
+test('Step 9F.2c.1 whole-word matching: a new macro term must not match inside another word', async () => {
+  const notGold = step8kCandidate('Goldman Sachs raises its price target');
+  const notAiSaid = step8kCandidate('Analysts said shares were fairly valued');
+  const notAiAig = step8kCandidate('AIG posts quarterly results');
+  const notEu = step8kCandidate('Neutral rating on retailer');
+  const {audit} = await step8kActiveRun({candidates: [notGold, notAiSaid, notAiAig, notEu]});
+  for (const headline of [notGold.headline, notAiSaid.headline, notAiAig.headline, notEu.headline]) {
+    assert.notEqual(audit.find(entry => entry.headline === headline).tier, 2, headline);
+  }
+});
+
+test('Step 9F.2c.1 the approved drop-list additions are dropped, but still protected by a macro match in the same headline', async () => {
+  // "palm oil exporters" already matches the existing tier 2 "oil" term, so this stays protected, as today.
+  const protectedByMacro = step8kCandidate('Malaysian palm oil exporters rally');
+  const dropped = step8kCandidate('Thai baht slips');
+  const {audit} = await step8kActiveRun({candidates: [protectedByMacro, dropped]});
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.tier, entry.decision]), [
+    [protectedByMacro.headline, 2, 'EXTRACTION_FAILED'],
+    [dropped.headline, 4, 'SKIPPED_BELOW_RELEVANCE_FLOOR']
+  ]);
 });
 
 // ---- Step 9F.1c: Yahoo admission by publish time inside the reading window ----
