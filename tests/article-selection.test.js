@@ -1,0 +1,397 @@
+// Step 9F.2e.2: the one article-selection step. Pure and not wired into the
+// pipeline -- these tests call lib/article-selection.js directly.
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const {
+  SLOT,
+  selectionSettings,
+  scoreCandidates,
+  fillGeneralSlots,
+  mergedPortfolioList,
+  pickPortfolioSlots,
+  applyWriterBudget,
+  checkClassifierFit,
+  selectArticles,
+  selectionSummary
+} = require('../lib/article-selection');
+const {SETTINGS_REGISTRY} = require('../lib/settings-registry');
+
+const KB = 1024;
+const YAHOO = 'us.yahoo-finance';
+const CNBC = 'us.cnbc';
+const TRIGGER = '2026-10-12T00:00:00.000Z';
+const HOUR = 60 * 60 * 1000;
+const hoursAgo = hours => new Date(Date.parse(TRIGGER) - hours * HOUR).toISOString();
+
+const AAPL = Object.freeze({symbol: 'AAPL', shortName: 'Apple Inc.', longName: 'Apple Inc.'});
+const VEEV = Object.freeze({symbol: 'VEEV', shortName: 'Veeva Systems Inc.', longName: 'Veeva Systems Inc.'});
+const UNH = Object.freeze({symbol: 'UNH', shortName: 'UnitedHealth Group Incorporated',
+  longName: 'UnitedHealth Group Incorporated'});
+
+function candidate(key, sourceId, headline, ageHours = 2, extra = {}) {
+  return {key, sourceId, headline, publisher: 'Yahoo Finance', publishedAt: hoursAgo(ageHours), ...extra};
+}
+
+// Synthetic, already-ordered entries for the slot-filling rows.
+function orderedPool(yahooCount, cnbcCount) {
+  const entries = [];
+  for (let i = 0; i < Math.max(yahooCount, cnbcCount); i++) {
+    if (i < yahooCount) entries.push({key: `y${i + 1}`, sourceId: YAHOO, score: 40 - i});
+    if (i < cnbcCount) entries.push({key: `c${i + 1}`, sourceId: CNBC, score: 40 - i});
+  }
+  return entries.sort((a, b) => b.score - a.score);
+}
+
+function count(picks, sourceId, slot) {
+  return picks.filter(pick => pick.sourceId === sourceId && pick.slot === slot).length;
+}
+
+test('Step 9F.2e.2: every number comes from the settings table at Kevin\'s values', () => {
+  const settings = selectionSettings({env: {}});
+  assert.deepEqual({...settings, slotsBySource: {...settings.slotsBySource}}, {
+    slotsBySource: {[YAHOO]: 7, [CNBC]: 3},
+    spilloverEnabled: true,
+    sparePerSource: 3,
+    portfolioSlots: 2,
+    firstPassPerCompany: 1,
+    textBudgetBytes: 150 * KB,
+    classifierMaxItems: 50,
+    classifierMaxBytes: 300 * KB
+  });
+  for (const name of ['yahooSlots', 'cnbcSlots', 'portfolioSlots', 'spareAdmits', 'slotSpilloverEnabled',
+    'articleTextBudgetBytesPlanned', 'portfolioFirstPassPerCompany']) {
+    assert.equal(SETTINGS_REGISTRY[name].wired, false, name);
+    assert.match(SETTINGS_REGISTRY[name].location, /switched on in Step 9F\.2[de]\.\d/, name);
+  }
+});
+
+// Safe-range clamping for every Admin setting the selection reads.
+const CLAMP_ROWS = [
+  ['YAHOO_SLOTS', '-3', s => s.slotsBySource[YAHOO], 0],
+  ['YAHOO_SLOTS', '99', s => s.slotsBySource[YAHOO], 10],
+  ['YAHOO_SLOTS', '7.6', s => s.slotsBySource[YAHOO], 7],
+  ['YAHOO_SLOTS', 'lots', s => s.slotsBySource[YAHOO], 7],
+  ['CNBC_SLOTS', '-1', s => s.slotsBySource[CNBC], 0],
+  ['CNBC_SLOTS', '9', s => s.slotsBySource[CNBC], 6],
+  ['PORTFOLIO_SLOTS', '-1', s => s.portfolioSlots, 0],
+  ['PORTFOLIO_SLOTS', '12', s => s.portfolioSlots, 4],
+  ['SPARE_ADMITS', '-2', s => s.sparePerSource, 0],
+  ['SPARE_ADMITS', '50', s => s.sparePerSource, 5],
+  ['SLOT_SPILLOVER_ENABLED', 'off', s => s.spilloverEnabled, false],
+  ['SLOT_SPILLOVER_ENABLED', 'maybe', s => s.spilloverEnabled, true],
+  ['ARTICLE_TEXT_BUDGET_BYTES_PLANNED', '1000', s => s.textBudgetBytes, 32 * KB],
+  ['ARTICLE_TEXT_BUDGET_BYTES_PLANNED', String(900 * KB), s => s.textBudgetBytes, 200 * KB],
+  ['CLASSIFIER_REQUEST_LIMIT_BYTES', '10', s => s.classifierMaxBytes, 64 * KB],
+  ['CLASSIFIER_REQUEST_LIMIT_BYTES', String(999 * KB), s => s.classifierMaxBytes, 400 * KB]
+];
+for (const [envVar, raw, read, expected] of CLAMP_ROWS) {
+  test(`Step 9F.2e.2 clamping: ${envVar}=${raw} -> ${expected}`, () => {
+    assert.equal(read(selectionSettings({env: {[envVar]: raw}})), expected);
+  });
+}
+
+// General slots: 7 Yahoo : 3 CNBC, spare slots passed on, up to 3 per source.
+const FILL_ROWS = [
+  {name: 'both sources have plenty', yahoo: 12, cnbc: 5, expect: [7, 0, 3, 0]},
+  {name: 'Yahoo short of 7, CNBC has more: CNBC takes the spare', yahoo: 4, cnbc: 8, expect: [4, 0, 3, 3]},
+  {name: 'Yahoo far short: CNBC takes at most 3 spare', yahoo: 2, cnbc: 9, expect: [2, 0, 3, 3]},
+  {name: 'CNBC returns zero: Yahoo takes the 3 spare', yahoo: 12, cnbc: 0, expect: [7, 3, 0, 0]},
+  {name: 'CNBC returns zero, Yahoo has only 8', yahoo: 8, cnbc: 0, expect: [7, 1, 0, 0]},
+  {name: 'both short: nothing to pass on', yahoo: 3, cnbc: 1, expect: [3, 0, 1, 0]},
+  {name: 'switch off: unused slots stay unused', yahoo: 12, cnbc: 0, spillover: false, expect: [7, 0, 0, 0]},
+  {name: 'spare limit 1', yahoo: 12, cnbc: 0, spare: 1, expect: [7, 1, 0, 0]}
+];
+for (const row of FILL_ROWS) {
+  test(`Step 9F.2e.2 general slots: ${row.name}`, () => {
+    const result = fillGeneralSlots({
+      ordered: orderedPool(row.yahoo, row.cnbc),
+      slotsBySource: {[YAHOO]: 7, [CNBC]: 3},
+      spilloverEnabled: row.spillover ?? true,
+      sparePerSource: row.spare ?? 3
+    });
+    assert.deepEqual([
+      count(result.picks, YAHOO, SLOT.GENERAL), count(result.picks, YAHOO, SLOT.SPARE),
+      count(result.picks, CNBC, SLOT.GENERAL), count(result.picks, CNBC, SLOT.SPARE)
+    ], row.expect);
+    const [yg, ys, cg, cs] = row.expect;
+    assert.equal(result.bySource[YAHOO].spareGiven, cs);
+    assert.equal(result.bySource[CNBC].spareGiven, ys);
+    assert.equal(result.picks.length + result.notChosen.length, row.yahoo + row.cnbc);
+    for (const pick of result.picks.filter(p => p.slot === SLOT.SPARE)) {
+      assert.notEqual(pick.fromSource, pick.sourceId);
+    }
+    assert.equal(yg + ys + cg + cs, result.picks.length);
+  });
+}
+
+test('Step 9F.2e.2 general slots: spare goes to the best remaining article, and the reasons say why', () => {
+  const result = fillGeneralSlots({
+    ordered: orderedPool(2, 9), slotsBySource: {[YAHOO]: 7, [CNBC]: 3},
+    spilloverEnabled: true, sparePerSource: 3
+  });
+  assert.deepEqual(result.picks.filter(p => p.slot === SLOT.SPARE).map(p => p.key), ['c4', 'c5', 'c6']);
+  assert.deepEqual(result.notChosen.map(e => [e.key, e.reason]),
+    [['c7', 'SPARE_LIMIT_REACHED'], ['c8', 'SPARE_LIMIT_REACHED'], ['c9', 'SPARE_LIMIT_REACHED']]);
+  const off = fillGeneralSlots({
+    ordered: orderedPool(9, 4), slotsBySource: {[YAHOO]: 7, [CNBC]: 3},
+    spilloverEnabled: true, sparePerSource: 3
+  });
+  assert.deepEqual(off.notChosen.map(e => e.reason), ['NO_SPARE_SLOT', 'NO_SPARE_SLOT', 'NO_SPARE_SLOT']);
+});
+
+test('Step 9F.2e.2 ordering: equal scores go to the newer article, then listing order', () => {
+  const scored = scoreCandidates({
+    triggerAt: TRIGGER,
+    candidates: [
+      candidate('old', YAHOO, 'Treasury yields climb', 3),
+      candidate('newer', CNBC, 'Fed holds rates steady', 1),
+      candidate('sameAgeFirst', YAHOO, 'Fed speakers line up', 2),
+      candidate('sameAgeSecond', CNBC, 'Treasury yields slip', 2)
+    ]
+  });
+  assert.deepEqual(scored.ordered.map(entry => entry.score), [24, 24, 24, 24]);
+  assert.deepEqual(scored.ordered.map(entry => entry.key), ['newer', 'sameAgeFirst', 'sameAgeSecond', 'old']);
+});
+
+test('Step 9F.2e.2 ordering: no publisher penalty, drop rule applied, recaps unscored and kept', () => {
+  const result = selectArticles({
+    triggerAt: TRIGGER,
+    env: {},
+    candidates: [
+      candidate('blog', YAHOO, 'Fed holds rates steady', 2, {publisher: 'Motley Fool'}),
+      candidate('wire', YAHOO, 'Fed holds rates steady again', 2, {publisher: 'Reuters'}),
+      candidate('drop', YAHOO, 'Singapore retirement savings tips', 1),
+      candidate('recap', YAHOO, 'Singapore retirement savings tips recap', 30, {isRecap: true})
+    ]
+  });
+  assert.equal(result.scored.ordered.find(e => e.key === 'blog').score, 24);
+  assert.equal(result.scored.ordered.find(e => e.key === 'wire').score, 29);
+  assert.deepEqual(result.scored.dropped.map(e => [e.key, e.dropReason]), [['drop', 'DROP_LIST']]);
+  const recap = result.selected.find(entry => entry.key === 'recap');
+  assert.equal(recap.slot, SLOT.RECAP);
+  assert.equal(recap.score, null);
+});
+
+test('Step 9F.2e.2: a candidate from a source without general slots is rejected', () => {
+  assert.throws(() => scoreCandidates({triggerAt: TRIGGER, candidates: [candidate('x', 'us.other', 'Fed')]}),
+    /no general slots are defined for source: us\.other/);
+  assert.throws(() => scoreCandidates({triggerAt: TRIGGER, candidates: [
+    candidate('x', YAHOO, 'Fed'), candidate('x', YAHOO, 'Fed again')]}), /duplicate candidate key/);
+});
+
+// Portfolio slots over both lists. One general slot (Yahoo), no spillover, so
+// the company articles compete for the portfolio slots.
+const ONE_GENERAL = Object.freeze({
+  ...selectionSettings({env: {}}),
+  slotsBySource: Object.freeze({[YAHOO]: 1, [CNBC]: 0}),
+  spilloverEnabled: false
+});
+const PORTFOLIO_POOL = [
+  candidate('macro', YAHOO, 'Fed holds rates steady', 1),
+  candidate('apple', YAHOO, 'Apple supplier warns on demand', 2),
+  candidate('veeva', CNBC, 'Veeva Systems wins a new contract', 3),
+  candidate('other', YAHOO, 'Retailer names a new chief executive', 1)
+];
+const PORTFOLIO_ROWS = [
+  {name: 'My Stocks only', lists: {myStocks: [AAPL]}, picks: [['apple', ['MY_STOCKS']]]},
+  {name: 'Watchlist only', lists: {watchlist: [VEEV]}, picks: [['veeva', ['WATCHLIST']]]},
+  {name: 'both lists', lists: {myStocks: [AAPL], watchlist: [VEEV]},
+    picks: [['apple', ['MY_STOCKS']], ['veeva', ['WATCHLIST']]]},
+  {name: 'a company on both lists', lists: {myStocks: [AAPL], watchlist: [AAPL, VEEV]},
+    picks: [['apple', ['MY_STOCKS', 'WATCHLIST']], ['veeva', ['WATCHLIST']]]},
+  {name: 'no portfolio article exists: slots stay empty', lists: {myStocks: [UNH]}, picks: []}
+];
+for (const row of PORTFOLIO_ROWS) {
+  test(`Step 9F.2e.2 portfolio slots: ${row.name}`, () => {
+    const result = selectArticles({
+      triggerAt: TRIGGER, env: {}, settings: ONE_GENERAL, candidates: PORTFOLIO_POOL, portfolioLists: row.lists
+    });
+    assert.deepEqual(result.general.picks.map(p => p.key), ['macro']);
+    assert.deepEqual(result.portfolio.picks.map(p => [p.key, [...p.lists]]), row.picks);
+    assert.ok(result.selected.every(entry => PORTFOLIO_POOL.some(c => c.key === entry.key)));
+  });
+}
+
+test('Step 9F.2e.2 portfolio slots: a general-slot article naming a company counts as covering it', () => {
+  const pool = [
+    candidate('fedApple', YAHOO, 'Fed and Apple lift stocks', 1),
+    candidate('apple2', YAHOO, 'Apple supplier warns on demand', 2),
+    candidate('veeva', CNBC, 'Veeva Systems wins a new contract', 9)
+  ];
+  const lists = {myStocks: [AAPL], watchlist: [VEEV]};
+  const result = selectArticles({triggerAt: TRIGGER, env: {}, settings: ONE_GENERAL, candidates: pool,
+    portfolioLists: lists});
+  assert.deepEqual(result.general.picks.map(p => p.key), ['fedApple']);
+  assert.deepEqual([...result.portfolio.coveredByGeneral], ['AAPL']);
+  // Apple scores higher, but Veeva is the only company not yet covered.
+  assert.deepEqual(result.portfolio.picks.map(p => [p.key, p.pass]),
+    [['veeva', 'FIRST_PASS'], ['apple2', 'SECOND_PASS']]);
+  const oneSlot = selectArticles({triggerAt: TRIGGER, env: {}, candidates: pool, portfolioLists: lists,
+    settings: {...ONE_GENERAL, portfolioSlots: 1}});
+  assert.deepEqual(oneSlot.portfolio.picks.map(p => p.key), ['veeva']);
+});
+
+test('Step 9F.2e.2 portfolio slots: the merged list keeps first appearance and both list names', () => {
+  const merged = mergedPortfolioList({myStocks: [AAPL, VEEV], watchlist: [VEEV, UNH]});
+  assert.deepEqual(merged.map(entry => [entry.identity.symbol, entry.lists]),
+    [['AAPL', ['MY_STOCKS']], ['VEEV', ['MY_STOCKS', 'WATCHLIST']], ['UNH', ['WATCHLIST']]]);
+  const direct = pickPortfolioSlots({
+    ordered: [{key: 'a', sourceId: YAHOO, headline: 'Apple supplier warns', score: 12, ageHours: 1}],
+    generalPicks: [], portfolioLists: {}, slots: 2, firstPassPerCompany: 1
+  });
+  assert.deepEqual(direct.picks, []);
+});
+
+// Writer budget over an already-downloaded list.
+function downloaded(key, slot, score, textKb, ageHours = 2, listIndex = 0) {
+  return {key, sourceId: YAHOO, headline: key, slot, score, ageHours, listIndex, textBytes: textKb * KB};
+}
+const BUDGET_LIST = Object.freeze([
+  downloaded('g1', SLOT.GENERAL, 30, 40, 2, 0),
+  downloaded('g2', SLOT.GENERAL, 20, 40, 2, 1),
+  downloaded('s1', SLOT.SPARE, 22, 20, 2, 2),
+  downloaded('p1', SLOT.PORTFOLIO, 12, 30, 2, 3),
+  downloaded('p2', SLOT.PORTFOLIO, 8, 30, 2, 4),
+  downloaded('r1', SLOT.RECAP, null, 30, 20, 5)
+]);
+const BUDGET_ROWS = [
+  {name: 'under budget: nothing dropped', budgetKb: 190, dropped: [], over: false},
+  {name: 'just over: the lowest general goes first', budgetKb: 160, dropped: ['g2'], over: false},
+  {name: 'general before portfolio, even when the portfolio scores lower', budgetKb: 100,
+    dropped: ['g2', 's1', 'g1'], over: false},
+  {name: 'then portfolio, lowest first', budgetKb: 45, dropped: ['g2', 's1', 'g1', 'p2', 'p1'], over: false},
+  {name: 'recaps alone over budget: kept and reported, not cut', budgetKb: 20,
+    dropped: ['g2', 's1', 'g1', 'p2', 'p1'], over: true}
+];
+for (const row of BUDGET_ROWS) {
+  test(`Step 9F.2e.2 writer budget: ${row.name}`, () => {
+    const result = applyWriterBudget({articles: BUDGET_LIST, budgetBytes: row.budgetKb * KB});
+    assert.deepEqual(result.dropped.map(entry => entry.key), row.dropped);
+    assert.ok(result.dropped.every(entry => entry.reason === 'OVER_TEXT_BUDGET'));
+    assert.equal(result.overBudget, row.over);
+    assert.equal(result.overBudgetReason, row.over ? 'NEVER_DROPPED_ITEMS_EXCEED_BUDGET' : null);
+    assert.ok(result.kept.some(entry => entry.key === 'r1'), 'recap kept');
+    assert.equal(result.totalBytesBefore, 190 * KB);
+    assert.equal(result.totalBytesAfter, result.kept.reduce((sum, entry) => sum + entry.textBytes, 0));
+    // Nothing is shortened: the kept articles are the same, untouched objects.
+    for (const entry of result.kept) assert.equal(entry, BUDGET_LIST.find(item => item.key === entry.key));
+  });
+}
+
+test('Step 9F.2e.2 writer budget: the default is 150 KB and article text is never changed', () => {
+  const text = 'x'.repeat(100 * KB);
+  const articles = [
+    {...downloaded('a', SLOT.GENERAL, 30, 0), text, textBytes: 100 * KB},
+    {...downloaded('b', SLOT.GENERAL, 10, 0, 2, 1), text, textBytes: 100 * KB}
+  ];
+  const result = applyWriterBudget({articles});
+  assert.equal(result.budgetBytes, 150 * KB);
+  assert.deepEqual(result.dropped.map(entry => entry.key), ['b']);
+  assert.equal(result.kept[0].text, text);
+  assert.equal(result.kept[0].textBytes, 100 * KB);
+  assert.throws(() => applyWriterBudget({articles: [{key: 'z', slot: SLOT.GENERAL}]}), /textBytes/);
+  assert.throws(() => applyWriterBudget({articles: [{key: 'z', slot: 'OTHER', textBytes: 1}]}), /unknown slot/);
+});
+
+// Classifier fit: 50 items and 300 KB.
+function classifierItems({protectedCount, generalCount, portfolioCount, bytesEach = KB, protectedBytes = KB}) {
+  const items = [];
+  for (let i = 0; i < protectedCount; i++) items.push({key: `t${i}`, slot: SLOT.PROTECTED, bytes: protectedBytes});
+  items.push({key: 'recap', slot: SLOT.RECAP, bytes: protectedBytes});
+  for (let i = 0; i < generalCount; i++) {
+    items.push({key: `g${i}`, slot: SLOT.GENERAL, bytes: bytesEach, score: 40 - i, listIndex: i});
+  }
+  for (let i = 0; i < portfolioCount; i++) {
+    items.push({key: `p${i}`, slot: SLOT.PORTFOLIO, bytes: bytesEach, score: 8, listIndex: 100 + i});
+  }
+  return items;
+}
+const CLASSIFIER_ROWS = [
+  {name: 'fits: nothing left out', items: classifierItems({protectedCount: 30, generalCount: 10, portfolioCount: 2}),
+    leftOut: [], fits: true},
+  {name: '52 items: the two lowest general items are left out', items: classifierItems({protectedCount: 39,
+    generalCount: 10, portfolioCount: 2}), leftOut: [['g9', 'OVER_ITEM_LIMIT'], ['g8', 'OVER_ITEM_LIMIT']], fits: true},
+  {name: 'over 300 KB: lowest general first, then portfolio', items: classifierItems({protectedCount: 20,
+    generalCount: 2, portfolioCount: 2, bytesEach: 100 * KB, protectedBytes: 7 * KB}),
+  leftOut: [['g1', 'OVER_BYTE_LIMIT'], ['g0', 'OVER_BYTE_LIMIT'], ['p1', 'OVER_BYTE_LIMIT']], fits: true},
+  {name: 'protected items alone over the limit: they stay, reported', items: classifierItems({protectedCount: 60,
+    generalCount: 1, portfolioCount: 0}), leftOut: [['g0', 'OVER_ITEM_LIMIT']], fits: false}
+];
+for (const row of CLASSIFIER_ROWS) {
+  test(`Step 9F.2e.2 classifier fit: ${row.name}`, () => {
+    const result = checkClassifierFit({items: row.items});
+    assert.equal(result.maxItems, 50);
+    assert.equal(result.maxBytes, 300 * KB);
+    assert.deepEqual(result.leftOut.map(entry => [entry.key, entry.reason]), row.leftOut);
+    assert.equal(result.fits, row.fits);
+    for (const item of row.items.filter(i => i.slot === SLOT.PROTECTED || i.slot === SLOT.RECAP)) {
+      assert.ok(result.kept.includes(item.key), `${item.key} kept`);
+    }
+  });
+}
+
+test('Step 9F.2e.2 classifier fit: the rest of the request counts toward the byte limit', () => {
+  const items = classifierItems({protectedCount: 1, generalCount: 2, portfolioCount: 0, bytesEach: 10 * KB});
+  assert.equal(checkClassifierFit({items, overheadBytes: 270 * KB}).leftOut.length, 0);
+  assert.deepEqual(checkClassifierFit({items, overheadBytes: 285 * KB}).leftOut.map(e => e.key), ['g1']);
+});
+
+test('Step 9F.2e.2 summary: every decision listed, short headlines only, no article text', () => {
+  const secret = 'BODY-TEXT-MUST-NOT-APPEAR '.repeat(50);
+  const longHeadline = `Fed holds rates steady ${'and markets wait for the next data release '.repeat(4)}`;
+  const candidates = [
+    candidate('macro', YAHOO, longHeadline, 1, {text: secret}),
+    candidate('apple', YAHOO, 'Apple supplier warns on demand', 2, {text: secret}),
+    candidate('other', YAHOO, 'Retailer names a new chief executive', 1, {text: secret}),
+    candidate('drop', YAHOO, 'Singapore retirement savings tips', 1, {text: secret}),
+    candidate('cnbc', CNBC, 'Treasury yields climb', 3, {text: secret}),
+    candidate('recap', YAHOO, 'Stock market today: Dow rises', 20, {isRecap: true, text: secret})
+  ];
+  const selection = selectArticles({
+    triggerAt: TRIGGER, env: {}, candidates, portfolioLists: {watchlist: [AAPL]},
+    settings: {...ONE_GENERAL, slotsBySource: {[YAHOO]: 1, [CNBC]: 1}}
+  });
+  assert.deepEqual(selection.selected.map(entry => [entry.key, entry.slot]),
+    [['recap', 'RECAP'], ['macro', 'GENERAL'], ['cnbc', 'GENERAL'], ['apple', 'PORTFOLIO']]);
+  // The classifier check first, then the writer budget on what the classifier kept.
+  const classifierFit = checkClassifierFit({
+    items: selection.selected.map(entry => ({...entry, bytes: 1000})), maxItems: 3
+  });
+  const writerBudget = applyWriterBudget({
+    articles: selection.selected.filter(entry => classifierFit.kept.includes(entry.key)),
+    budgetBytes: 2 * secret.length
+  });
+  const summary = selectionSummary({selection, writerBudget, classifierFit});
+  const json = JSON.stringify(summary);
+  assert.ok(!json.includes('BODY-TEXT-MUST-NOT-APPEAR'));
+  assert.deepEqual(summary.decisions.map(d => [d.key, d.decision, d.reason]), [
+    ['macro', 'DROPPED', 'OVER_TEXT_BUDGET'],
+    ['apple', 'KEPT', 'PORTFOLIO_FIRST_PASS'],
+    ['other', 'NOT_CHOSEN', 'SOURCE_SLOTS_FULL'],
+    ['drop', 'DROPPED', 'DROP_LIST'],
+    ['cnbc', 'LEFT_OUT_OF_CLASSIFIER', 'OVER_ITEM_LIMIT'],
+    ['recap', 'KEPT', 'RECAP_ALWAYS_KEPT']
+  ]);
+  assert.equal(summary.decisions[0].headline.length, 80);
+  assert.equal(summary.decisions.find(d => d.key === 'other').portfolioReason, 'NO_PORTFOLIO_COMPANY');
+  assert.equal(summary.portfolio.filled, 1);
+  assert.equal(summary.writerBudget.droppedCount, 1);
+  assert.equal(summary.classifierFit.leftOutCount, 1);
+});
+
+test('Step 9F.2e.2: nothing under api/ or lib/ imports the selection step (not connected)', () => {
+  const root = path.join(__dirname, '..');
+  const files = [];
+  for (const dir of ['api', 'lib', path.join('lib', 'sources')]) {
+    for (const name of fs.readdirSync(path.join(root, dir))) {
+      if (name.endsWith('.js')) files.push(path.join(dir, name));
+    }
+  }
+  const importers = files.filter(file => file !== path.join('lib', 'article-selection.js')
+    && /require\([^)]*article-selection/.test(fs.readFileSync(path.join(root, file), 'utf8')));
+  assert.deepEqual(importers, []);
+});

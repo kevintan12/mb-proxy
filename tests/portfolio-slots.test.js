@@ -153,3 +153,18 @@ test('Step 9F.2d.2: bad inputs are rejected', () => {
   assert.throws(() => pickPortfolioArticles({articles: [], portfolioSlotList: [], slots: 1.5}), TypeError);
   assert.throws(() => pickPortfolioArticles({articles: [], portfolioSlotList: [], firstPassPerCompany: 0}), TypeError);
 });
+
+test('Step 9F.2e.2: a company already covered by a general slot waits for the second pass', () => {
+  const articles = [
+    article('n2', 'Nvidia supplier expands', 28),
+    article('m1', 'Microsoft raises its dividend', 8)
+  ];
+  const covered = pickPortfolioArticles({
+    articles, portfolioSlotList: STARTING_LIST, slots: 1, firstPassPerCompany: 1, coveredSymbols: ['NVDA']
+  });
+  assert.deepEqual(covered.picks.map(pick => [pick.key, pick.pass]), [['m1', 'FIRST_PASS']]);
+  const notCovered = pickPortfolioArticles({articles, portfolioSlotList: STARTING_LIST, slots: 1, firstPassPerCompany: 1});
+  assert.deepEqual(notCovered.picks.map(pick => [pick.key, pick.pass]), [['n2', 'FIRST_PASS']]);
+  assert.throws(() => pickPortfolioArticles({articles, portfolioSlotList: STARTING_LIST, coveredSymbols: 'NVDA'}),
+    /coveredSymbols must be an array/);
+});
