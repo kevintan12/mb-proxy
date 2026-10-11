@@ -22,6 +22,7 @@ const {
   createReaderStopRule
 } = require('../lib/article-selection');
 const {SETTINGS_REGISTRY} = require('../lib/settings-registry');
+const {createReadingBudget} = require('../lib/reading-window');
 
 const KB = 1024;
 const YAHOO = 'us.yahoo-finance';
@@ -540,4 +541,166 @@ test('Step 9F.2e.3.1 reader stop rule: rejects a bad cap or a missing clock', ()
   assert.throws(() => createReaderStopRule({maxAttempts: -1, maxAdmitted: 1, budgetMs: 1, now: () => 0}), /maxAttempts/);
   assert.throws(() => createReaderStopRule({maxAttempts: 1, maxAdmitted: -1, budgetMs: 1, now: () => 0}), /maxAdmitted/);
   assert.throws(() => createReaderStopRule({maxAttempts: 1, maxAdmitted: 1, budgetMs: 1}), /now/);
+});
+
+// Step 9F.2e.3.4a: three additions so the reader can connect safely later
+// (Step 9F.2e.3.4b) -- a shared stopwatch, the old-label positions on
+// tierTryOrder, and decimal caps on createReaderStopRule. Nothing here is
+// connected; every existing assertion above stays unchanged.
+function countingClock(start = 0) {
+  let value = start;
+  let reads = 0;
+  return {
+    now: () => { reads++; return value; },
+    set: next => { value = next; },
+    reads: () => reads
+  };
+}
+
+test('Step 9F.2e.3.4a reader stop rule: a supplied budget is reused as is, with no second stopwatch', () => {
+  const clock = countingClock(0);
+  const sharedBudget = createReadingBudget({budgetMs: 1000, now: clock.now});
+  const readsAfterBudget = clock.reads();
+  const stopRule = createReaderStopRule({maxAttempts: 3, maxAdmitted: 2, budget: sharedBudget});
+  assert.equal(clock.reads(), readsAfterBudget, 'making the stop rule from a supplied budget reads the clock no extra time');
+  assert.deepEqual(stopRule({attemptsMade: 0, admittedCount: 0}), {stop: false, reason: null});
+  assert.equal(clock.reads(), readsAfterBudget + 1, 'one clock read per call, via the shared budget only');
+  clock.set(1000);
+  assert.deepEqual(stopRule({attemptsMade: 0, admittedCount: 0}), {stop: true, reason: 'READING_BUDGET_SPENT'});
+});
+
+test('Step 9F.2e.3.4a reader stop rule: supplying a budget reads the clock the same number of times as making one', () => {
+  const selfMade = countingClock(0);
+  createReaderStopRule({maxAttempts: 3, maxAdmitted: 2, budgetMs: 1000, now: selfMade.now});
+  const selfMadeConstructReads = selfMade.reads();
+
+  const shared = countingClock(0);
+  const budget = createReadingBudget({budgetMs: 1000, now: shared.now});
+  const sharedConstructReads = shared.reads();
+  createReaderStopRule({maxAttempts: 3, maxAdmitted: 2, budget});
+  assert.equal(shared.reads(), sharedConstructReads, 'no extra read when a budget is supplied');
+  assert.equal(sharedConstructReads, selfMadeConstructReads, 'constructing reads the clock the same number of times either way');
+});
+
+test('Step 9F.2e.3.4a reader stop rule: without a supplied budget, behaviour is unchanged from Step 9F.2e.3.1', () => {
+  let clock = 0;
+  const stopRule = createReaderStopRule({maxAttempts: 3, maxAdmitted: 2, budgetMs: 1000, now: () => clock});
+  assert.deepEqual(stopRule({attemptsMade: 0, admittedCount: 0}), {stop: false, reason: null});
+  assert.deepEqual(stopRule({attemptsMade: 3, admittedCount: 0}), {stop: true, reason: 'MAX_ATTEMPTS_REACHED'});
+  assert.deepEqual(stopRule({attemptsMade: 0, admittedCount: 2}), {stop: true, reason: 'MAX_ADMITTED_REACHED'});
+  clock = 999;
+  assert.equal(stopRule({attemptsMade: 0, admittedCount: 0}).stop, false);
+  clock = 1000;
+  assert.deepEqual(stopRule({attemptsMade: 0, admittedCount: 0}), {stop: true, reason: 'READING_BUDGET_SPENT'});
+});
+
+test('Step 9F.2e.3.4a reader stop rule: caps are checked before the clock is ever read, attempts then admitted then budget', () => {
+  const clock = countingClock(0);
+  const stopRule = createReaderStopRule({maxAttempts: 2, maxAdmitted: 2, budgetMs: 1000, now: clock.now});
+  const afterConstruct = clock.reads();
+  assert.deepEqual(stopRule({attemptsMade: 2, admittedCount: 2}), {stop: true, reason: 'MAX_ATTEMPTS_REACHED'});
+  assert.equal(clock.reads(), afterConstruct, 'the attempts cap trips before the clock is read');
+  assert.deepEqual(stopRule({attemptsMade: 0, admittedCount: 2}), {stop: true, reason: 'MAX_ADMITTED_REACHED'});
+  assert.equal(clock.reads(), afterConstruct, 'the admitted cap trips before the clock is read');
+  stopRule({attemptsMade: 0, admittedCount: 0});
+  assert.equal(clock.reads(), afterConstruct + 1, 'the budget is checked, and the clock read, only once neither cap trips');
+});
+
+// Decimal caps: an Admin value like 12.5 is accepted and compared raw (>=),
+// exactly like today's reader loop header -- not rounded, not rejected.
+const DECIMAL_CAP_ROWS = [
+  {name: 'decimal attempts cap 12.5: 12 does not stop, 13 does',
+    maxAttempts: 12.5, maxAdmitted: 1e6, attemptsMade: 12, admittedCount: 0, stop: false, reason: null},
+  {name: 'decimal attempts cap 12.5: 13 stops',
+    maxAttempts: 12.5, maxAdmitted: 1e6, attemptsMade: 13, admittedCount: 0, stop: true, reason: 'MAX_ATTEMPTS_REACHED'},
+  {name: 'decimal admitted cap 6.5: 6 does not stop, 7 does',
+    maxAttempts: 1e6, maxAdmitted: 6.5, attemptsMade: 0, admittedCount: 6, stop: false, reason: null},
+  {name: 'decimal admitted cap 6.5: 7 stops',
+    maxAttempts: 1e6, maxAdmitted: 6.5, attemptsMade: 0, admittedCount: 7, stop: true, reason: 'MAX_ADMITTED_REACHED'},
+  {name: 'a zero attempts cap stops immediately',
+    maxAttempts: 0, maxAdmitted: 1e6, attemptsMade: 0, admittedCount: 0, stop: true, reason: 'MAX_ATTEMPTS_REACHED'},
+  {name: 'a zero admitted cap stops immediately',
+    maxAttempts: 1e6, maxAdmitted: 0, attemptsMade: 0, admittedCount: 0, stop: true, reason: 'MAX_ADMITTED_REACHED'},
+  {name: 'huge caps do not stop a modest count',
+    maxAttempts: 1e9, maxAdmitted: 1e9, attemptsMade: 999999, admittedCount: 999999, stop: false, reason: null}
+];
+for (const row of DECIMAL_CAP_ROWS) {
+  test(`Step 9F.2e.3.4a reader stop rule: ${row.name}`, () => {
+    const stopRule = createReaderStopRule({
+      maxAttempts: row.maxAttempts, maxAdmitted: row.maxAdmitted, budgetMs: 1e9, now: () => 0
+    });
+    assert.deepEqual(stopRule({attemptsMade: row.attemptsMade, admittedCount: row.admittedCount}),
+      {stop: row.stop, reason: row.reason});
+  });
+}
+
+test('Step 9F.2e.3.4a reader stop rule: non-finite, non-numeric or missing caps are rejected like negative caps are', () => {
+  assert.throws(() => createReaderStopRule({maxAttempts: NaN, maxAdmitted: 1, budgetMs: 1, now: () => 0}), /maxAttempts/);
+  assert.throws(() => createReaderStopRule({maxAttempts: Infinity, maxAdmitted: 1, budgetMs: 1, now: () => 0}), /maxAttempts/);
+  assert.throws(() => createReaderStopRule({maxAttempts: 'lots', maxAdmitted: 1, budgetMs: 1, now: () => 0}), /maxAttempts/);
+  assert.throws(() => createReaderStopRule({maxAdmitted: 1, budgetMs: 1, now: () => 0}), /maxAttempts/);
+  assert.throws(() => createReaderStopRule({maxAttempts: 1, maxAdmitted: NaN, budgetMs: 1, now: () => 0}), /maxAdmitted/);
+  assert.throws(() => createReaderStopRule({maxAttempts: 1, maxAdmitted: Infinity, budgetMs: 1, now: () => 0}), /maxAdmitted/);
+  assert.throws(() => createReaderStopRule({maxAttempts: 1, maxAdmitted: 'lots', budgetMs: 1, now: () => 0}), /maxAdmitted/);
+  assert.throws(() => createReaderStopRule({maxAttempts: 1, budgetMs: 1, now: () => 0}), /maxAdmitted/);
+});
+
+test('Step 9F.2e.3.4a reader stop rule: a supplied budget without a spent() method is rejected', () => {
+  assert.throws(() => createReaderStopRule({maxAttempts: 1, maxAdmitted: 1, budget: {}}), /spent/);
+  assert.throws(() => createReaderStopRule({maxAttempts: 1, maxAdmitted: 1, budget: {spent: 'nope'}}), /spent/);
+});
+
+test('Step 9F.2e.3.4a TIER order: oldLabelPositions is exactly the try-last subset, same order, never a dropped position', () => {
+  const generationTime = Date.parse(TRIGGER);
+  const labelWindow = {startsAtInclusive: TRIGGER};
+  const candidates = [
+    {headline: 'Quarterly gardening tips for spring', ageLabel: '100h ago'}, // stale -> tryLast
+    {headline: 'Quarterly gardening tips for spring', ageLabel: '1m ago'}, // fresh -> tryFirst
+    {headline: 'Singapore retirement savings guide', ageLabel: '1m ago'}, // 4a -> dropped
+    {headline: 'Quarterly gardening tips for spring', ageLabel: '1m ago'} // fresh -> tryFirst
+  ];
+  const result = tierTryOrder({candidates, mostActive: [], portfolioSnapshots: [], labelWindow, generationTime});
+  // Unchanged from the Step 9F.2e.3.1 assertions.
+  assert.deepEqual(result.dropped, [2]);
+  assert.deepEqual(result.order, [1, 3, 0]);
+  assert.deepEqual(result.tiers[0], {tier: 5, subTier: '3b'});
+  // New field only.
+  assert.deepEqual(result.oldLabelPositions, [0]);
+  assert.deepEqual(result.order.slice(result.order.length - result.oldLabelPositions.length), result.oldLabelPositions,
+    'old-label positions are exactly the tail of order, in the same order order placed them');
+  for (const position of result.oldLabelPositions) assert.ok(!result.dropped.includes(position), 'never a dropped position');
+});
+
+test('Step 9F.2e.3.4a TIER order: oldLabelPositions is empty when none are stale, and covers every kept position when all are', () => {
+  const generationTime = Date.parse(TRIGGER);
+  const labelWindow = {startsAtInclusive: TRIGGER};
+  const freshCandidates = [
+    {headline: 'Quarterly gardening tips for spring', ageLabel: '1m ago'},
+    {headline: 'Quarterly gardening tips for autumn', ageLabel: '2m ago'}
+  ];
+  const noneOld = tierTryOrder({candidates: freshCandidates, mostActive: [], portfolioSnapshots: [], labelWindow, generationTime});
+  assert.deepEqual(noneOld.oldLabelPositions, []);
+
+  const staleCandidates = [
+    {headline: 'Quarterly gardening tips for spring', ageLabel: '100h ago'},
+    {headline: 'Quarterly gardening tips for autumn', ageLabel: '200h ago'}
+  ];
+  const allOld = tierTryOrder({candidates: staleCandidates, mostActive: [], portfolioSnapshots: [], labelWindow, generationTime});
+  assert.deepEqual([...allOld.oldLabelPositions].sort((a, b) => a - b), [...allOld.order].sort((a, b) => a - b));
+});
+
+test('Step 9F.2e.3.4a TIER order: oldLabelPositions are valid indices into the original candidates array', () => {
+  const generationTime = Date.parse(TRIGGER);
+  const labelWindow = {startsAtInclusive: TRIGGER};
+  const candidates = [
+    {headline: 'Quarterly gardening tips for spring', ageLabel: '100h ago'},
+    {headline: 'AAPL unveils a new product line', ageLabel: '1m ago'}
+  ];
+  const result = tierTryOrder({
+    candidates, mostActive: [], portfolioSnapshots: [{symbol: 'AAPL', instrumentName: 'Apple Inc.'}],
+    labelWindow, generationTime
+  });
+  for (const position of result.oldLabelPositions) {
+    assert.ok(Number.isInteger(position) && position >= 0 && position < candidates.length, 'in range');
+  }
 });
