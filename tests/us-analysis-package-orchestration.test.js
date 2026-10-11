@@ -5949,6 +5949,41 @@ test('Step 9F.2c.1b "AMD" the eye disease does not match the AMD macro term, but
   }
 });
 
+// ---- Step 9F.2c.3: new macro terms, the "dollar" currency fix, "Wall Street" removal ----
+// Rows 8 and 10 are still macro overall (via "earnings" and "Fed"/"rate hike"
+// respectively) even though the dollar match is suppressed for that headline.
+// Row 12 is still macro overall (via "Nvidia") even though "Wall Street" no
+// longer matches.
+const STEP_9F2C3_ROWS = [
+  {headline: 'Update: Equities Rise Intraday as Traders Parse Consumer Sentiment Survey', macro: true},
+  {headline: 'Consumer sentiment falls to a five-month low', macro: true},
+  {headline: 'Stock market today: Dow, S&P 500, Nasdaq rally', macro: true},
+  {headline: 'Dollar steadies near two-month high as US-Iran stalemate lifts oil', macro: true},
+  {headline: 'Dollar slips as Treasury yields ease', macro: true},
+  {headline: 'Costco is booming as Americans rethink where every dollar goes', macro: false},
+  {headline: 'Dollar General raises its full-year forecast', macro: false},
+  {headline: 'Dollar Tree shares jump on earnings', macro: true},
+  {headline: 'Start-up raises billion-dollar round', macro: false},
+  {headline: 'Dollar General and Fed rate hike fears', macro: true},
+  {headline: "The Dividend Battle Wall Street Didn't See Coming", macro: false},
+  {headline: 'Wall Street closes higher as Nvidia leads rally', macro: true}
+];
+
+test('Step 9F.2c.3 new macro terms, the dollar currency fix, and the Wall Street removal', async () => {
+  const candidates = STEP_9F2C3_ROWS.map(row => step8kCandidate(row.headline));
+  const {audit} = await step8kActiveRun({candidates});
+  for (const row of STEP_9F2C3_ROWS) {
+    const key = row.headline.slice(0, 80);
+    const entry = audit.find(e => e.headline === key);
+    assert.ok(entry, row.headline);
+    if (row.macro) {
+      assert.equal(entry.tier, 2, row.headline);
+    } else {
+      assert.notEqual(entry.tier, 2, row.headline);
+    }
+  }
+});
+
 // ---- Step 9F.1c: Yahoo admission by publish time inside the reading window ----
 // Old session window start: PRE/REGULAR 2026-09-04T20:00Z (Labor Day 09-07 skipped), POST
 // 2026-09-08T20:00Z. Reading window start is the last close minus 24 h.
