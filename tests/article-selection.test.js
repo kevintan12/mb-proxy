@@ -16,7 +16,10 @@ const {
   applyWriterBudget,
   checkClassifierFit,
   selectArticles,
-  selectionSummary
+  selectionSummary,
+  checkListOrderFit,
+  tierTryOrder,
+  createReaderStopRule
 } = require('../lib/article-selection');
 const {SETTINGS_REGISTRY} = require('../lib/settings-registry');
 
@@ -394,4 +397,142 @@ test('Step 9F.2e.2: nothing under api/ or lib/ imports the selection step (not c
   const importers = files.filter(file => file !== path.join('lib', 'article-selection.js')
     && /require\([^)]*article-selection/.test(fs.readFileSync(path.join(root, file), 'utf8')));
   assert.deepEqual(importers, []);
+});
+
+// Step 9F.2e.3.1: today's-mode pieces -- still not connected (the test above
+// keeps proving it). Every position array must cover every item exactly once,
+// in range, and in original-list order.
+function assertPositions(items, result) {
+  const all = result.kept.concat(result.dropped);
+  assert.equal(all.length, items.length, 'every item accounted for exactly once');
+  assert.deepEqual([...all].sort((a, b) => a - b), [...items.keys()], 'no position missing or repeated');
+  assert.deepEqual(result.kept, [...result.kept].sort((a, b) => a - b), 'kept stays in original order');
+  assert.deepEqual(result.dropped, [...result.dropped].sort((a, b) => a - b), 'dropped stays in original order');
+}
+
+test('Step 9F.2e.3.1 list-order fit: STOP drops the first misfit and everything after it; SKIP only skips it', () => {
+  const items = [{big: false}, {big: false}, {big: true}, {big: false}, {big: false}];
+  const measure = trial => (trial[trial.length - 1]?.big ? 1000 : 1);
+  const stop = checkListOrderFit({items, mode: 'STOP', maxItems: 10, maxBytes: 500, measure});
+  assert.deepEqual(stop, {kept: [0, 1], dropped: [2, 3, 4]});
+  assertPositions(items, stop);
+  const skip = checkListOrderFit({items, mode: 'SKIP', maxItems: 10, maxBytes: 500, measure});
+  assert.deepEqual(skip, {kept: [0, 1, 3, 4], dropped: [2]});
+  assertPositions(items, skip);
+});
+
+test('Step 9F.2e.3.1 list-order fit: the item-count test trips exactly one over the limit, in either mode', () => {
+  const items = Array.from({length: 51}, () => ({}));
+  const atLimit = checkListOrderFit({items: items.slice(0, 50), mode: 'STOP', maxItems: 50});
+  assert.deepEqual(atLimit.dropped, []);
+  for (const mode of ['STOP', 'SKIP']) {
+    const result = checkListOrderFit({items, mode, maxItems: 50});
+    assert.deepEqual(result.kept, [...Array(50).keys()]);
+    assert.deepEqual(result.dropped, [50]);
+    assertPositions(items, result);
+  }
+});
+
+test('Step 9F.2e.3.1 list-order fit: baseCount counts toward the item limit too', () => {
+  const items = [{}, {}];
+  const result = checkListOrderFit({items, mode: 'STOP', maxItems: 2, baseCount: 1});
+  assert.deepEqual(result, {kept: [0], dropped: [1]});
+});
+
+test('Step 9F.2e.3.1 list-order fit: the byte test trips exactly one byte over the limit', () => {
+  const items = [{size: 150}, {size: 150}, {size: 1}];
+  const measure = trial => trial.reduce((sum, item) => sum + item.size, 0);
+  const atLimit = checkListOrderFit({items: items.slice(0, 2), mode: 'STOP', maxItems: 10, maxBytes: 300, measure});
+  assert.deepEqual(atLimit.dropped, []);
+  const oneOver = checkListOrderFit({items, mode: 'STOP', maxItems: 10, maxBytes: 300, measure});
+  assert.deepEqual(oneOver, {kept: [0, 1], dropped: [2]});
+  assertPositions(items, oneOver);
+});
+
+test('Step 9F.2e.3.1 list-order fit: with no measuring function, only the item-count test runs', () => {
+  const items = [{size: 10 ** 9}, {size: 10 ** 9}, {size: 10 ** 9}, {size: 10 ** 9}];
+  const result = checkListOrderFit({items, mode: 'STOP', maxItems: 3});
+  assert.deepEqual(result, {kept: [0, 1, 2], dropped: [3]});
+});
+
+test('Step 9F.2e.3.1 list-order fit: a noHorizon item is a misfit up front, before any measuring', () => {
+  const items = [{}, {noHorizon: true}, {}];
+  assert.deepEqual(checkListOrderFit({items, mode: 'STOP', maxItems: 10}), {kept: [0], dropped: [1, 2]});
+  assert.deepEqual(checkListOrderFit({items, mode: 'SKIP', maxItems: 10}), {kept: [0, 2], dropped: [1]});
+});
+
+test('Step 9F.2e.3.1 list-order fit: a throwing measuring function is caught and treated as a misfit, never rethrown', () => {
+  const items = [{}, {poison: true}, {}];
+  const measure = trial => {
+    if (trial[trial.length - 1]?.poison) throw new Error('boom');
+    return 1;
+  };
+  assert.deepEqual(checkListOrderFit({items, mode: 'STOP', maxItems: 10, maxBytes: 100, measure}),
+    {kept: [0], dropped: [1, 2]});
+  assert.deepEqual(checkListOrderFit({items, mode: 'SKIP', maxItems: 10, maxBytes: 100, measure}),
+    {kept: [0, 2], dropped: [1]});
+});
+
+test('Step 9F.2e.3.1 list-order fit: an empty list keeps and drops nothing', () => {
+  for (const mode of ['STOP', 'SKIP']) {
+    assert.deepEqual(checkListOrderFit({items: [], mode, maxItems: 5}), {kept: [], dropped: []});
+  }
+});
+
+test('Step 9F.2e.3.1 list-order fit: rejects a bad mode, limit or byte cap', () => {
+  assert.throws(() => checkListOrderFit({items: [], mode: 'OTHER', maxItems: 1}), /mode/);
+  assert.throws(() => checkListOrderFit({items: [], mode: 'STOP', maxItems: -1}), /maxItems/);
+  assert.throws(() => checkListOrderFit({items: [], mode: 'STOP', maxItems: 1, measure: () => 1}), /maxBytes/);
+});
+
+test('Step 9F.2e.3.1 TIER order: non-stale tries first, stale-labelled tries last, tier ranking still drops tier 4a', () => {
+  const generationTime = Date.parse(TRIGGER);
+  const labelWindow = {startsAtInclusive: TRIGGER};
+  const candidates = [
+    {headline: 'Quarterly gardening tips for spring', ageLabel: '100h ago'}, // 3b, stale -> tryLast
+    {headline: 'Quarterly gardening tips for spring', ageLabel: '1m ago'}, // 3b, fresh -> tryFirst
+    {headline: 'Singapore retirement savings guide', ageLabel: '1m ago'}, // 4a -> dropped
+    {headline: 'Quarterly gardening tips for spring', ageLabel: '1m ago'} // 3b, fresh -> tryFirst
+  ];
+  const result = tierTryOrder({candidates, mostActive: [], portfolioSnapshots: [], labelWindow, generationTime});
+  assert.deepEqual(result.dropped, [2]);
+  assert.deepEqual(result.order, [1, 3, 0]);
+  assert.deepEqual([...result.order].sort((a, b) => a - b).concat(result.dropped).sort((a, b) => a - b),
+    [...candidates.keys()], 'every candidate accounted for exactly once');
+  assert.deepEqual(result.tiers[0], {tier: 5, subTier: '3b'});
+  assert.deepEqual(result.tiers[1], {tier: 5, subTier: '3b'});
+  assert.deepEqual(result.tiers[3], {tier: 5, subTier: '3b'});
+});
+
+test('Step 9F.2e.3.1 TIER order: an identity match still ranks and tries before a generic headline', () => {
+  const generationTime = Date.parse(TRIGGER);
+  const labelWindow = {startsAtInclusive: TRIGGER};
+  const candidates = [
+    {headline: 'Quarterly gardening tips for spring', ageLabel: '1m ago'},
+    {headline: 'AAPL unveils a new product line', ageLabel: '1m ago'}
+  ];
+  const result = tierTryOrder({
+    candidates, mostActive: [], portfolioSnapshots: [{symbol: 'AAPL', instrumentName: 'Apple Inc.'}],
+    labelWindow, generationTime
+  });
+  assert.deepEqual(result.order, [1, 0]);
+  assert.deepEqual(result.tiers[1], {tier: 1, subTier: '1a'});
+});
+
+test('Step 9F.2e.3.1 reader stop rule: trips on the attempts cap, the admitted cap, or the budget, using the caller\'s clock', () => {
+  let clock = 0;
+  const stopRule = createReaderStopRule({maxAttempts: 3, maxAdmitted: 2, budgetMs: 1000, now: () => clock});
+  assert.deepEqual(stopRule({attemptsMade: 0, admittedCount: 0}), {stop: false, reason: null});
+  assert.deepEqual(stopRule({attemptsMade: 3, admittedCount: 0}), {stop: true, reason: 'MAX_ATTEMPTS_REACHED'});
+  assert.deepEqual(stopRule({attemptsMade: 0, admittedCount: 2}), {stop: true, reason: 'MAX_ADMITTED_REACHED'});
+  clock = 999;
+  assert.equal(stopRule({attemptsMade: 0, admittedCount: 0}).stop, false);
+  clock = 1000;
+  assert.deepEqual(stopRule({attemptsMade: 0, admittedCount: 0}), {stop: true, reason: 'READING_BUDGET_SPENT'});
+});
+
+test('Step 9F.2e.3.1 reader stop rule: rejects a bad cap or a missing clock', () => {
+  assert.throws(() => createReaderStopRule({maxAttempts: -1, maxAdmitted: 1, budgetMs: 1, now: () => 0}), /maxAttempts/);
+  assert.throws(() => createReaderStopRule({maxAttempts: 1, maxAdmitted: -1, budgetMs: 1, now: () => 0}), /maxAdmitted/);
+  assert.throws(() => createReaderStopRule({maxAttempts: 1, maxAdmitted: 1, budgetMs: 1}), /now/);
 });
