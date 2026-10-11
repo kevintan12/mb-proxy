@@ -114,7 +114,10 @@ const WIRED_TODAY_VALUES = {
   writerRequestLimitBytes: 500 * KB,
   classifierRequestLimitBytes: 300 * KB,
   yahooRecapPageTimeoutMs: 4000,
-  yahooRecapMaxResponseBytes: 1572864
+  yahooRecapMaxResponseBytes: 1572864,
+  yahooInitialCandidateAttempts: 5,
+  auditMaxCandidatesPerEvent: 10,
+  auditMaxEventBytes: 3400
 };
 
 for (const [name, expected] of Object.entries(WIRED_TODAY_VALUES)) {
@@ -134,6 +137,38 @@ test('Step 9F.2a settings registry: new settings are registered but not wired', 
   assert.ok(unwired.length >= 30, `expected at least 30 unwired settings, found ${unwired.length}`);
   for (const name of unwired) {
     assert.equal(SETTINGS_REGISTRY[name].wired, false);
+  }
+});
+
+// Step 9F.6a.1: the audit text limits keep today's literal values, and the
+// classifier item cap row points at the real constant with the same value.
+test('Step 9F.6a.1 settings registry: audit field limits and classifier item cap', () => {
+  assert.equal(SETTINGS_REGISTRY.auditFieldLimits.admin, 'Fixed');
+  assert.deepEqual(settingValue('auditFieldLimits', {env: {}}), {
+    headlineCharacters: 80, headlineBytes: 120,
+    publisherCharacters: 24, publisherBytes: 48,
+    slugCharacters: 48, slugBytes: 48,
+    ageLabelCharacters: 12, ageLabelBytes: 16,
+    failureTypeCharacters: 48, failureTypeBytes: 48,
+    listingOutcomeCharacters: 32, listingOutcomeBytes: 32
+  });
+  const {MAX_CLASSIFICATION_EVIDENCE_ITEMS} = require('../lib/claude-evidence-role-classification');
+  assert.equal(SETTINGS_REGISTRY.maxClassificationEvidenceItems.default, MAX_CLASSIFICATION_EVIDENCE_ITEMS);
+  assert.equal(SETTINGS_REGISTRY.maxClassificationEvidenceItems.reference, true);
+});
+
+// Step 9F.6a.1: Further Readings numbers for Step 9F.2h, Admin, not wired.
+test('Step 9F.6a.1 settings registry: Further Readings numbers registered, not wired', () => {
+  const expected = {
+    furtherReadingMaxLinks: [15, 5, 30],
+    furtherReadingExtrasBudgetSeconds: [10, 5, 30],
+    furtherReadingExtrasMinScore: [12, 0, 58]
+  };
+  for (const [name, [value, min, max]] of Object.entries(expected)) {
+    const entry = SETTINGS_REGISTRY[name];
+    assert.equal(entry.admin, 'Admin', name);
+    assert.equal(entry.wired, false, name);
+    assert.deepEqual([entry.default, entry.min, entry.max], [value, min, max], name);
   }
 });
 
