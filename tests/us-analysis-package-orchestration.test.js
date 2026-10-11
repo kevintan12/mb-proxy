@@ -6145,3 +6145,56 @@ test('Step 9F.1d the 30 second reading budget stops further reading partway', as
   assert.deepEqual([summary.articleFetchAttemptCount, summary.downloadAttemptCount, summary.readingBudgetStopped],
     [3, 7, true]);
 });
+
+// Step 9F.6a.4: the candidate pool reaches the optional hook, in the audit's
+// order with the audit's decisions; a failing hook changes nothing; without a
+// hook the package is the same.
+test('Step 9F.6a.4: candidate pool handed to the optional hook, package unchanged', async () => {
+  const articles = step9F1fArticles(3);
+  const pools = [];
+  const build = extra => {
+    const diagnostics = [];
+    return {diagnostics, ...harness({
+      createTelemetryAcquisition: () => ({async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {hasOverlay: false});
+      }}),
+      yahooLatestNewsDiscovery: {async discoverLatestNews() {
+        return {ok: true, type: 'SUCCESS', candidates: articles.map(article => ({
+          headline: article.title, url: article.canonicalUrl, uuid: null, publisher: 'Yahoo Finance'
+        }))};
+      }},
+      yahooCurrentNewsArticleContentAcquisition: {async acquireArticleContent(candidate) {
+        const article = articles.find(entry => entry.canonicalUrl === candidate.url);
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: article.canonicalUrl,
+          headline: article.title, publisher: 'Yahoo Finance',
+          publishedAt: article.publishedAt, updatedAt: null, articleText: article.summary
+        }};
+      }},
+      now: () => new Date('2026-09-08T15:00:00.000Z'),
+      onDiagnostics: value => diagnostics.push(value),
+      ...extra
+    })};
+  };
+  const withHook = build({onCandidatePool: value => pools.push(value)});
+  const withHookOutput = await withHook.service.assemble(request());
+  const withoutHook = build({});
+  const withoutHookOutput = await withoutHook.service.assemble(request());
+  const throwingHook = build({onCandidatePool: () => { throw new Error('hook failed'); }});
+  const throwingHookOutput = await throwingHook.service.assemble(request());
+
+  assert.equal(pools.length, 1);
+  assert.equal(pools[0].sourceId, 'us.yahoo-finance');
+  assert.ok(Object.isFrozen(pools[0].pool));
+  const audit = withHook.diagnostics.filter(value => value.stage === 'activeYahooCandidateAudit')
+    .flatMap(value => value.candidates);
+  assert.deepEqual(pools[0].pool.map(entry => [entry.rank, entry.decision]),
+    audit.map(entry => [entry.rank, entry.decision]));
+  assert.deepEqual(pools[0].pool.map(entry => entry.url), articles.map(article => article.canonicalUrl));
+  assert.equal(pools[0].pool.every(entry => entry.opened && entry.sourceId === 'us.yahoo-finance'), true);
+  // The pool is never logged or put in the package.
+  assert.equal(JSON.stringify(withHook.diagnostics).includes('"pool"'), false);
+  assert.equal(JSON.stringify(withHookOutput), JSON.stringify(withoutHookOutput));
+  assert.equal(JSON.stringify(throwingHookOutput), JSON.stringify(withoutHookOutput));
+  assert.throws(() => harness({onCandidatePool: 'not a function'}), TypeError);
+});

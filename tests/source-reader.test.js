@@ -300,3 +300,72 @@ test('Step 9F.6a.3 Yahoo source: listing counts sanitised, failures empty, headl
     }
   });
 });
+
+test('Step 9F.6a.4 shared reader: the pool lists every candidate in ranked order with its decision', async () => {
+  const {source} = fakeSource({a: 'OK', b: 'HTTP_404', old: 'OK', c: 'OK', d: 'OK'},
+    {ageLabels: {old: '9 days ago'}});
+  const {result, events} = await runReader(source,
+    {limits: {maxArticleAttempts: 12, maxAdmittedArticles: 2, initialCandidateAttempts: 5}});
+  const audit = events.filter(event => event.stage === 'activeYahooCandidateAudit')
+    .flatMap(event => event.candidates);
+  assert.ok(Object.isFrozen(result.pool));
+  assert.equal(result.pool.length, 5);
+  assert.deepEqual(result.pool.map(entry => [entry.rank, entry.decision]),
+    audit.map(entry => [entry.rank, entry.decision]));
+  const byName = Object.fromEntries(result.pool.map(entry => [entry.url.split('/').at(-1).replace('.html', ''), entry]));
+  assert.deepEqual(byName.a, {
+    sourceId: 'us.yahoo-finance', rank: 1, url: urlFor('a'), headline: 'Fake headline a',
+    publisher: 'Fake Wire', listedAt: null, ageLabel: null, edition: 'US', tier: 5, subTier: '3b',
+    labelOld: false, opened: true, attempts: 1, publishedAt: iso(LAST_CLOSE - 3600000), decision: 'ADMITTED'
+  });
+  assert.equal(byName.b.decision, 'FETCH_FAILED');
+  assert.equal(byName.b.publishedAt, null);
+  // Two admitted (a, c): d and the label-old candidate are never opened.
+  assert.equal(byName.d.opened, false);
+  assert.equal(byName.d.attempts, null);
+  assert.equal(byName.d.decision, 'SKIPPED_MAX_ADMITTED');
+  assert.equal(byName.old.labelOld, true);
+  assert.equal(byName.old.ageLabel, '9 days ago');
+  assert.equal(byName.old.opened, false);
+  // The pool is not logged.
+  assert.equal(JSON.stringify(events).includes(urlFor('a')), false);
+});
+
+test('Step 9F.6a.5 audit: every candidate audit event names its source once', async () => {
+  const pages = Object.fromEntries(Array.from({length: 14}, (_, index) => [`story${index}`, 'HTTP_404']));
+  const {events} = await runReader(fakeSource(pages).source);
+  const audit = events.filter(event => event.stage === 'activeYahooCandidateAudit');
+  assert.equal(audit.length, 2);
+  for (const event of audit) {
+    assert.deepEqual(Object.keys(event).slice(0, 4), ['stage', 'sourceId', 'part', 'parts']);
+    assert.equal(event.sourceId, 'us.yahoo-finance');
+    assert.equal(event.candidates.some(entry => 'sourceId' in entry), false);
+  }
+  // The reading summary is unchanged: no source id there.
+  assert.equal('sourceId' in events[0], false);
+});
+
+test('Step 9F.6a.5 audit: the source id is counted, so no event passes the byte limit at the edge', () => {
+  const {auditEvents, AUDIT_MAX_EVENT_BYTES} = require('../lib/source-audit');
+  const entry = (rank, pad) => ({rank, tier: 5, subTier: '3b', headline: 'x'.repeat(pad),
+    publisher: 'Fake Wire', slug: `story-${rank}`, edition: 'US', ageLabel: null, decision: 'SKIPPED_MAX_ATTEMPTS'});
+  let closest = 0;
+  const partCounts = new Set();
+  // Five candidates, the last one growing a byte at a time across the limit.
+  for (let pad = 0; pad <= 1600; pad++) {
+    const entries = [entry(1, 300), entry(2, 300), entry(3, 300), entry(4, 300), entry(5, pad)];
+    const events = auditEvents(entries, null, null,
+      {stage: 'activeYahooCandidateAudit', sourceId: 'us.yahoo-finance'});
+    partCounts.add(events.length);
+    for (const event of events) {
+      const bytes = Buffer.byteLength(JSON.stringify({...event, generationId: '0'.repeat(36)}), 'utf8');
+      assert.ok(bytes <= AUDIT_MAX_EVENT_BYTES, `pad ${pad}: ${bytes} bytes`);
+      closest = Math.max(closest, bytes);
+    }
+    assert.deepEqual(events.flatMap(event => event.candidates), entries);
+  }
+  // The splitter counts a separator for every candidate, so it stops a few
+  // bytes short of the limit; the sweep still reaches within 10 bytes of it.
+  assert.ok(closest >= AUDIT_MAX_EVENT_BYTES - 10, `closest to the limit was ${closest}`);
+  assert.deepEqual([...partCounts], [1, 2]);
+});
