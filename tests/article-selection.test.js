@@ -1,5 +1,5 @@
-// Step 9F.2e.2: the one article-selection step. Pure and not wired into the
-// pipeline -- these tests call lib/article-selection.js directly.
+// Step 9F.2e.2: the one article-selection step. Pure; these tests call
+// lib/article-selection.js directly (Step 9F.2e.3.2 wires only checkListOrderFit in).
 'use strict';
 
 const test = require('node:test');
@@ -386,7 +386,9 @@ test('Step 9F.2e.2 summary: every decision listed, short headlines only, no arti
   assert.equal(summary.classifierFit.leftOutCount, 1);
 });
 
-test('Step 9F.2e.2: nothing under api/ or lib/ imports the selection step (not connected)', () => {
+// Step 9F.2e.3.2 (supersedes the Step 9F.2e.2 "nothing imports it" test): only
+// the orchestration imports the selection step, and only checkListOrderFit.
+test('Step 9F.2e.3.2: only the orchestration imports the selection step, and only checkListOrderFit', () => {
   const root = path.join(__dirname, '..');
   const files = [];
   for (const dir of ['api', 'lib', path.join('lib', 'sources')]) {
@@ -394,14 +396,17 @@ test('Step 9F.2e.2: nothing under api/ or lib/ imports the selection step (not c
       if (name.endsWith('.js')) files.push(path.join(dir, name));
     }
   }
+  const imports = /require\([^)]*article-selection/;
+  const sources = new Map(files.map(file => [file, fs.readFileSync(path.join(root, file), 'utf8')]));
   const importers = files.filter(file => file !== path.join('lib', 'article-selection.js')
-    && /require\([^)]*article-selection/.test(fs.readFileSync(path.join(root, file), 'utf8')));
-  assert.deepEqual(importers, []);
+    && imports.test(sources.get(file)));
+  assert.deepEqual(importers, [path.join('lib', 'us-analysis-package-orchestration.js')]);
+  const lines = sources.get(importers[0]).split(/\r?\n/).filter(line => imports.test(line));
+  assert.deepEqual(lines, ["const {checkListOrderFit} = require('./article-selection');"]);
 });
 
-// Step 9F.2e.3.1: today's-mode pieces -- still not connected (the test above
-// keeps proving it). Every position array must cover every item exactly once,
-// in range, and in original-list order.
+// Step 9F.2e.3.1: today's-mode pieces. Every position array must cover every
+// item exactly once, in range, and in original-list order.
 function assertPositions(items, result) {
   const all = result.kept.concat(result.dropped);
   assert.equal(all.length, items.length, 'every item accounted for exactly once');
