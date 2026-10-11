@@ -9,7 +9,8 @@ const {
   settingValue,
   clampSetting,
   clampBooleanSetting,
-  checkArticleBudgetFits
+  checkArticleBudgetFits,
+  checkRecencyNeverOverridesMacro
 } = require('../lib/settings-registry');
 
 const KB = 1024;
@@ -167,3 +168,55 @@ test("Step 9F.2b: checkArticleBudgetFits still fits at today's live writer limit
   });
   assert.deepEqual(fits, {fits: true, budgetBytes: 150 * KB, warning: null});
 });
+
+// Step 9F.2c.2 safety check: none of the three recency bonuses may ever reach
+// or exceed the US macro points (not wired into any pipeline code; unit-tested
+// only, per the task).
+test('Step 9F.2c.2 settings registry: checkRecencyNeverOverridesMacro is safe at defaults', () => {
+  const result = checkRecencyNeverOverridesMacro({env: {}});
+  assert.equal(result.safe, true);
+  assert.equal(result.warning, null);
+  assert.deepEqual(result.values, {
+    recencyBonusUnder6h: SETTINGS_REGISTRY.recencyBonusUnder6h.default,
+    recencyBonus6to24h: SETTINGS_REGISTRY.recencyBonus6to24h.default,
+    recencyBonusOver24h: SETTINGS_REGISTRY.recencyBonusOver24h.default
+  });
+});
+
+// Each recency bonus's own safe range (0-8) sits well below the macro points'
+// default (20), so the breach has to come from lowering rankingPointsUsMacro
+// (its own safe range is 0-40, so this is itself a legal Admin override), not
+// from raising a recency bonus past its own ceiling. The other two recency
+// bonuses are pinned to 0 in each case so the clamp under test is isolated.
+const RECENCY_BONUS_NAMES_LIST = ['recencyBonusUnder6h', 'recencyBonus6to24h', 'recencyBonusOver24h'];
+const MACRO_ENV_VAR = SETTINGS_REGISTRY.rankingPointsUsMacro.envVar;
+
+for (const name of RECENCY_BONUS_NAMES_LIST) {
+  const envVar = SETTINGS_REGISTRY[name].envVar;
+  const maxBonus = SETTINGS_REGISTRY[name].max;
+
+  test(`Step 9F.2c.2 settings registry: checkRecencyNeverOverridesMacro clamps ${name} at the macro points`, () => {
+    const env = {[MACRO_ENV_VAR]: String(maxBonus), [envVar]: String(maxBonus)};
+    for (const other of RECENCY_BONUS_NAMES_LIST) {
+      if (other !== name) env[SETTINGS_REGISTRY[other].envVar] = '0';
+    }
+    const result = checkRecencyNeverOverridesMacro({env});
+    assert.equal(result.safe, false);
+    assert.match(result.warning, new RegExp(`${name} \\(${maxBonus}\\)`));
+    assert.equal(result.values[name], maxBonus - 1);
+    for (const other of RECENCY_BONUS_NAMES_LIST) {
+      if (other !== name) assert.equal(result.values[other], 0);
+    }
+  });
+
+  test(`Step 9F.2c.2 settings registry: checkRecencyNeverOverridesMacro clamps ${name} when it exceeds the macro points`, () => {
+    const lowMacroPoints = Math.max(0, maxBonus - 3);
+    const env = {[MACRO_ENV_VAR]: String(lowMacroPoints), [envVar]: String(maxBonus)};
+    for (const other of RECENCY_BONUS_NAMES_LIST) {
+      if (other !== name) env[SETTINGS_REGISTRY[other].envVar] = '0';
+    }
+    const result = checkRecencyNeverOverridesMacro({env});
+    assert.equal(result.safe, false);
+    assert.equal(result.values[name], lowMacroPoints - 1);
+  });
+}

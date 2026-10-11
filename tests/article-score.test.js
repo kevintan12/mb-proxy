@@ -1,0 +1,251 @@
+// Step 9F.2c.2: table-driven checks for the shared article score. Not wired
+// into ranking, slots or selection -- these tests exercise lib/article-score.js
+// directly, with no pipeline code involved.
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const {scoreArticle, compareScoredArticles} = require('../lib/article-score');
+const {SETTINGS_REGISTRY} = require('../lib/settings-registry');
+
+const TRIGGER = '2026-10-11T12:00:00Z';
+
+const PORTFOLIO_ITEM = Object.freeze({symbol: 'ACME', shortName: 'Acme Inc', longName: 'Acme Incorporated'});
+const MOST_ACTIVE_ITEM = Object.freeze({symbol: 'ZETA', shortName: 'Zeta Corp', longName: 'Zeta Corp'});
+const INCLUDE_WORDS = Object.freeze([{term: 'moonshot'}]);
+
+const POINTS = Object.freeze({
+  usMacro: SETTINGS_REGISTRY.rankingPointsUsMacro.default,
+  mostActive: SETTINGS_REGISTRY.rankingPointsMostActive.default,
+  portfolio: SETTINGS_REGISTRY.rankingPointsPortfolio.default,
+  wirePublishers: SETTINGS_REGISTRY.rankingPointsWirePublishers.default,
+  includeWords: SETTINGS_REGISTRY.rankingPointsIncludeWords.default,
+  asiaEurope: SETTINGS_REGISTRY.rankingPointsAsiaEurope.default,
+  benchmarkOrGeneric: SETTINGS_REGISTRY.rankingPointsBenchmarkOrGeneric.default
+});
+const RECENCY = Object.freeze({
+  under6h: SETTINGS_REGISTRY.recencyBonusUnder6h.default,
+  between: SETTINGS_REGISTRY.recencyBonus6to24h.default,
+  over24h: SETTINGS_REGISTRY.recencyBonusOver24h.default
+});
+
+// Kevin's numbers (4 Oct 2026): 20/12/8/5/5/3/1, max 54 without recency, 58 with
+// the biggest recency bonus. This confirms the registry defaults (set in Step
+// 9F.2a) are exactly what he specified today, with no changes needed.
+test('Step 9F.2c.2: registry defaults match the specified points and recency values', () => {
+  assert.deepEqual(POINTS, {
+    usMacro: 20, mostActive: 12, portfolio: 8, wirePublishers: 5,
+    includeWords: 5, asiaEurope: 3, benchmarkOrGeneric: 1
+  });
+  assert.deepEqual(RECENCY, {under6h: 4, between: 2, over24h: 0});
+  const maxWithoutRecency = Object.values(POINTS).reduce((sum, points) => sum + points, 0);
+  assert.equal(maxWithoutRecency, 54);
+  assert.equal(maxWithoutRecency + RECENCY.under6h, 58);
+});
+
+function score(candidate, options = {}) {
+  return scoreArticle(candidate, {triggerAt: TRIGGER, ...options});
+}
+
+// Each list alone.
+const SINGLE_LIST_ROWS = [
+  {name: 'usMacro', headline: 'Nasdaq futures tick higher on jobs report', options: {}, key: 'usMacro'},
+  {
+    name: 'mostActive', headline: 'Zeta Corp shares jump in heavy trading',
+    options: {mostActiveIdentities: [MOST_ACTIVE_ITEM]}, key: 'mostActive'
+  },
+  {
+    name: 'portfolio', headline: 'Acme Inc posts a strong quarter',
+    options: {portfolioIdentities: [PORTFOLIO_ITEM]}, key: 'portfolio'
+  },
+  {
+    name: 'wirePublishers', headline: 'Quiet session for regional shops', publisher: 'Reuters',
+    options: {}, key: 'wirePublishers'
+  },
+  {
+    name: 'includeWords', headline: 'Moonshot plan unveiled at the conference',
+    options: {includeWords: INCLUDE_WORDS}, key: 'includeWords'
+  },
+  {name: 'asiaEurope', headline: 'Nikkei slips in early trade', options: {}, key: 'asiaEurope'},
+  {
+    name: 'benchmarkOrGeneric', headline: 'Stocks drift in a quiet session', options: {},
+    key: 'benchmarkOrGeneric'
+  }
+];
+
+for (const row of SINGLE_LIST_ROWS) {
+  test(`Step 9F.2c.2: ${row.name} alone scores ${POINTS[row.key]} points`, () => {
+    const result = score({headline: row.headline, publisher: row.publisher}, row.options);
+    assert.equal(result.matched[row.key], POINTS[row.key]);
+    for (const key of Object.keys(result.matched)) {
+      if (key !== row.key) assert.equal(result.matched[key], 0);
+    }
+    assert.equal(result.score, POINTS[row.key]);
+    assert.equal(result.excludedByDropList, false);
+  });
+}
+
+// Two- and three-list combinations (additive).
+test('Step 9F.2c.2: two lists together are additive (macro + wire publisher)', () => {
+  const result = score({headline: 'Fed flags inflation risk in new report', publisher: 'Reuters'});
+  assert.equal(result.matched.usMacro, POINTS.usMacro);
+  assert.equal(result.matched.wirePublishers, POINTS.wirePublishers);
+  assert.equal(result.score, POINTS.usMacro + POINTS.wirePublishers);
+});
+
+test('Step 9F.2c.2: three lists together are additive (portfolio + asiaEurope + benchmarkOrGeneric)', () => {
+  const result = score(
+    {headline: 'Acme Inc gains as Nikkei leads regional stocks higher'},
+    {portfolioIdentities: [PORTFOLIO_ITEM]}
+  );
+  assert.equal(result.matched.portfolio, POINTS.portfolio);
+  assert.equal(result.matched.asiaEurope, POINTS.asiaEurope);
+  assert.equal(result.matched.benchmarkOrGeneric, POINTS.benchmarkOrGeneric);
+  assert.equal(result.score, POINTS.portfolio + POINTS.asiaEurope + POINTS.benchmarkOrGeneric);
+});
+
+// Maximum without recency (54) and with the biggest recency bonus (58).
+const MAX_HEADLINE = 'Acme Inc and Zeta Corp surge as Fed flags inflation; '
+  + 'Nikkei dips while stocks rally and moonshot plan excites traders';
+const MAX_OPTIONS = {
+  portfolioIdentities: [PORTFOLIO_ITEM], mostActiveIdentities: [MOST_ACTIVE_ITEM], includeWords: INCLUDE_WORDS
+};
+
+test('Step 9F.2c.2: maximum score without recency is 54', () => {
+  const result = score({headline: MAX_HEADLINE, publisher: 'Reuters'}, MAX_OPTIONS);
+  assert.deepEqual(result.matched, POINTS);
+  assert.equal(result.recencyPoints, 0);
+  assert.equal(result.score, 54);
+});
+
+test('Step 9F.2c.2: maximum score with the biggest recency bonus is 58', () => {
+  const publishedAt = '2026-10-11T10:30:00Z'; // 1.5h before TRIGGER, under the near threshold
+  const result = score({headline: MAX_HEADLINE, publisher: 'Reuters', publishedAt}, MAX_OPTIONS);
+  assert.equal(result.recencyPoints, RECENCY.under6h);
+  assert.equal(result.score, 58);
+});
+
+// Recency buckets, from a known publish time.
+const RECENCY_ROWS = [
+  {name: 'under 6h (1h)', publishedAt: '2026-10-11T11:00:00Z', ageHours: 1, bonus: RECENCY.under6h},
+  {name: 'between (12h)', publishedAt: '2026-10-11T00:00:00Z', ageHours: 12, bonus: RECENCY.between},
+  {name: 'over 24h (48h)', publishedAt: '2026-10-09T12:00:00Z', ageHours: 48, bonus: RECENCY.over24h},
+  {name: 'exactly 6h -> middle bucket', publishedAt: '2026-10-11T06:00:00Z', ageHours: 6, bonus: RECENCY.between},
+  {name: 'exactly 24h -> far bucket', publishedAt: '2026-10-10T12:00:00Z', ageHours: 24, bonus: RECENCY.over24h}
+];
+
+for (const row of RECENCY_ROWS) {
+  test(`Step 9F.2c.2: recency ${row.name}`, () => {
+    const result = score({headline: 'No list words here at all', publishedAt: row.publishedAt});
+    assert.equal(result.ageHours, row.ageHours);
+    assert.equal(result.recencyBasis, 'publishedAt');
+    assert.equal(result.recencyPoints, row.bonus);
+  });
+}
+
+// Recency from the age label, used when the publish time isn't known yet.
+test('Step 9F.2c.2: recency from an age label under 6h', () => {
+  const result = score({headline: 'No list words here at all', ageLabel: '5h ago'});
+  assert.equal(result.recencyBasis, 'ageLabel');
+  assert.equal(result.ageHours, 5);
+  assert.equal(result.recencyPoints, RECENCY.under6h);
+});
+
+test('Step 9F.2c.2: recency from an age label over 24h', () => {
+  const result = score({headline: 'No list words here at all', ageLabel: '2d ago'});
+  assert.equal(result.recencyBasis, 'ageLabel');
+  assert.equal(result.ageHours, 48);
+  assert.equal(result.recencyPoints, RECENCY.over24h);
+});
+
+// Unknown publish time AND unknown/unparseable age label -> recency 0.
+test('Step 9F.2c.2: unknown publish time and no age label gives recency 0', () => {
+  const result = score({headline: 'No list words here at all'});
+  assert.equal(result.recencyBasis, 'unknown');
+  assert.equal(result.ageHours, null);
+  assert.equal(result.recencyPoints, 0);
+});
+
+test('Step 9F.2c.2: unknown publish time and an unparseable age label gives recency 0', () => {
+  const result = score({headline: 'No list words here at all', ageLabel: 'yesterday'});
+  assert.equal(result.recencyBasis, 'unknown');
+  assert.equal(result.recencyPoints, 0);
+});
+
+// A fresh headline with no list words must score below an older headline that
+// has a macro word -- recency can never overrule the US macro list.
+test('Step 9F.2c.2: a fresh no-match headline scores below an older macro headline', () => {
+  const freshNoMatch = score({headline: 'Local bakery wins award', publishedAt: '2026-10-11T11:00:00Z'});
+  const olderMacro = score({headline: 'Nasdaq futures tick higher'});
+  assert.equal(freshNoMatch.score, RECENCY.under6h);
+  assert.equal(olderMacro.score, POINTS.usMacro);
+  assert.ok(olderMacro.score > freshNoMatch.score);
+});
+
+// Drop list: removed only when nothing else scores it.
+test('Step 9F.2c.2: a drop-only headline is excluded', () => {
+  const result = score({headline: 'Singapore shoppers flock to malls this weekend'});
+  assert.equal(result.excludedByDropList, true);
+  assert.deepEqual(result.matched, {
+    usMacro: 0, mostActive: 0, portfolio: 0, wirePublishers: 0, includeWords: 0, asiaEurope: 0, benchmarkOrGeneric: 0
+  });
+});
+
+test('Step 9F.2c.2: a drop term plus a macro term in the same headline is not excluded', () => {
+  const result = score({headline: 'Singapore markets react as Fed raises rates'});
+  assert.equal(result.excludedByDropList, false);
+  assert.equal(result.matched.usMacro, POINTS.usMacro);
+});
+
+// A wire publisher (Reuters) reaching Yahoo gets +5 independent of a macro match.
+test('Step 9F.2c.2: a Reuters story via Yahoo gets the wire-publisher points regardless of macro', () => {
+  const noMacro = score({headline: 'Quiet session for regional shops', publisher: 'Reuters'});
+  assert.equal(noMacro.matched.wirePublishers, POINTS.wirePublishers);
+  assert.equal(noMacro.matched.usMacro, 0);
+
+  const withMacro = score({headline: 'Fed raises rates, Wall Street reacts', publisher: 'Reuters'});
+  assert.equal(withMacro.matched.wirePublishers, POINTS.wirePublishers);
+  assert.equal(withMacro.matched.usMacro, POINTS.usMacro);
+});
+
+// Include words: a match gets +5; an empty list gets 0.
+test('Step 9F.2c.2: an include-word match scores 5 and an empty list scores 0', () => {
+  const matched = score({headline: 'Moonshot plan unveiled'}, {includeWords: INCLUDE_WORDS});
+  assert.equal(matched.matched.includeWords, POINTS.includeWords);
+
+  const empty = score({headline: 'Moonshot plan unveiled'}, {includeWords: []});
+  assert.equal(empty.matched.includeWords, 0);
+
+  const defaulted = score({headline: 'Moonshot plan unveiled'});
+  assert.equal(defaulted.matched.includeWords, 0);
+});
+
+// Portfolio match gets +8.
+test('Step 9F.2c.2: a portfolio identity match scores 8', () => {
+  const result = score(
+    {headline: 'Acme Inc posts a strong quarter'},
+    {portfolioIdentities: [PORTFOLIO_ITEM]}
+  );
+  assert.equal(result.matched.portfolio, POINTS.portfolio);
+});
+
+// Ties: newer first, then original listing order.
+test('Step 9F.2c.2: compareScoredArticles breaks ties by newer first, then listing order', () => {
+  const entries = [
+    {score: 20, ageHours: 5, listIndex: 0},
+    {score: 20, ageHours: 5, listIndex: 1},
+    {score: 20, ageHours: 2, listIndex: 2},
+    {score: 10, ageHours: 1, listIndex: 3}
+  ];
+  const sorted = [...entries].sort(compareScoredArticles);
+  assert.deepEqual(sorted.map(entry => entry.listIndex), [2, 0, 1, 3]);
+});
+
+test('Step 9F.2c.2: compareScoredArticles falls back to listing order when an age is unknown', () => {
+  const entries = [
+    {score: 20, ageHours: null, listIndex: 0},
+    {score: 20, ageHours: 3, listIndex: 1}
+  ];
+  const sorted = [...entries].sort(compareScoredArticles);
+  assert.deepEqual(sorted.map(entry => entry.listIndex), [0, 1]);
+});
