@@ -1056,3 +1056,54 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Could not share in this step:** unchanged from the batch-1 entry: where admitted items go in the evidence list and the completed-state classifier re-check (orchestration until 9F.2e); Yahoo-named log stages (until 9F.6b).
 - **Must not change:** as the 9F.6a.1 to 9F.6a.3 entry; plus: the pool stays in memory only (not logged, not in Neon, not in the package) until a step that uses it says otherwise; the source id appears once per audit event and is counted against the 3400-byte limit; the hook never affects package assembly.
 - **Supersedes:** none.
+
+## Step 9F.2d.1, 9F.2d.2, 9F.2e.1 — Score drop rule, portfolio-slot picker, shadow score in the audit (repo: mb-proxy)
+
+- **Date:** 2026-10-11 · **Branch:** step-9f2d-selection · **Status:** IMPLEMENTED, tests passing; not yet committed. Phase 1 of 9F.2d/9F.2e: nothing is connected to the ranking, the slots or the selection. The reader still ranks by tier. Phase 2 (9F.2e.2 onward) waits for Kevin's sign-off on the before-and-after table.
+- **Kevin's answers (11 Oct 2026):**
+  1. A drop-list or "how to" headline is protected only by a portfolio, most-active, US macro or Asia-Europe match, or by the include-words list (promote-only, empty today). Wire publishers and the generic benchmark/market list do NOT protect. This is today's tier behaviour.
+  2. The attempt cap's planned value is 18 (safe range 6-24, Admin), not live until Step 9F.2e.5.
+  3. Section 4 will cite Yahoo portfolio articles in completed states: Step 9F.2d.3 (later).
+  4. **Recaps are never dropped by the slots or by the budget.** Binding for Steps 9F.2d.3 and 9F.2e.2-9F.2e.6.
+  5. The AMD eye-disease exclusion for company matching is a separate small step, 9F.2d.4 (later).
+  6. Portfolio **scoring** uses both lists (as the tier ranking does today). Portfolio **slots** use only the list that started the run, passed as one named input (`portfolioSlotSnapshots` / `portfolioSlotList`) so Step 21D can widen it.
+- **Decision:**
+  1. **9F.2d.1 — settings and the score's drop rule.** `lib/article-score.js`: the drop check now uses `DROP_PROTECTING_LISTS` (portfolio, mostActive, usMacro, asiaEurope, includeWords); a headline with a drop-list term or a "how to" start and none of those is excluded, whatever its wire, generic or recency points. The result gains `dropReason` (`DROP_LIST`, `HOW_TO` or null); `excludedByDropList` covers both. The "how to" rule moves from the inline regex in `lib/source-ranking.js` to the named list `HOW_TO_DROP_PREFIXES` in `lib/headline-lists.js`, compiled by the new `headlineStartPattern` in `lib/headline-matching.js` into exactly the old pattern (`/^\s*how\s+to(?![A-Za-z0-9])/i`; a test checks source, flags and the answer on every string literal in the test files). The tier ranking reads it from there; its tier position is unchanged. Still not called by any pipeline code.
+  2. **The live attempt cap stays 12.** `yahooMaxArticleAttempts` is read on every run, so changing its default to 18 would let today's runs try more articles. It stays 12 (6-20, live); the planned value is a separate, unwired row, `yahooMaxArticleAttemptsPlanned` (18, 6-24, Admin, env `YAHOO_MAX_ARTICLE_ATTEMPTS_PLANNED`). Step 9F.2e.5 swaps them.
+  3. **9F.2d.2 — portfolio-slot picker.** New `lib/portfolio-slots.js`, `pickPortfolioArticles({articles, portfolioSlotList, slots, firstPassPerCompany, alreadyChosen})`, pure and not wired. Eligible: names a company in `portfolioSlotList`, not already holding a general slot, not a recap. First pass in score order (ties: newer, then listing order): one article per company not yet covered by a portfolio pick (`portfolioFirstPassPerCompany`, Fixed 1). Second pass, only if a slot is still empty: the next best article, even for a covered company. An article naming two companies covers both. Returns picks (with symbols and pass) and passed-over articles with a reason (`RECAP`, `ALREADY_CHOSEN`, `NO_PORTFOLIO_COMPANY`, `SLOTS_FULL`).
+  4. **9F.2e.1 — shadow score.** `lib/source-reader.js` scores every candidate with `scoreArticle`. The inputs are the same names the tier ranking uses (both lists through the shared `portfolioIdentitiesFrom`, Most Active), the trigger time (`acquisitionStartedAt`) and the headline, publisher and age label (before download, so recency comes from the label). Nothing about the order, the decisions or the caps changes.
+     - **New fields in each candidate-audit entry (logs only),** right after `subTier`: `score` (number), `scoreParts` (non-zero parts, e.g. "macro 20, wire 5, recency 2", "none" when nothing scores, at most 64 characters/bytes), and `scoreDrop: true` (only when the score's rule would drop it).
+     - **New fields in each candidate-pool entry (memory only, never logged, stored or put in the package):** `score`, `scoreBreakdown` (every list's points), `recencyPoints`, `recencyBasis`, `ageHours`, `dropReason`, `portfolioSlotEligible` (names a company in the starting list).
+     - The orchestration hands the reader the starting list's stock snapshots (`portfolioSlotSnapshots`) from the validated request's `initiatingList`. The reading summary event, tier and subTier, try order, decisions, package, classifier request and writer request are unchanged.
+- **Numbers added:** `yahooMaxArticleAttemptsPlanned` 18 (6-24, Admin, not wired); `portfolioFirstPassPerCompany` 1 (Fixed, used only by the unwired picker); `headlineListHowToPatterns` (reference row pointing at `HOW_TO_DROP_PREFIXES`); `auditFieldLimits.scorePartsCharacters` 64 and `auditFieldLimits.scorePartsBytes` 64 (Fixed, live, logs only).
+- **Tests:** full suite 1189/1189 (1158 before; 31 new):
+  - `tests/article-score.test.js` (17): 15 drop-rule rows (wire-only, generic-only and fresh drop words dropped; Asia-Europe, macro, portfolio, most-active and include-word protect; "how to" at the start, after spaces, mid-headline, from a wire publisher, with macro, with Asia-Europe, run together), the protecting-list set, and the how-to pattern equivalence.
+  - `tests/settings-registry.test.js` (2): the new rows, and the automatic default/clamp/override row for the new Admin number.
+  - New `tests/portfolio-slots.test.js` (10).
+  - `tests/source-reader.test.js` (2): shadow score in the audit and pool with tier order unchanged; long points summary cut to the limit.
+  - Two existing tests updated for the listed fields only (the pool's full-entry check; the audit field limits).
+  - Syntax 59/59 (new `lib/portfolio-slots.js`). `git diff --check` clean. No paid calls.
+- **Free comparison (scratch only, not committed):** `Replay Packages\harness\compare.js`, old tree `f67bb80` exported read-only with `git show`, new tree the working tree. 8 packages × 6 scenarios = 48 runs per sub-step. The scenarios are the 5 existing ones (failing stand-ins included) plus a new "real headlines" listing: 28 real headlines with mixed publishers, portfolio and most-active names, drop words, "how to", Asia-Europe words, age labels and failing pages; Most Active stand-in NVDA, SOFI, INTC.
+  - 9F.2d.1: 48/48 fully byte-identical.
+  - 9F.2d.2: 48/48 fully byte-identical.
+  - 9F.2e.1: 48/48 identical apart from the listed fields (`score`, `scoreParts`, `scoreDrop`). In the 8 real-headlines runs the audit splits into 4 parts instead of 3; the content matches with the parts joined, and the largest event is 3391 bytes (limit 3400).
+  - Every pool score equals a direct `scoreArticle` call on the same inputs, every audit score equals the pool's, and `portfolioSlotEligible` matches the starting list.
+  - Outputs: `compare-9F.2d.1-output.txt`, `compare-9F.2d.2-output.txt`, `compare-9F.2e.1-output.txt`.
+- **Before-and-after table:** `Replay Packages\harness\compare-selection-order.js` → `before-after-9F.2e.1.md` / `.json`.
+  - **Method:** the real `rankCandidates` from `f67bb80` against the real `scoreArticle` / `compareScoredArticles` / `pickPortfolioArticles`.
+  - **Same inputs:** both methods get the same portfolio names, most-active names, trigger time and candidates per block, with a SHA-256 fingerprint of each method's input taken before and after each call.
+  - **Blocks:** the 8 saved packages, the real-headlines listing and the test-file rows. 90 rows, 27 changed. Fingerprints identical in all 10 blocks; 0 unexplained; 0 recaps scored or dropped; 0 headlines the new rule drops that today keeps; 0 portfolio picks outside the starting list; today's tiers match the tests on every test-file row.
+  - **Awaiting Kevin's sign-off.**
+- **Could not share:** the saved packages hold only admitted headlines and no Most Active list. Most-active names were inferred from tags the packages saved (SOFI in POST 09-29); the wider listing comes from the harness's real-headlines scenario and the test-file rows. CNBC is not tier-ranked today, so its rows show the new score only.
+- **Must not change:** everything under Steps 9F.2a, 9F.2b, 9F.2c.1, 9F.2c.1b, 9F.2c.2 and 9F.6a's "Must not change", except the clauses superseded below. In addition:
+  - the reader ranks, tries and admits by tier until Step 9F.2e.4;
+  - the live attempt cap stays 12 and the admit cap 6 until Step 9F.2e.5;
+  - the shadow score fields stay out of the package;
+  - the pool stays in memory only;
+  - recaps are never dropped by the slots or the budget;
+  - CNBC acquisition and its timing functions are untouched;
+  - no `?rev=` token is changed; nothing is stored in Neon.
+- **Supersedes:**
+  - Step 9F.2c.2's drop rule "the drop list removes a headline only when no other list scores it": now only portfolio, most-active, US macro, Asia-Europe and include-words protect.
+  - Step 9F.2c.2's note that the "how to" rule is not part of the score's drop check: it now is, as `HOW_TO`.
+  - Step 9F.6a's location of the "how to" rule (inline in `lib/source-ranking.js`): it now lives in the `HOW_TO_DROP_PREFIXES` list, with the same pattern and the same tier behaviour.

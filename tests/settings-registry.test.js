@@ -150,7 +150,9 @@ test('Step 9F.6a.1 settings registry: audit field limits and classifier item cap
     slugCharacters: 48, slugBytes: 48,
     ageLabelCharacters: 12, ageLabelBytes: 16,
     failureTypeCharacters: 48, failureTypeBytes: 48,
-    listingOutcomeCharacters: 32, listingOutcomeBytes: 32
+    listingOutcomeCharacters: 32, listingOutcomeBytes: 32,
+    // Step 9F.2e.1: the shadow score's points summary.
+    scorePartsCharacters: 64, scorePartsBytes: 64
   });
   const {MAX_CLASSIFICATION_EVIDENCE_ITEMS} = require('../lib/claude-evidence-role-classification');
   assert.equal(SETTINGS_REGISTRY.maxClassificationEvidenceItems.default, MAX_CLASSIFICATION_EVIDENCE_ITEMS);
@@ -255,3 +257,20 @@ for (const name of RECENCY_BONUS_NAMES_LIST) {
     assert.equal(result.values[name], lowMacroPoints - 1);
   });
 }
+
+// Step 9F.2d.1: the planned attempt cap (not live), the portfolio first-pass
+// limit (Fixed, not wired) and the "how to" list pointer. The live attempt cap
+// keeps today's 12 and its 6-20 range.
+test('Step 9F.2d.1 settings registry: planned attempt cap, portfolio first pass, how-to list', () => {
+  const planned = SETTINGS_REGISTRY.yahooMaxArticleAttemptsPlanned;
+  assert.deepEqual([planned.default, planned.min, planned.max, planned.admin, planned.wired],
+    [18, 6, 24, 'Admin', false]);
+  assert.equal(planned.envVar, 'YAHOO_MAX_ARTICLE_ATTEMPTS_PLANNED');
+  const live = SETTINGS_REGISTRY.yahooMaxArticleAttempts;
+  assert.deepEqual([live.default, live.min, live.max, live.wired], [12, 6, 20, true]);
+  const firstPass = SETTINGS_REGISTRY.portfolioFirstPassPerCompany;
+  assert.deepEqual([firstPass.default, firstPass.admin, firstPass.wired], [1, 'Fixed', false]);
+  const howTo = SETTINGS_REGISTRY.headlineListHowToPatterns;
+  assert.equal(howTo.reference, true);
+  assert.match(howTo.default, /HOW_TO_DROP_PREFIXES/);
+});

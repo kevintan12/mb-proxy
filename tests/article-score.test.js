@@ -249,3 +249,72 @@ test('Step 9F.2c.2: compareScoredArticles falls back to listing order when an ag
   const sorted = [...entries].sort(compareScoredArticles);
   assert.deepEqual(sorted.map(entry => entry.listIndex), [0, 1]);
 });
+
+// Step 9F.2d.1 (Kevin, 11 Oct 2026): a drop-list or "how to" headline is
+// protected only by portfolio, most-active, US macro, Asia/Europe or include
+// words -- the tier ranking's protection today. Wire publishers and the generic
+// benchmark/market list do not protect, and recency never does.
+const DROP_RULE_ROWS = [
+  {name: 'wire publisher only', headline: 'Australian developer axes Sydney data centre plan',
+    publisher: 'Reuters', dropReason: 'DROP_LIST'},
+  {name: 'generic market word only', headline: 'Singapore stocks rally to a three-week high',
+    dropReason: 'DROP_LIST'},
+  {name: 'fresh publish time only', headline: 'Singapore shoppers flock to malls',
+    publishedAt: '2026-10-11T11:00:00Z', dropReason: 'DROP_LIST'},
+  {name: 'Asia/Europe word', headline: 'Thai baht weakens as China exports slow', dropReason: null},
+  {name: 'US macro word', headline: 'Singapore markets react as Fed raises rates', dropReason: null},
+  {name: 'portfolio name', headline: 'Acme Inc opens a Singapore office',
+    options: {portfolioIdentities: [PORTFOLIO_ITEM]}, dropReason: null},
+  {name: 'most-active name', headline: 'Zeta Corp opens a Singapore office',
+    options: {mostActiveIdentities: [MOST_ACTIVE_ITEM]}, dropReason: null},
+  {name: 'include word', headline: 'Moonshot plan for Singapore retirees',
+    options: {includeWords: INCLUDE_WORDS}, dropReason: null},
+  {name: '"how to" at the start', headline: 'How to trade volatile markets', dropReason: 'HOW_TO'},
+  {name: '"how to" after leading spaces', headline: '  how to open a savings account', dropReason: 'DROP_LIST'},
+  {name: '"how to" mid-headline', headline: 'Investors weigh how to respond', dropReason: null},
+  {name: '"how to" from a wire publisher', headline: 'How to read the rate path', publisher: 'Reuters',
+    dropReason: 'HOW_TO'},
+  {name: '"how to" plus a macro word', headline: 'How to trade the Fed decision', dropReason: null},
+  {name: '"how to" plus Asia/Europe', headline: 'How to invest in China now', dropReason: null},
+  {name: '"howto" run together', headline: 'Howto guides for beginners', dropReason: null}
+];
+
+for (const row of DROP_RULE_ROWS) {
+  test(`Step 9F.2d.1: drop rule -- ${row.name}`, () => {
+    const result = score({headline: row.headline, publisher: row.publisher, publishedAt: row.publishedAt},
+      row.options || {});
+    assert.equal(result.dropReason, row.dropReason);
+    assert.equal(result.excludedByDropList, row.dropReason !== null);
+  });
+}
+
+test('Step 9F.2d.1: the protecting lists are exactly portfolio, most-active, macro, Asia/Europe, include words', () => {
+  const {DROP_PROTECTING_LISTS} = require('../lib/article-score');
+  assert.deepEqual([...DROP_PROTECTING_LISTS].sort(),
+    ['asiaEurope', 'includeWords', 'mostActive', 'portfolio', 'usMacro']);
+});
+
+// The "how to" pattern built from the word list is the same pattern that used to
+// be written inline, and gives the same answer on every headline in the tests.
+test('Step 9F.2d.1: the listed "how to" pattern equals the old inline rule', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const {HOW_TO_DROP_PATTERNS} = require('../lib/headline-matching');
+  const oldRule = /^\s*how\s+to(?![A-Za-z0-9])/i;
+  assert.equal(HOW_TO_DROP_PATTERNS.length, 1);
+  assert.equal(HOW_TO_DROP_PATTERNS[0].source, oldRule.source);
+  assert.equal(HOW_TO_DROP_PATTERNS[0].flags, oldRule.flags);
+  const testsDir = __dirname;
+  const literals = new Set();
+  for (const file of fs.readdirSync(testsDir).filter(name => name.endsWith('.test.js'))) {
+    const text = fs.readFileSync(path.join(testsDir, file), 'utf8');
+    for (const match of text.matchAll(/'((?:[^'\\n]|\.){3,200})'/g)) literals.add(match[1]);
+  }
+  for (const extra of ['How to', 'how to', 'How-to guide', 'How toys sell', '  How to', 'How\tto save']) {
+    literals.add(extra);
+  }
+  assert.ok(literals.size > 500);
+  for (const headline of literals) {
+    assert.equal(HOW_TO_DROP_PATTERNS[0].test(headline), oldRule.test(headline), headline);
+  }
+});

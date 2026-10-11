@@ -316,7 +316,12 @@ test('Step 9F.6a.4 shared reader: the pool lists every candidate in ranked order
   assert.deepEqual(byName.a, {
     sourceId: 'us.yahoo-finance', rank: 1, url: urlFor('a'), headline: 'Fake headline a',
     publisher: 'Fake Wire', listedAt: null, ageLabel: null, edition: 'US', tier: 5, subTier: '3b',
-    labelOld: false, opened: true, attempts: 1, publishedAt: iso(LAST_CLOSE - 3600000), decision: 'ADMITTED'
+    labelOld: false, opened: true, attempts: 1, publishedAt: iso(LAST_CLOSE - 3600000), decision: 'ADMITTED',
+    // Step 9F.2e.1: the shadow score (nothing scores for a fake headline).
+    score: 0,
+    scoreBreakdown: {usMacro: 0, mostActive: 0, portfolio: 0, wirePublishers: 0, includeWords: 0,
+      asiaEurope: 0, benchmarkOrGeneric: 0},
+    recencyPoints: 0, recencyBasis: 'unknown', ageHours: null, dropReason: null, portfolioSlotEligible: false
   });
   assert.equal(byName.b.decision, 'FETCH_FAILED');
   assert.equal(byName.b.publishedAt, null);
@@ -368,4 +373,94 @@ test('Step 9F.6a.5 audit: the source id is counted, so no event passes the byte 
   // bytes short of the limit; the sweep still reaches within 10 bytes of it.
   assert.ok(closest >= AUDIT_MAX_EVENT_BYTES - 10, `closest to the limit was ${closest}`);
   assert.deepEqual([...partCounts], [1, 2]);
+});
+
+// Step 9F.2e.1: the shadow score. Every candidate gets its score next to its
+// tier in the audit and the pool, from the same names the tier ranking uses
+// (both lists, Most Active) and the trigger time. The tier order still decides
+// what is opened; nothing about the reading changes.
+test('Step 9F.2e.1 shared reader: shadow score in the audit and pool, tier order unchanged', async () => {
+  const listing = [
+    {name: 'acme', headline: 'Acme Inc opens a new plant', publisher: 'Barchart', ageLabel: '2h ago'},
+    {name: 'wire', headline: 'Fed holds rates as Treasury yields climb', publisher: 'Reuters', ageLabel: '8h ago'},
+    {name: 'zeta', headline: 'Zeta Corp shares jump in heavy trading', publisher: 'Zacks'},
+    {name: 'beta', headline: 'Beta Holdings names a new chief', publisher: 'Zacks'},
+    {name: 'drop', headline: 'Australian developer axes Sydney data centre plan', publisher: 'Reuters'},
+    {name: 'howto', headline: 'How to trade volatile markets', publisher: 'Yahoo Finance'}
+  ];
+  const reads = [];
+  const source = {
+    sourceId: YAHOO_NEWS_SOURCE_ID,
+    async findCandidates() {
+      return {ok: true, candidates: listing.map(entry => ({
+        headline: entry.headline, url: urlFor(entry.name), publisher: entry.publisher, edition: 'US',
+        ...(entry.ageLabel ? {ageLabel: entry.ageLabel} : {})
+      })), discoveryStats: {}};
+    },
+    async readPage(url, {headline}) {
+      reads.push(url.split('/').at(-1).replace('.html', ''));
+      return {ok: true, type: 'SUCCESS', articleContent: {headline, canonicalUrl: url, publisher: 'Fake Wire',
+        publishedAt: iso(LAST_CLOSE - 3600000), articleText: `${headline}. Body text.`}};
+    }
+  };
+  const acme = {symbol: 'ACME', instrumentName: 'Acme Inc'};
+  const beta = {symbol: 'BETA', instrumentName: 'Beta Holdings'};
+  const {result, events} = await runReader(source, {
+    runContext: {mostActive: [{symbol: 'ZETA', shortName: 'Zeta Corp', longName: 'Zeta Corp'}]},
+    stockSnapshots: [acme, beta],
+    portfolioSlotSnapshots: [acme]
+  });
+  const audit = decisions(events);
+  // Tier order (1a acme, beta; 2w wire; 1b zeta), not score order, decides what is opened.
+  assert.deepEqual(reads, ['acme', 'beta', 'wire', 'zeta']);
+  assert.deepEqual([audit.acme.rank, audit.beta.rank, audit.wire.rank, audit.zeta.rank], [1, 2, 3, 4]);
+  // Scores and points summaries.
+  assert.equal(audit.acme.score, 8 + 4);
+  assert.equal(audit.acme.scoreParts, 'portfolio 8, recency 4');
+  assert.equal(audit.wire.score, 20 + 5 + 2);
+  assert.equal(audit.wire.scoreParts, 'macro 20, wire 5, recency 2');
+  assert.equal(audit.zeta.score, 12);
+  assert.equal(audit.zeta.scoreParts, 'most-active 12');
+  assert.equal(audit.beta.scoreParts, 'portfolio 8');
+  // The score's drop rule: wire points do not protect; "how to" drops. Only
+  // dropped headlines carry scoreDrop.
+  assert.equal(audit.drop.scoreDrop, true);
+  assert.equal(audit.drop.scoreParts, 'wire 5');
+  assert.equal(audit.howto.scoreDrop, true);
+  assert.equal('scoreDrop' in audit.wire, false);
+  assert.equal(audit.drop.decision, 'SKIPPED_BELOW_RELEVANCE_FLOOR');
+  // The listed fields sit right after the tier fields.
+  assert.deepEqual(Object.keys(audit.acme).slice(0, 5), ['rank', 'tier', 'subTier', 'score', 'scoreParts']);
+  // The pool: full breakdown, drop reason and starting-list eligibility.
+  const pool = Object.fromEntries(result.pool.map(entry => [entry.url.split('/').at(-1).replace('.html', ''), entry]));
+  assert.equal(pool.wire.score, 27);
+  assert.equal(pool.wire.scoreBreakdown.wirePublishers, 5);
+  assert.equal(pool.wire.recencyBasis, 'ageLabel');
+  assert.equal(pool.wire.ageHours, 8);
+  assert.equal(pool.drop.dropReason, 'DROP_LIST');
+  assert.equal(pool.howto.dropReason, 'HOW_TO');
+  assert.equal(pool.acme.portfolioSlotEligible, true);
+  assert.equal(pool.beta.portfolioSlotEligible, false);
+  assert.equal(pool.zeta.portfolioSlotEligible, false);
+});
+
+test('Step 9F.2e.1 shared reader: a long points summary is cut to the audit limit', async () => {
+  const {AUDIT_FIELD_LIMITS} = require('../lib/source-audit');
+  const headline = 'Acme Inc and Zeta Corp surge as Fed flags inflation; Nikkei dips while stocks rally';
+  const source = {
+    sourceId: YAHOO_NEWS_SOURCE_ID,
+    async findCandidates() {
+      return {ok: true, candidates: [{headline, url: urlFor('max'), publisher: 'Reuters', edition: 'US',
+        ageLabel: '1h ago'}], discoveryStats: {}};
+    },
+    async readPage() { return {ok: false, type: 'HTTP_FAILURE', httpStatus: 404}; }
+  };
+  const {events} = await runReader(source, {
+    runContext: {mostActive: [{symbol: 'ZETA', shortName: 'Zeta Corp', longName: 'Zeta Corp'}]},
+    stockSnapshots: [{symbol: 'ACME', instrumentName: 'Acme Inc'}]
+  });
+  const entry = decisions(events).max;
+  assert.equal(entry.score, 20 + 12 + 8 + 5 + 3 + 1 + 4);
+  assert.ok(entry.scoreParts.length <= AUDIT_FIELD_LIMITS.scorePartsCharacters);
+  assert.ok(entry.scoreParts.startsWith('macro 20, most-active 12, portfolio 8, wire 5'));
 });
