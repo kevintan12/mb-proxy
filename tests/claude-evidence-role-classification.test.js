@@ -599,7 +599,9 @@ test('completes omitted active classifications with conservative non-causal defa
     unknownOrExtraReferenceCount: 0,
     deterministicCompletionApplied: true
   });
-  assert.deepEqual(diagnostics[0].classificationCoverage, result.classificationCoverage);
+  // Step 9F.2b: diagnostics[0] is the new requestSizeSummary event; the final
+  // per-call event (with classificationCoverage) is diagnostics[1].
+  assert.deepEqual(diagnostics[1].classificationCoverage, result.classificationCoverage);
 });
 
 test('diagnoses primary subject omission separately from subjects sanitized to empty', async () => {
@@ -631,7 +633,9 @@ test('diagnoses primary subject omission separately from subjects sanitized to e
     primaryOmittedSubjectCount: 1,
     primarySanitizedEmptySubjectCount: 1
   });
-  assert.deepEqual(diagnostics[0].subjectCoverage, result.subjectCoverage);
+  // Step 9F.2b: diagnostics[0] is the new requestSizeSummary event; the final
+  // per-call event (with subjectCoverage) is diagnostics[1].
+  assert.deepEqual(diagnostics[1].subjectCoverage, result.subjectCoverage);
 });
 
 test('never retries network, HTTP, unreadable-body, or truncated failures', async () => {
@@ -702,8 +706,9 @@ test('Step 8L: classifier first-try success makes one call and logs no retry', a
 
 test('blocks oversized requests before fetch', async () => {
   // Step 9F.1f: the classifier reads only the first 8 KB of each article, so one
-  // huge article no longer overflows; nine 8 KB articles still do.
-  const largeItems = Array.from({length: 9}, (_, index) =>
+  // huge article no longer overflows. Step 9F.2b raised the classifier limit to
+  // 300 KB, so it now takes 40 max-size (50-item cap) 8 KB articles to overflow.
+  const largeItems = Array.from({length: 40}, (_, index) =>
     evidence(index + 1, {summary: 'x'.repeat(CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES)}));
   let fetchCount = 0;
   const diagnostics = [];
@@ -713,9 +718,42 @@ test('blocks oversized requests before fetch', async () => {
   });
   assert.equal(result.type, 'REQUEST_TOO_LARGE');
   assert.equal(fetchCount, 0);
-  assert.equal(diagnostics[0].providerInvocationSkipped, true);
-  assert.equal(diagnostics[0].fetchCount, 0);
+  // diagnostics[0] is the new requestSizeSummary event (Step 9F.2b); diagnostics[1]
+  // is the existing providerInvocationSkipped event.
+  assert.equal(diagnostics[0].stage, 'requestSizeSummary');
+  assert.equal(diagnostics[0].call, 'classifier');
+  assert.ok(diagnostics[0].requestBytes > diagnostics[0].limitBytes);
+  assert.equal(diagnostics[1].providerInvocationSkipped, true);
+  assert.equal(diagnostics[1].fetchCount, 0);
 });
+
+// Step 9F.2b: table-driven -- a classifier request just under vs. just over
+// the live 300 KB limit (each article truncated to the fixed 8 KB classifier
+// cut, so 35 articles land under and 36 land over).
+for (const [label, itemCount, expectRequestTooLarge] of [
+  ['just under the limit (35 articles)', 35, false],
+  ['just over the limit (36 articles)', 36, true]
+]) {
+  test(`Step 9F.2b: classifier request ${label}`, async () => {
+    const items = Array.from({length: itemCount}, (_, index) =>
+      evidence(index + 1, {summary: 'x'.repeat(CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES)}));
+    let fetchCount = 0;
+    const result = await invokeClaudeEvidenceRoleClassification({
+      input: input(items.map(() => 'COMPLETED_SESSION'), items), apiKey: 'secret',
+      fetchImpl: async () => { fetchCount++; return response(classifications()); }
+    });
+    if (expectRequestTooLarge) {
+      assert.equal(result.type, 'REQUEST_TOO_LARGE');
+      assert.equal(fetchCount, 0);
+    } else {
+      // The fixed 3-reference stub response under-covers these larger inputs, so
+      // Step 8L's one silent contract retry fires; what matters here is that the
+      // size gate passed and at least one fetch happened (not REQUEST_TOO_LARGE).
+      assert.ok(fetchCount >= 1);
+      assert.notEqual(result.type, 'REQUEST_TOO_LARGE');
+    }
+  });
+}
 
 test('captures only sanitized size, counts, request-id, timing, usage, and fetch diagnostics', async () => {
   const diagnostics = [];
@@ -724,32 +762,40 @@ test('captures only sanitized size, counts, request-id, timing, usage, and fetch
     onDiagnostics: value => diagnostics.push(value), monotonicNow: (() => { let now = 0; return () => ++now; })()
   });
   assert.equal(result.ok, true);
-  assert.equal(diagnostics.length, 1);
-  assert.deepEqual(Object.keys(diagnostics[0]), [
+  // Step 9F.2b: diagnostics[0] is the new requestSizeSummary event; the
+  // existing per-call event (unchanged shape) moves to diagnostics[1].
+  assert.equal(diagnostics.length, 2);
+  assert.deepEqual(diagnostics[0], {
+    stage: 'requestSizeSummary', call: 'classifier',
+    requestBytes: diagnostics[1].requestSize.completeRequestBodyBytes,
+    limitBytes: CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES,
+    percentOfLimit: diagnostics[0].percentOfLimit
+  });
+  assert.deepEqual(Object.keys(diagnostics[1]), [
     'model', 'requestId', 'requestSize', 'counts', 'timing', 'usage', 'fetchCount',
     'classificationCoverage', 'subjectCoverage'
   ]);
-  assert.deepEqual(diagnostics[0].counts, {evidenceCount: 3, benchmarkTelemetryCount: 1});
-  assert.deepEqual(diagnostics[0].usage, {input_tokens: 300, output_tokens: 80});
-  assert.equal(diagnostics[0].fetchCount, 1);
-  assert.deepEqual(diagnostics[0].subjectCoverage, {
+  assert.deepEqual(diagnostics[1].counts, {evidenceCount: 3, benchmarkTelemetryCount: 1});
+  assert.deepEqual(diagnostics[1].usage, {input_tokens: 300, output_tokens: 80});
+  assert.equal(diagnostics[1].fetchCount, 1);
+  assert.deepEqual(diagnostics[1].subjectCoverage, {
     eligibleReferenceCount: 0,
     primaryOmittedSubjectCount: 0,
     primarySanitizedEmptySubjectCount: 0
   });
-  assert.equal(diagnostics[0].requestSize.classificationInputBytes,
+  assert.equal(diagnostics[1].requestSize.classificationInputBytes,
     Buffer.byteLength(JSON.stringify(canonicalClassificationInput(input())), 'utf8'));
-  assert.equal(diagnostics[0].requestSize.projectedClassificationInputBytes,
+  assert.equal(diagnostics[1].requestSize.projectedClassificationInputBytes,
     Buffer.byteLength(buildClaudeEvidenceRoleClassificationRequest(input()).messages[0].content, 'utf8'));
-  assert.equal(diagnostics[0].requestSize.projectedClassificationInputBytes
-    < diagnostics[0].requestSize.classificationInputBytes, true);
-  const serialized = JSON.stringify(diagnostics[0]);
+  assert.equal(diagnostics[1].requestSize.projectedClassificationInputBytes
+    < diagnostics[1].requestSize.classificationInputBytes, true);
+  const serialized = JSON.stringify(diagnostics);
   for (const forbidden of ['Canonical evidence', 'Bounded evidence', 'cnbc.com', 'TOP_SECRET', 'Classify every']) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
 });
 
-test('Step 8K.2 a worst-case widened-window package of six max-size admitted current-session articles stays under the 64 KB classifier limit', () => {
+test('Step 8K.2/9F.2b a worst-case widened-window package of six max-size admitted current-session articles stays under the classifier limit', () => {
   const {
     YAHOO_CURRENT_NEWS_MAX_ARTICLE_TEXT_BYTES,
     YAHOO_CURRENT_NEWS_MAX_HEADLINE_BYTES

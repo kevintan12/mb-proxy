@@ -758,7 +758,7 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
 test('active Yahoo retains a narrow first article and later broad-market articles for classification', async () => {
   const candidates = [
     'Local retailer updates one store',
-    'Nvidia chip orders lift semiconductor shares',
+    'Chipmaker orders lift semiconductor shares',
     'Banks gain as lending outlook improves',
     'Fourth current-session story for classification',
     'Fifth current-session story for classification',
@@ -790,13 +790,13 @@ test('active Yahoo retains a narrow first article and later broad-market article
     evidenceRoleClassification: {async classifyEvidenceRoles(input) {
       calls.evidenceRoleClassification.push(input);
       return {ok: true, type: 'SUCCESS', output: {classifications: input.evidence.map(entry => {
-        const nvidia = entry.item.title === candidates[1].headline;
+        const chipmaker = entry.item.title === candidates[1].headline;
         const banks = entry.item.title === candidates[2].headline;
         return {
           reference: entry.reference,
-          materiality: nvidia || banks ? 'HIGH' : 'LOW',
-          roles: nvidia || banks ? ['MATERIAL_EVENT'] : [],
-          subjects: nvidia ? [{kind: 'COMPANY', name: 'Nvidia'}]
+          materiality: chipmaker || banks ? 'HIGH' : 'LOW',
+          roles: chipmaker || banks ? ['MATERIAL_EVENT'] : [],
+          subjects: chipmaker ? [{kind: 'COMPANY', name: 'Chipmaker'}]
             : banks ? [{kind: 'SECTOR', name: 'Banks'}] : []
         };
       })}};
@@ -1085,16 +1085,21 @@ test('classifier-preflight rejection continues to the next package-admissible ac
       }))
     })), 'utf8');
   }
+  // Step 9F.2b: the classifier limit is now 300 KB, so 20 filler items (the old
+  // 64 KB boundary's count) can no longer reach it even at the fixed 8 KB
+  // per-article classifier cut (20 * 8 KB = 160 KB). 45 items keeps the search
+  // boundary comfortably under that cut (45 * 8 KB = 360 KB > 300 KB), so the
+  // search still finds its boundary before truncation flattens the curve.
   let low = 0;
-  let high = 4000;
+  let high = 8192;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    const federalItems = manyFedEvidence(20, middle).items;
+    const federalItems = manyFedEvidence(45, middle).items;
     if (activeClassifierBytes(federalItems, smallCandidate)
         <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) low = middle;
     else high = middle - 1;
   }
-  const federalCollection = manyFedEvidence(20, low);
+  const federalCollection = manyFedEvidence(45, low);
   assert.ok(activeClassifierBytes(federalCollection.items, smallCandidate)
     <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
   assert.ok(activeClassifierBytes(federalCollection.items, largeCandidate)
@@ -1161,8 +1166,10 @@ test('active Yahoo classifier preflight counts previously admitted current artic
     publishedAt: '2026-09-08T14:31:00.000Z', symbols: [], publisher: 'Yahoo Finance'
   });
   function requestBytes(federalSummaryBytes, currentItems) {
+    // Step 9F.2b: 45 federal filler items (see the sibling preflight test above
+    // for why 20 can no longer reach the new 300 KB classifier limit).
     const base = [yahooEvidence('^RUT').items[0],
-      ...manyFedEvidence(20, federalSummaryBytes).items];
+      ...manyFedEvidence(45, federalSummaryBytes).items];
     const items = base.concat(currentItems);
     const collection = createEvidenceCollection({market: 'US', items});
     return Buffer.byteLength(JSON.stringify(buildClaudeEvidenceRoleClassificationRequest({
@@ -1180,7 +1187,7 @@ test('active Yahoo classifier preflight counts previously admitted current artic
     })), 'utf8');
   }
   let low = 0;
-  let high = 4000;
+  let high = 8192;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
     if (requestBytes(middle, [first])
@@ -1200,7 +1207,7 @@ test('active Yahoo classifier preflight counts previously admitted current artic
   const {service, calls} = harness({
     createTelemetryAcquisition: () => ({async acquireSnapshot() { return benchmark; }}),
     federalReserveEvidenceAcquisition: {async acquireEvidence() {
-      return manyFedEvidence(20, low);
+      return manyFedEvidence(45, low);
     }},
     yahooLatestNewsDiscovery: {async discoverLatestNews() {
       return {ok: true, type: 'SUCCESS', candidates};
@@ -1284,9 +1291,9 @@ test('Step 9F.1f: six 16 KB articles all reach the classifier, which reads only 
   const classifierInput = calls.evidenceRoleClassification[0];
   const current = classifierInput.evidence.filter(entry => entry.horizon === 'CURRENT_SESSION');
   assert.equal(current.length, 6);
-  // The full texts would not fit the classifier; the cut texts do.
-  assert.ok(current.reduce((sum, entry) => sum + Buffer.byteLength(entry.item.summary, 'utf8'), 0)
-    > CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  // Step 9F.2b: six full 16 KB texts (96 KB) now fit comfortably under the new
+  // 300 KB limit on their own; the fixed 8 KB classifier cut (Step 9F.1f,
+  // unchanged by this step) still applies regardless, as the assertions below confirm.
   const request8 = buildClaudeEvidenceRoleClassificationRequest(classifierInput);
   assert.ok(Buffer.byteLength(JSON.stringify(request8), 'utf8')
     <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
@@ -1310,7 +1317,11 @@ test('Step 9F.1f: an article that would push the classifier over its cap is flag
   const articles = step9F1fArticles();
   const benchmark = snapshotWithState('^RUT', 'REGULAR', {hasOverlay: false});
   function classifierBytes(federalSummaryBytes, count) {
-    const base = [yahooEvidence('^RUT').items[0], ...manyFedEvidence(20, federalSummaryBytes).items];
+    // Step 9F.2b: 40 federal filler items (see the preflight tests above for why
+    // 20 can no longer reach the new 300 KB classifier limit) -- kept low enough
+    // that 40 federal + 1 Yahoo completed + up to 6 current items stays within
+    // the 50-item classifier cap.
+    const base = [yahooEvidence('^RUT').items[0], ...manyFedEvidence(40, federalSummaryBytes).items];
     const current = articles.slice(0, count).map(article => createEvidenceItem({
       sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
       title: article.title, summary: article.summary, canonicalUrl: article.canonicalUrl,
@@ -1333,14 +1344,14 @@ test('Step 9F.1f: an article that would push the classifier over its cap is flag
     })), 'utf8');
   }
   let low = 0;
-  let high = 4000;
+  let high = 8192;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
     if (classifierBytes(middle, 5) <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) low = middle;
     else high = middle - 1;
   }
   assert.ok(classifierBytes(low, 6) > CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
-  const {service, diagnostics} = step9F1fHarness(articles, manyFedEvidence(20, low));
+  const {service, diagnostics} = step9F1fHarness(articles, manyFedEvidence(40, low));
   await service.assemble(request());
   const acquisition = diagnostics.find(entry => entry.stage === 'activeYahooAcquisition');
   assert.equal(acquisition.acquiredCurrentSessionCount, 5);
@@ -4260,7 +4271,7 @@ test('admits provisional CNBC evidence only while the 50-item classifier bound r
   assert.equal(context.unresolvedGaps.includes(BROAD_MARKET_EVIDENCE_UNAVAILABLE_GAP), false);
 });
 
-test('keeps oversized provisional CNBC evidence optional at the 64 KiB classifier preflight', async () => {
+test('keeps oversized provisional CNBC evidence optional at the classifier preflight', async () => {
   const benchmark = snapshot('^RUT');
   const yahooItem = yahooEvidence('^RUT').items[0];
   const provisional = cnbcResearchSuccess(
@@ -4284,18 +4295,20 @@ test('keeps oversized provisional CNBC evidence optional at the 64 KiB classifie
     });
     return Buffer.byteLength(JSON.stringify(requestBody), 'utf8');
   }
+  // Step 9F.2b: 45 federal filler items (see the active-session preflight tests
+  // above for why 20 can no longer reach the new 300 KB classifier limit).
   let low = 0;
-  let high = 4000;
+  let high = 8192;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    const items = [yahooItem, ...manyFedEvidence(20, middle).items];
+    const items = [yahooItem, ...manyFedEvidence(45, middle).items];
     if (classifierBytes(items) <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) {
       low = middle;
     } else {
       high = middle - 1;
     }
   }
-  const fedCollection = manyFedEvidence(20, low);
+  const fedCollection = manyFedEvidence(45, low);
   const baseItems = [yahooItem, ...fedCollection.items];
   assert.equal(classifierBytes(baseItems)
     <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES, true);
@@ -5411,7 +5424,7 @@ test('Step 8K.1 tier 4a candidates are dropped before fetching and stay in the a
 });
 
 test('Step 8K.1 tier 4b China and India headlines are kept, fetched and ranked last', async () => {
-  const china = step8kCandidate('China May Reopen Nvidia AI Market');
+  const china = step8kCandidate('China May Reopen Chip Export Market');
   const india = step8kCandidate('India growth outlook improves');
   const neutral = step8kCandidate('Neutral story number 1');
   const dropped = step8kCandidate('Singapore stocks rally');
@@ -5831,31 +5844,32 @@ test('Step 8K.5 a wire partner without a tier 2 term does not jump ahead of a mo
     [[mostActiveOnly.headline, '1b'], [wireNoMacro.headline, '3b']]);
 });
 
-test('Step 8K.5 a wire market wrap outranks a single-company piece from a blog partner', async () => {
-  const blog = step8kCandidate('Intel: is the stock a buy at these levels', {publisher: 'Simply Wall St.'});
+test('Step 8K.5 a wire market wrap outranks a same-tier single-company piece regardless of publisher', async () => {
+  const otherPublisher = step8kCandidate('Intel: is the stock a buy at these levels', {publisher: 'Simply Wall St.'});
   const wrap = step8kCandidate('Stocks fall as Treasury yields climb', {publisher: 'Associated Press'});
   const {audit} = await step8kActiveRun({
-    candidates: [blog, wrap],
+    candidates: [otherPublisher, wrap],
     mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
   });
   assert.deepEqual(audit.map(entry => [entry.headline, entry.subTier]),
-    [[wrap.headline, '2w'], [blog.headline, '1b']]);
+    [[wrap.headline, '2w'], [otherPublisher.headline, '1b']]);
 });
 
-test('Step 8K.5 blog-style partners rank last inside their tier and are never dropped', async () => {
-  const blogFirst = step8kCandidate('Neutral gardening story one', {publisher: 'Simply Wall St.'});
+test('Step 9F.2c.1 publishers other than wire partners (including Simply Wall St, Motley Fool, Insider Monkey) no longer affect ranking order', async () => {
+  const simplyWallSt = step8kCandidate('Neutral gardening story one', {publisher: 'Simply Wall St.'});
   const motley = step8kCandidate('Neutral gardening story two', {publisher: 'The Motley Fool'});
   const insider = step8kCandidate('Neutral gardening story three', {publisher: 'Insider Monkey'});
   const regular = step8kCandidate('Neutral gardening story four');
   const otherRegular = step8kCandidate('Neutral gardening story five', {publisher: 'Barchart'});
-  const {audit, calls} = await step8kActiveRun({candidates: [blogFirst, motley, regular, insider, otherRegular]});
+  const {audit, calls} = await step8kActiveRun({candidates: [simplyWallSt, motley, regular, insider, otherRegular]});
+  // Page order is preserved exactly as given, with no publisher-based reordering.
   assert.deepEqual(audit.map(entry => entry.headline),
-    [regular.headline, otherRegular.headline, blogFirst.headline, motley.headline, insider.headline]);
+    [simplyWallSt.headline, motley.headline, regular.headline, insider.headline, otherRegular.headline]);
   assert.equal(calls.yahooCurrentNewsArticle.length, 5);
   assert.ok(audit.every(entry => entry.decision === 'EXTRACTION_FAILED'));
 });
 
-test('Step 8K.5 a blog partner still loses to a most-active headline in the same tier and keeps page order among blogs', async () => {
+test('Step 9F.2c.1 a wire partner still earns its tier 2w bucket but a non-wire publisher never does', async () => {
   const blogA = step8kCandidate('Intel valuation looks stretched', {publisher: 'Motley Fool'});
   const active = step8kCandidate('Intel unveils a new chip line');
   const blogB = step8kCandidate('Intel dividend prospects', {publisher: 'Motley Fool'});
@@ -5863,7 +5877,76 @@ test('Step 8K.5 a blog partner still loses to a most-active headline in the same
     candidates: [blogA, active, blogB],
     mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
   });
-  assert.deepEqual(audit.map(entry => entry.headline), [active.headline, blogA.headline, blogB.headline]);
+  // All three match the Intel identity (tier 1b); with no publisher split, page order decides.
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.subTier]),
+    [[blogA.headline, '1b'], [active.headline, '1b'], [blogB.headline, '1b']]);
+});
+
+// ---- Step 9F.2c.1: 3 Oct 2026 approved word-list additions, whole-word matching ----
+test('Step 9F.2c.1 the approved macro-list additions (AI, gold, bonds and similar) rank as tier 2', async () => {
+  const table = [
+    'AI Valuation Correction Could Trigger Wider Market Sell-Off, Margin Calls, Warns',
+    'Ray Dalio warns AI bubble is nearing a breaking point as debt and rates rise',
+    "Michael Burry Is Betting Against Artificial Intelligence (AI). Here's the Case for...",
+    'Oracle stock falls on more debt to fund AI chip buying, OpenAI revenue disclosure',
+    'Gold edges higher as bond yields ease'
+  ];
+  const candidates = table.map(headline => step8kCandidate(headline));
+  const {audit} = await step8kActiveRun({candidates});
+  // All five are expected tier 2, so they keep page order in the audit (ties are
+  // broken by page order); compare by position rather than by headline, since the
+  // audit truncates long headlines to 80 characters.
+  assert.deepEqual(audit.map(entry => entry.tier), table.map(() => 2));
+});
+
+test('Step 9F.2c.1 whole-word matching: a new macro term must not match inside another word', async () => {
+  const notGold = step8kCandidate('Goldman Sachs raises its price target');
+  const notAiSaid = step8kCandidate('Analysts said shares were fairly valued');
+  const notAiAig = step8kCandidate('AIG posts quarterly results');
+  const notEu = step8kCandidate('Neutral rating on retailer');
+  const {audit} = await step8kActiveRun({candidates: [notGold, notAiSaid, notAiAig, notEu]});
+  for (const headline of [notGold.headline, notAiSaid.headline, notAiAig.headline, notEu.headline]) {
+    assert.notEqual(audit.find(entry => entry.headline === headline).tier, 2, headline);
+  }
+});
+
+test('Step 9F.2c.1 the approved drop-list additions are dropped, but still protected by a macro match in the same headline', async () => {
+  // "palm oil exporters" already matches the existing tier 2 "oil" term, so this stays protected, as today.
+  const protectedByMacro = step8kCandidate('Malaysian palm oil exporters rally');
+  const dropped = step8kCandidate('Thai baht slips');
+  const {audit} = await step8kActiveRun({candidates: [protectedByMacro, dropped]});
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.tier, entry.decision]), [
+    [protectedByMacro.headline, 2, 'EXTRACTION_FAILED'],
+    [dropped.headline, 4, 'SKIPPED_BELOW_RELEVANCE_FLOOR']
+  ]);
+});
+
+// ---- Step 9F.2c.1b: "AMD" the eye disease must not match the AMD macro term ----
+const STEP_9F2C1B_ROWS = [
+  {headline: 'Kodiak Sciences (KOD) Climbs Nearly 3x on Promising Wet AMD Trial', macro: false},
+  {headline: 'Dry AMD drug wins approval, shares jump', macro: false},
+  {headline: 'Study of age-related macular degeneration shows promise', macro: false},
+  {headline: 'AMD stock jumps on new data center chip', macro: true},
+  {headline: 'Nvidia, Broadcom, and AMD Investors Need to Have Oct. 15 Circled on Their Calendars', macro: true},
+  {headline: 'HPE stock closes at record high on growing networking orders, $1.2 billion AMD Helios order', macro: true},
+  {headline: 'Wet AMD trial results, plus Nvidia earnings preview', macro: true}
+];
+
+test('Step 9F.2c.1b "AMD" the eye disease does not match the AMD macro term, but real chip stories still do', async () => {
+  // Match on the first 80 characters: the audit truncates long headlines, and
+  // two of these rows exceed that length.
+  const candidates = STEP_9F2C1B_ROWS.map(row => step8kCandidate(row.headline));
+  const {audit} = await step8kActiveRun({candidates});
+  for (const row of STEP_9F2C1B_ROWS) {
+    const key = row.headline.slice(0, 80);
+    const entry = audit.find(e => e.headline === key);
+    assert.ok(entry, row.headline);
+    if (row.macro) {
+      assert.equal(entry.tier, 2, row.headline);
+    } else {
+      assert.notEqual(entry.tier, 2, row.headline);
+    }
+  }
 });
 
 // ---- Step 9F.1c: Yahoo admission by publish time inside the reading window ----
@@ -6061,4 +6144,57 @@ test('Step 9F.1d the 30 second reading budget stops further reading partway', as
   const summary = step9f1dSummary(diagnostics);
   assert.deepEqual([summary.articleFetchAttemptCount, summary.downloadAttemptCount, summary.readingBudgetStopped],
     [3, 7, true]);
+});
+
+// Step 9F.6a.4: the candidate pool reaches the optional hook, in the audit's
+// order with the audit's decisions; a failing hook changes nothing; without a
+// hook the package is the same.
+test('Step 9F.6a.4: candidate pool handed to the optional hook, package unchanged', async () => {
+  const articles = step9F1fArticles(3);
+  const pools = [];
+  const build = extra => {
+    const diagnostics = [];
+    return {diagnostics, ...harness({
+      createTelemetryAcquisition: () => ({async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {hasOverlay: false});
+      }}),
+      yahooLatestNewsDiscovery: {async discoverLatestNews() {
+        return {ok: true, type: 'SUCCESS', candidates: articles.map(article => ({
+          headline: article.title, url: article.canonicalUrl, uuid: null, publisher: 'Yahoo Finance'
+        }))};
+      }},
+      yahooCurrentNewsArticleContentAcquisition: {async acquireArticleContent(candidate) {
+        const article = articles.find(entry => entry.canonicalUrl === candidate.url);
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: article.canonicalUrl,
+          headline: article.title, publisher: 'Yahoo Finance',
+          publishedAt: article.publishedAt, updatedAt: null, articleText: article.summary
+        }};
+      }},
+      now: () => new Date('2026-09-08T15:00:00.000Z'),
+      onDiagnostics: value => diagnostics.push(value),
+      ...extra
+    })};
+  };
+  const withHook = build({onCandidatePool: value => pools.push(value)});
+  const withHookOutput = await withHook.service.assemble(request());
+  const withoutHook = build({});
+  const withoutHookOutput = await withoutHook.service.assemble(request());
+  const throwingHook = build({onCandidatePool: () => { throw new Error('hook failed'); }});
+  const throwingHookOutput = await throwingHook.service.assemble(request());
+
+  assert.equal(pools.length, 1);
+  assert.equal(pools[0].sourceId, 'us.yahoo-finance');
+  assert.ok(Object.isFrozen(pools[0].pool));
+  const audit = withHook.diagnostics.filter(value => value.stage === 'activeYahooCandidateAudit')
+    .flatMap(value => value.candidates);
+  assert.deepEqual(pools[0].pool.map(entry => [entry.rank, entry.decision]),
+    audit.map(entry => [entry.rank, entry.decision]));
+  assert.deepEqual(pools[0].pool.map(entry => entry.url), articles.map(article => article.canonicalUrl));
+  assert.equal(pools[0].pool.every(entry => entry.opened && entry.sourceId === 'us.yahoo-finance'), true);
+  // The pool is never logged or put in the package.
+  assert.equal(JSON.stringify(withHook.diagnostics).includes('"pool"'), false);
+  assert.equal(JSON.stringify(withHookOutput), JSON.stringify(withoutHookOutput));
+  assert.equal(JSON.stringify(throwingHookOutput), JSON.stringify(withoutHookOutput));
+  assert.throws(() => harness({onCandidatePool: 'not a function'}), TypeError);
 });
