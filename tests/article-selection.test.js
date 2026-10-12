@@ -1,5 +1,6 @@
 // Step 9F.2e.2: the one article-selection step. Pure; these tests call
-// lib/article-selection.js directly (Step 9F.2e.3.2 wires only checkListOrderFit in).
+// lib/article-selection.js directly (Step 9F.2e.3.2 wires checkListOrderFit into
+// the hand-offs; Step 9F.2e.3.4b wires the today's-mode pieces into the reader).
 'use strict';
 
 const test = require('node:test');
@@ -387,9 +388,11 @@ test('Step 9F.2e.2 summary: every decision listed, short headlines only, no arti
   assert.equal(summary.classifierFit.leftOutCount, 1);
 });
 
-// Step 9F.2e.3.2 (supersedes the Step 9F.2e.2 "nothing imports it" test): only
-// the orchestration imports the selection step, and only checkListOrderFit.
-test('Step 9F.2e.3.2: only the orchestration imports the selection step, and only checkListOrderFit', () => {
+// Step 9F.2e.3.4b (supersedes the Step 9F.2e.3.2 "only the orchestration"
+// test): only the orchestration (checkListOrderFit) and the reader
+// (tierTryOrder, createReaderStopRule, checkListOrderFit) import the selection
+// step; nothing under api/ does.
+test('Step 9F.2e.3.4b: only the orchestration and the reader import the selection step, each only its pieces', () => {
   const root = path.join(__dirname, '..');
   const files = [];
   for (const dir of ['api', 'lib', path.join('lib', 'sources')]) {
@@ -401,9 +404,16 @@ test('Step 9F.2e.3.2: only the orchestration imports the selection step, and onl
   const sources = new Map(files.map(file => [file, fs.readFileSync(path.join(root, file), 'utf8')]));
   const importers = files.filter(file => file !== path.join('lib', 'article-selection.js')
     && imports.test(sources.get(file)));
-  assert.deepEqual(importers, [path.join('lib', 'us-analysis-package-orchestration.js')]);
-  const lines = sources.get(importers[0]).split(/\r?\n/).filter(line => imports.test(line));
-  assert.deepEqual(lines, ["const {checkListOrderFit} = require('./article-selection');"]);
+  assert.deepEqual(importers.sort(), [
+    path.join('lib', 'source-reader.js'),
+    path.join('lib', 'us-analysis-package-orchestration.js')
+  ]);
+  assert.ok(importers.every(file => !file.startsWith(`api${path.sep}`)));
+  const importLines = file => sources.get(file).split(/\r?\n/).filter(line => imports.test(line));
+  assert.deepEqual(importLines(path.join('lib', 'us-analysis-package-orchestration.js')),
+    ["const {checkListOrderFit} = require('./article-selection');"]);
+  assert.deepEqual(importLines(path.join('lib', 'source-reader.js')),
+    ["const {tierTryOrder, createReaderStopRule, checkListOrderFit} = require('./article-selection');"]);
 });
 
 // Step 9F.2e.3.1: today's-mode pieces. Every position array must cover every
@@ -703,4 +713,22 @@ test('Step 9F.2e.3.4a TIER order: oldLabelPositions are valid indices into the o
   for (const position of result.oldLabelPositions) {
     assert.ok(Number.isInteger(position) && position >= 0 && position < candidates.length, 'in range');
   }
+});
+
+// Step 9F.2e.3.4b: the reader translates the try order's positions back to its
+// ranked rows through each candidate object, so the same object listed twice
+// breaks the mapping. Impossible for Yahoo today (one fresh object per listing
+// row, de-duplicated by link); this documents the limit.
+test('Step 9F.2e.3.4b: a candidate object listed twice breaks the position mapping (documented limit)', () => {
+  const a = {headline: 'Fake a', url: 'https://x.test/a.html', publisher: 'P'};
+  const b = {headline: 'Fake b', url: 'https://x.test/b.html', publisher: 'P'};
+  const result = tierTryOrder({candidates: [a, b, a], mostActive: [], portfolioSnapshots: [],
+    labelWindow: null, generationTime: NaN});
+  // Both copies map to the last position: position 2 is tried twice, position 0 never.
+  assert.deepEqual(result.order, [2, 1, 2]);
+  assert.equal(result.order.includes(0), false);
+  // With distinct objects every position appears exactly once.
+  const distinct = tierTryOrder({candidates: [a, b, {...a}], mostActive: [], portfolioSnapshots: [],
+    labelWindow: null, generationTime: NaN});
+  assert.deepEqual([...distinct.order].sort(), [0, 1, 2]);
 });

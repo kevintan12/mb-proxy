@@ -464,3 +464,140 @@ test('Step 9F.2e.1 shared reader: a long points summary is cut to the audit limi
   assert.ok(entry.scoreParts.length <= AUDIT_FIELD_LIMITS.scorePartsCharacters);
   assert.ok(entry.scoreParts.startsWith('macro 20, most-active 12, portfolio 8, wire 5'));
 });
+
+// Step 9F.2e.3.4b: the reader now takes its try order, stop rule and
+// per-article classifier fit check from the shared selection step. Every
+// decision and every count the audit and the reading summary list must still
+// be produced; these runs together reach each one at least once.
+function scriptedSource(rows) {
+  const reads = [];
+  const source = {
+    sourceId: YAHOO_NEWS_SOURCE_ID,
+    async findCandidates() {
+      return {ok: true, candidates: rows.map(row => ({
+        headline: row.headline || `Fake headline ${row.name}`, url: urlFor(row.name),
+        publisher: row.publisher || 'Fake Wire', edition: 'US', ...(row.ageLabel ? {ageLabel: row.ageLabel} : {})
+      })), discoveryStats: {listingOutcome: 'SUCCESS'}};
+    },
+    async readPage(url, {headline}) {
+      const row = rows.find(entry => urlFor(entry.name) === url);
+      reads.push(row.name);
+      if (row.onRead) row.onRead();
+      const kind = row.page || 'OK';
+      if (kind === 'THROW') throw new Error('reader failed');
+      if (kind === 'TIMEOUT') return {ok: false, type: 'TIMEOUT'};
+      if (kind === 'HTTP_404') return {ok: false, type: 'HTTP_FAILURE', httpStatus: 404};
+      if (kind.startsWith('EXTRACT:')) {
+        return {ok: false, type: 'EXTRACTION_FAILURE', extractionFailureType: kind.slice(8)};
+      }
+      if (kind === 'OTHER') return {ok: false, type: 'SOMETHING_ELSE'};
+      const publishedAt = kind === 'NO_TIME' ? null
+        : kind.startsWith('OK@') ? kind.slice(3) : iso(LAST_CLOSE - 3600000);
+      return {ok: true, type: 'SUCCESS', articleContent: {
+        headline: kind === 'BAD_ITEM' ? '' : headline, canonicalUrl: url, publisher: 'Fake Wire', publishedAt,
+        articleText: `${headline}. Body text.`
+      }};
+    }
+  };
+  return {source, reads};
+}
+
+function evidenceNamed(name) {
+  return createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: `Evidence ${name}`, summary: `Evidence ${name}.`, canonicalUrl: urlFor(name),
+    publishedAt: iso(LAST_CLOSE - 7200000), symbols: [], publisher: 'Fake Wire'
+  });
+}
+
+test('Step 9F.2e.3.4b shared reader: every audit decision and summary count is still produced', async () => {
+  const budgetMs = settingValue(SOURCE_LIMIT_SETTINGS[YAHOO_NEWS_SOURCE_ID].readingBudgetSeconds) * 1000;
+  const runs = [];
+  const run = async (rows, overrides) => {
+    const scripted = scriptedSource(rows);
+    const outcome = await runReader(scripted.source, overrides);
+    runs.push(outcome);
+    return {...outcome, reads: scripted.reads};
+  };
+  const limits = (maxArticleAttempts, maxAdmittedArticles) =>
+    ({limits: {maxArticleAttempts, maxAdmittedArticles, initialCandidateAttempts: 5}});
+
+  // 1. Every page outcome, a dropped (tier 4a) headline and an old label.
+  const main = await run([
+    {name: 'ok'}, {name: 'timeout', page: 'TIMEOUT'}, {name: 'notfound', page: 'HTTP_404'},
+    {name: 'thrown', page: 'THROW'}, {name: 'nometa', page: 'EXTRACT:NO_COMPATIBLE_ARTICLE_METADATA'},
+    {name: 'mismatch', page: 'EXTRACT:ARTICLE_IDENTITY_OR_HEADLINE_MISMATCH'},
+    {name: 'nobody', page: 'EXTRACT:NO_ARTICLE_BODY_CONTAINER_OR_TEXT'},
+    {name: 'canonical', page: 'EXTRACT:CANONICAL_OR_REDIRECT_MISMATCH'},
+    {name: 'oddextract', page: 'EXTRACT:SOMETHING_NEW'}, {name: 'other', page: 'OTHER'},
+    {name: 'notime', page: 'NO_TIME'}, {name: 'early', page: `OK@${iso(WINDOW_START - 1000)}`},
+    {name: 'late', page: `OK@${iso(Date.parse(TRIGGER) + 1000)}`}, {name: 'dup'},
+    {name: 'baditem', page: 'BAD_ITEM'}, {name: 'old', ageLabel: '9 days ago'},
+    {name: 'drop', headline: 'Australian developer axes Sydney data centre plan', publisher: 'Reuters'}
+  ], {requiredItems: [evidenceNamed('dup')], runContext: {mostActive: [{symbol: 'ZZZZ'}]}, ...limits(20, 6)});
+  const mainAudit = decisions(main.events);
+  assert.equal(main.reads.at(-1), 'old', 'the old-label article is tried last');
+  assert.equal(main.reads.includes('drop'), false, 'the tier 4a article is never opened');
+  assert.equal(mainAudit.drop.decision, 'SKIPPED_BELOW_RELEVANCE_FLOOR');
+  assert.equal(mainAudit.baditem.decision, 'REJECTED_OTHER');
+  // labelOld is written before any download, so it sits before the download fields.
+  assert.deepEqual(Object.keys(mainAudit.old).slice(-4), ['decision', 'labelOld', 'attempts', 'publishedAt']);
+
+  // 2. The 50-item classifier limit (pre-check off): 49 required + 1 admitted.
+  const required = Array.from({length: 49}, (_, index) => evidenceNamed(`req${index}`));
+  const full = await run([{name: 'first'}, {name: 'second'}], {requiredItems: required});
+  assert.equal(decisions(full.events).first.decision, 'ADMITTED');
+  assert.equal(decisions(full.events).second.decision, 'REJECTED_CLASSIFIER_PREFLIGHT');
+  // 3. Pre-check on, the request cannot be built: a misfit, never a crash.
+  const broken = await run([{name: 'one'}], {classificationPreflightAvailable: true, marketContext: {}});
+  assert.equal(decisions(broken.events).one.decision, 'REJECTED_CLASSIFIER_PREFLIGHT');
+  assert.equal(broken.events[0].classifierPreflightRejectedCount, 1);
+  assert.equal(broken.events[0].otherEvidenceConstructionRejectedCount, 1);
+  // 4. No horizon: window unavailable, by reason.
+  await run([{name: 'one'}], {horizonFor: () => null, windowUnavailableReason: 'BENCHMARK_OVERLAY_INVALID'});
+  await run([{name: 'one'}], {horizonFor: () => null});
+  // 5. Completed state with an after-close article.
+  await run([{name: 'before'}, {name: 'after', page: `OK@${iso(LAST_CLOSE + 3600000)}`}], {
+    mode: 'COMPLETED',
+    horizonFor: publishedAt => publishedAt > LAST_CLOSE ? 'SUBSEQUENT_DEVELOPMENT' : 'COMPLETED_SESSION'
+  });
+  // 6. The three stop reasons (only the budget sets readingBudgetStopped), and
+  // a retry stopped by the budget.
+  const admittedCap = await run([{name: 'a'}, {name: 'b'}], limits(12, 1));
+  assert.equal(admittedCap.events[0].readingBudgetStopped, false);
+  const attemptsCap = await run([{name: 'a', page: 'HTTP_404'}, {name: 'b'}], limits(1, 6));
+  assert.equal(attemptsCap.events[0].readingBudgetStopped, false);
+  let now = 0;
+  const spent = await run([{name: 'a', onRead: () => { now += budgetMs + 1; }}, {name: 'b'}],
+    {clock: {monotonicNow: () => now, sleep: async () => {}}});
+  assert.equal(spent.events[0].readingBudgetStopped, true);
+  let later = 0;
+  const retry = await run([{name: 'slow', page: 'TIMEOUT', onRead: () => { later += budgetMs - 1; }}],
+    {clock: {monotonicNow: () => later, sleep: async () => {}}});
+  assert.equal(decisions(retry.events).slow.retriesStoppedByBudget, true);
+
+  const seenDecisions = new Set(runs.flatMap(outcome => Object.values(decisions(outcome.events))
+    .map(entry => entry.decision)));
+  assert.deepEqual([...seenDecisions].sort(), [
+    'ADMITTED', 'EXTRACTION_FAILED', 'FETCH_FAILED', 'REJECTED_AFTER_READING_WINDOW',
+    'REJECTED_BEFORE_READING_WINDOW', 'REJECTED_CLASSIFIER_PREFLIGHT', 'REJECTED_DUPLICATE',
+    'REJECTED_NO_PUBLICATION_TIME', 'REJECTED_OTHER', 'REJECTED_WINDOW_UNAVAILABLE',
+    'SKIPPED_BELOW_RELEVANCE_FLOOR', 'SKIPPED_MAX_ADMITTED', 'SKIPPED_MAX_ATTEMPTS', 'SKIPPED_READING_BUDGET'
+  ]);
+  const auditFields = new Set(runs.flatMap(outcome => Object.values(decisions(outcome.events))
+    .flatMap(entry => Object.keys(entry))));
+  for (const field of ['labelOld', 'attempts', 'retriesStoppedByBudget', 'failureType', 'publishedAt',
+    'afterClose', 'scoreDrop']) {
+    assert.ok(auditFields.has(field), `audit field ${field} produced`);
+  }
+  // Every count in the reading summary is non-zero (or true) in at least one run.
+  const summaries = runs.map(outcome => outcome.events[0]);
+  for (const key of Object.keys(summaries.find(summary => 'subsequentDevelopmentCount' in summary))) {
+    if (key === 'stage' || key === 'listingOutcome') continue;
+    if (key === 'outcome') {
+      assert.deepEqual([...new Set(summaries.map(summary => summary.outcome))].sort(), ['NOT_FOUND', 'SUCCESS']);
+      continue;
+    }
+    assert.ok(summaries.some(summary => summary[key] === true || summary[key] > 0), `count ${key} produced`);
+  }
+});
