@@ -378,7 +378,8 @@ test('Step 9F.6a.5 audit: the source id is counted, so no event passes the byte 
 // Step 9F.2e.1: the shadow score. Every candidate gets its score next to its
 // tier in the audit and the pool, from the same names the tier ranking uses
 // (both lists, Most Active) and the trigger time. The tier order still decides
-// what is opened; nothing about the reading changes.
+// what is opened; nothing about the reading changes. Step 9F.2e.4a: that is
+// now the switch-off path; with the switch on the same scores set the order.
 test('Step 9F.2e.1 shared reader: shadow score in the audit and pool, tier order unchanged', async () => {
   const listing = [
     {name: 'acme', headline: 'Acme Inc opens a new plant', publisher: 'Barchart', ageLabel: '2h ago'},
@@ -405,11 +406,12 @@ test('Step 9F.2e.1 shared reader: shadow score in the audit and pool, tier order
   };
   const acme = {symbol: 'ACME', instrumentName: 'Acme Inc'};
   const beta = {symbol: 'BETA', instrumentName: 'Beta Holdings'};
-  const {result, events} = await runReader(source, {
+  const inputs = {
     runContext: {mostActive: [{symbol: 'ZETA', shortName: 'Zeta Corp', longName: 'Zeta Corp'}]},
     stockSnapshots: [acme, beta],
     portfolioSlotSnapshots: [acme]
-  });
+  };
+  const {result, events} = await runReader(source, {...inputs, env: {SCORE_TRY_ORDER_ENABLED: 'off'}});
   const audit = decisions(events);
   // Tier order (1a acme, beta; 2w wire; 1b zeta), not score order, decides what is opened.
   assert.deepEqual(reads, ['acme', 'beta', 'wire', 'zeta']);
@@ -442,6 +444,12 @@ test('Step 9F.2e.1 shared reader: shadow score in the audit and pool, tier order
   assert.equal(pool.acme.portfolioSlotEligible, true);
   assert.equal(pool.beta.portfolioSlotEligible, false);
   assert.equal(pool.zeta.portfolioSlotEligible, false);
+  // Step 9F.2e.4a: switch on (the default), the same scores set the order:
+  // wire 27, acme 12 (2h) before zeta 12 (no label), then beta 8.
+  reads.length = 0;
+  const scored = await runReader(source, inputs);
+  assert.deepEqual(reads, ['wire', 'acme', 'zeta', 'beta']);
+  assert.deepEqual(scored.result.pool.map(entry => [entry.rank, entry.score]), result.pool.map(entry => [entry.rank, entry.score]));
 });
 
 test('Step 9F.2e.1 shared reader: a long points summary is cut to the audit limit', async () => {
@@ -594,10 +602,133 @@ test('Step 9F.2e.3.4b shared reader: every audit decision and summary count is s
   const summaries = runs.map(outcome => outcome.events[0]);
   for (const key of Object.keys(summaries.find(summary => 'subsequentDevelopmentCount' in summary))) {
     if (key === 'stage' || key === 'listingOutcome') continue;
+    // Step 9F.2e.4a: a label, not a count.
+    if (key === 'tryOrder') {
+      assert.ok(summaries.every(summary => summary.tryOrder === 'SCORE'));
+      continue;
+    }
     if (key === 'outcome') {
       assert.deepEqual([...new Set(summaries.map(summary => summary.outcome))].sort(), ['NOT_FOUND', 'SUCCESS']);
       continue;
     }
     assert.ok(summaries.some(summary => summary[key] === true || summary[key] > 0), `count ${key} produced`);
+  }
+});
+
+// Step 9F.2e.4a: the score try order behind its Admin switch. Only the order
+// the reader tries articles in changes; with the switch off the reader runs
+// exactly as before (no new log fields).
+const listings = require('./fixtures/yahoo-listings');
+
+function listingSource(candidates, trigger) {
+  const reads = [];
+  const source = {
+    sourceId: YAHOO_NEWS_SOURCE_ID,
+    async findCandidates() {
+      return {ok: true, candidates, discoveryStats: {listingOutcome: 'SUCCESS'}};
+    },
+    async readPage(url, {headline}) {
+      reads.push(headline);
+      return {ok: true, type: 'SUCCESS', articleContent: {headline, canonicalUrl: url, publisher: 'Fake Wire',
+        publishedAt: iso(Date.parse(trigger) - 3600000), articleText: `${headline}. Body text.`}};
+    }
+  };
+  return {source, reads};
+}
+
+function run2026_10_12(env, candidates = listings.listing2026_10_12()) {
+  const {source, reads} = listingSource(candidates, listings.TRIGGER_2026_10_12);
+  return runReader(source, {
+    acquisitionStartedAt: listings.TRIGGER_2026_10_12,
+    runContext: {mostActive: listings.MOST_ACTIVE_2026_10_12},
+    stockSnapshots: listings.PORTFOLIO_2026_10_12,
+    env
+  }).then(outcome => ({...outcome, reads, candidates}));
+}
+
+const auditEntriesOf = events => events.filter(event => event.stage === 'activeYahooCandidateAudit')
+  .flatMap(event => event.candidates);
+
+test('Step 9F.2e.4a shared reader: the 12 Oct 2026 listing is tried by score with the switch on', async () => {
+  const on = await run2026_10_12({});
+  const headlineOfRow = row => listings.LOGGED_ROWS_2026_10_12[row - 1][4];
+  assert.deepEqual(on.reads, [1, 3, 5, 6, 4, 7].map(headlineOfRow));
+  assert.equal(on.acquiredItems.length, 6);
+  const off = await run2026_10_12({SCORE_TRY_ORDER_ENABLED: 'off'});
+  assert.deepEqual(off.reads, [1, 2, 3, 4, 5, 6].map(headlineOfRow));
+  // The same rows are dropped either way.
+  const dropped = outcome => auditEntriesOf(outcome.events)
+    .filter(entry => entry.decision === 'SKIPPED_BELOW_RELEVANCE_FLOOR').map(entry => entry.slug).sort();
+  assert.equal(dropped(on).length, 3);
+  assert.deepEqual(dropped(on), dropped(off));
+});
+
+test('Step 9F.2e.4a shared reader: the switch is on by default and reads true/1/on and false/0/off', async () => {
+  const firstRead = async env => (await run2026_10_12(env)).reads[2];
+  const scoreThird = listings.LOGGED_ROWS_2026_10_12[4][4];
+  const tierThird = listings.LOGGED_ROWS_2026_10_12[2][4];
+  for (const value of [undefined, 'true', '1', 'on', 'ON ', 'maybe', '']) {
+    const env = value === undefined ? {} : {SCORE_TRY_ORDER_ENABLED: value};
+    assert.equal(await firstRead(env), scoreThird, `value ${JSON.stringify(value)}`);
+  }
+  for (const value of ['false', '0', 'off', ' Off']) {
+    assert.equal(await firstRead({SCORE_TRY_ORDER_ENABLED: value}), tierThird, `value ${value}`);
+  }
+});
+
+test('Step 9F.2e.4a shared reader: tryOrder and tryRank are logged with the switch on only', async () => {
+  const on = await run2026_10_12({});
+  const off = await run2026_10_12({SCORE_TRY_ORDER_ENABLED: 'off'});
+  const onSummary = on.events[0];
+  const offSummary = off.events[0];
+  // On: tryOrder sits right after staleByLabelCount; nothing else in the summary changes.
+  const onKeys = Object.keys(onSummary);
+  assert.equal(onSummary.tryOrder, 'SCORE');
+  assert.equal(onKeys[onKeys.indexOf('staleByLabelCount') + 1], 'tryOrder');
+  assert.deepEqual(onKeys.filter(key => key !== 'tryOrder'), Object.keys(offSummary));
+  assert.equal('tryOrder' in offSummary, false);
+  // On: tryRank right after rank on every row that is in the try order, 1..n
+  // in download order; dropped rows have none.
+  const onAudit = auditEntriesOf(on.events);
+  for (const entry of onAudit) {
+    if (entry.decision === 'SKIPPED_BELOW_RELEVANCE_FLOOR') {
+      assert.equal('tryRank' in entry, false);
+    } else {
+      assert.deepEqual(Object.keys(entry).slice(0, 3), ['rank', 'tryRank', 'tier']);
+    }
+  }
+  const tried = onAudit.filter(entry => 'tryRank' in entry).sort((a, b) => a.tryRank - b.tryRank);
+  assert.deepEqual(tried.map(entry => entry.tryRank), tried.map((entry, index) => index + 1));
+  assert.equal(tried.length, 71);
+  const {auditSlug} = require('../lib/source-audit');
+  const slugOfRead = headline => auditSlug(on.candidates.find(item => item.headline === headline).url);
+  assert.deepEqual(tried.slice(0, on.reads.length).map(entry => entry.slug), on.reads.map(slugOfRead));
+  // The audit rows stay in tier order (rank) either way.
+  assert.deepEqual(onAudit.map(entry => entry.rank), onAudit.map((entry, index) => index + 1));
+  // Off: no tryRank anywhere; every audit row is the same apart from tryRank.
+  const offAudit = auditEntriesOf(off.events);
+  assert.equal(offAudit.some(entry => 'tryRank' in entry), false);
+  const withoutTryRank = ({tryRank, ...rest}) => rest;
+  const decisionless = ({decision, attempts, publishedAt, ...rest}) => rest;
+  assert.deepEqual(onAudit.map(withoutTryRank).map(decisionless), offAudit.map(decisionless));
+});
+
+test('Step 9F.2e.4a shared reader: a 74-candidate audit stays under the event byte limit, on and off', async () => {
+  const {AUDIT_MAX_EVENT_BYTES} = require('../lib/source-audit');
+  for (const env of [{}, {SCORE_TRY_ORDER_ENABLED: 'off'}]) {
+    // Long headlines so every audit row is near its field limits.
+    const candidates = listings.listing2026_10_12().map((item, index) => ({
+      ...item, headline: `${item.headline} ${'x'.repeat(80)}`.slice(0, 200), publisher: `${item.publisher} Long Publisher Name`,
+      url: `${item.url.replace('.html', '')}-${'y'.repeat(60)}-${index}.html`
+    }));
+    const {events} = await run2026_10_12(env, candidates);
+    const audit = events.filter(event => event.stage === 'activeYahooCandidateAudit');
+    assert.ok(audit.length >= 8);
+    for (const event of audit) {
+      const bytes = Buffer.byteLength(JSON.stringify({...event, generationId: '0'.repeat(36)}), 'utf8');
+      assert.ok(bytes <= AUDIT_MAX_EVENT_BYTES, `${bytes} bytes`);
+      assert.equal(event.parts, audit.length);
+    }
+    assert.equal(audit.flatMap(event => event.candidates).length, 74);
   }
 });

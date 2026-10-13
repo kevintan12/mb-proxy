@@ -20,7 +20,8 @@ const {
   selectionSummary,
   checkListOrderFit,
   tierTryOrder,
-  createReaderStopRule
+  createReaderStopRule,
+  scoreTryOrder
 } = require('../lib/article-selection');
 const {SETTINGS_REGISTRY} = require('../lib/settings-registry');
 const {createReadingBudget} = require('../lib/reading-window');
@@ -390,8 +391,8 @@ test('Step 9F.2e.2 summary: every decision listed, short headlines only, no arti
 
 // Step 9F.2e.3.4b (supersedes the Step 9F.2e.3.2 "only the orchestration"
 // test): only the orchestration (checkListOrderFit) and the reader
-// (tierTryOrder, createReaderStopRule, checkListOrderFit) import the selection
-// step; nothing under api/ does.
+// (tierTryOrder, createReaderStopRule, checkListOrderFit; Step 9F.2e.4a adds
+// scoreTryOrder) import the selection step; nothing under api/ does.
 test('Step 9F.2e.3.4b: only the orchestration and the reader import the selection step, each only its pieces', () => {
   const root = path.join(__dirname, '..');
   const files = [];
@@ -413,7 +414,7 @@ test('Step 9F.2e.3.4b: only the orchestration and the reader import the selectio
   assert.deepEqual(importLines(path.join('lib', 'us-analysis-package-orchestration.js')),
     ["const {checkListOrderFit} = require('./article-selection');"]);
   assert.deepEqual(importLines(path.join('lib', 'source-reader.js')),
-    ["const {tierTryOrder, createReaderStopRule, checkListOrderFit} = require('./article-selection');"]);
+    ["const {tierTryOrder, scoreTryOrder, createReaderStopRule, checkListOrderFit} = require('./article-selection');"]);
 });
 
 // Step 9F.2e.3.1: today's-mode pieces. Every position array must cover every
@@ -731,4 +732,175 @@ test('Step 9F.2e.3.4b: a candidate object listed twice breaks the position mappi
   const distinct = tierTryOrder({candidates: [a, b, {...a}], mostActive: [], portfolioSnapshots: [],
     labelWindow: null, generationTime: NaN});
   assert.deepEqual([...distinct.order].sort(), [0, 1, 2]);
+});
+
+// Step 9F.2e.4a: the score try order. Same inputs and return shape as the tier
+// order; same dropped set; old-label rows still last; inside each group: score,
+// then the newer article (age label), then listing position, with no readable
+// label counting as the oldest within its score.
+const listings = require('./fixtures/yahoo-listings');
+const {scoreArticle, compareScoredArticles} = require('../lib/article-score');
+const {rankCandidates, portfolioIdentitiesFrom} = require('../lib/source-ranking');
+
+function orderArgs2026_10_12(candidates = listings.listing2026_10_12()) {
+  return {
+    candidates,
+    mostActive: listings.MOST_ACTIVE_2026_10_12,
+    portfolioSnapshots: listings.PORTFOLIO_2026_10_12,
+    labelWindow: {startsAtInclusive: listings.WINDOW_START_2026_10_12},
+    generationTime: Date.parse(listings.TRIGGER_2026_10_12)
+  };
+}
+
+function realHeadlinesArgs() {
+  return {
+    candidates: listings.realHeadlinesListing(), mostActive: listings.REAL_HEADLINES_MOST_ACTIVE,
+    portfolioSnapshots: listings.NO_MATERIAL_PORTFOLIO, labelWindow: {startsAtInclusive: '2026-10-11T00:00:00.000Z'},
+    generationTime: Date.parse('2026-10-12T16:00:00.000Z')
+  };
+}
+
+// The score's own drop rule, per listing position.
+function scoreDropPositions({candidates, mostActive, portfolioSnapshots, generationTime}) {
+  const portfolioIdentities = portfolioIdentitiesFrom(portfolioSnapshots);
+  return candidates.map((candidateItem, position) => [position, scoreArticle(
+    {headline: candidateItem.headline, publisher: candidateItem.publisher, ageLabel: candidateItem.ageLabel},
+    {triggerAt: generationTime, portfolioIdentities, mostActiveIdentities: mostActive})])
+    .filter(([, scored]) => scored.excludedByDropList).map(([position]) => position);
+}
+
+test('Step 9F.2e.4a SCORE order: same shape as the tier order, every candidate accounted for once', () => {
+  const args = orderArgs2026_10_12();
+  const score = scoreTryOrder(args);
+  const tier = tierTryOrder(args);
+  assert.deepEqual(Object.keys(score), Object.keys(tier));
+  assert.ok(Object.isFrozen(score) && Object.isFrozen(score.order) && Object.isFrozen(score.oldLabelPositions));
+  assert.equal(args.candidates.length, 74);
+  assert.deepEqual([...score.order, ...score.dropped].sort((a, b) => a - b), [...args.candidates.keys()]);
+  // Same dropped positions, same tiers and the same try-last set as the tier order.
+  assert.deepEqual(score.dropped, tier.dropped);
+  assert.deepEqual(score.tiers, tier.tiers);
+  assert.deepEqual([...score.oldLabelPositions].sort((a, b) => a - b),
+    [...tier.oldLabelPositions].sort((a, b) => a - b));
+  assert.equal(score.oldLabelPositions.length, 4);
+  assert.deepEqual(score.order.slice(-score.oldLabelPositions.length), score.oldLabelPositions);
+  assert.throws(() => scoreTryOrder({...args, candidates: null}), TypeError);
+});
+
+test('Step 9F.2e.4a SCORE order: the 12 Oct 2026 Pre-market listing', () => {
+  const args = orderArgs2026_10_12();
+  const row = position => position + 1;
+  const result = scoreTryOrder(args);
+  const scoreOrder = result.order.map(row);
+  // Today (tier order): rows 1-6, all single-company chip stories.
+  assert.deepEqual(tierTryOrder(args).order.map(row).slice(0, 6), [1, 2, 3, 4, 5, 6]);
+  // Score order: the Goldman market-wide story (row 7) is sixth. Rows 5 and 6
+  // tie on score and age, so listing order decides; rows 7 and 2 tie on 30 and
+  // row 7 (2h) is newer than row 2 (12h).
+  assert.deepEqual(scoreOrder.slice(0, 6), [1, 3, 5, 6, 4, 7]);
+  assert.deepEqual(scoreOrder.slice(0, 10), [1, 3, 5, 6, 4, 7, 2, 8, 9, 33]);
+  assert.equal(scoreOrder.indexOf(25) + 1, 11);
+  // Every logged score is reproduced except row 22: as listed it has no
+  // generic word, so it scores 24, not the logged 25.
+  const portfolioIdentities = portfolioIdentitiesFrom(listings.PORTFOLIO_2026_10_12);
+  const mismatches = listings.LOGGED_ROWS_2026_10_12.map(([logged], index) => [index + 1, logged,
+    scoreArticle(args.candidates[index], {triggerAt: args.generationTime, portfolioIdentities,
+      mostActiveIdentities: listings.MOST_ACTIVE_2026_10_12}).score])
+    .filter(([, logged, mine]) => logged !== mine);
+  assert.deepEqual(mismatches, [[22, 25, 24]]);
+  // The three drop-rule headlines are never tried; old-label fillers go last.
+  assert.deepEqual(result.dropped.map(row), [38, 39, 40]);
+  for (const position of result.oldLabelPositions) assert.equal(args.candidates[position].ageLabel, '5d ago');
+});
+
+test("Step 9F.2e.4a SCORE order: the score's drop rule and the tier drop rule give the same set", () => {
+  const cases = {
+    '12 Oct listing': orderArgs2026_10_12(),
+    'REAL HEADLINES': realHeadlinesArgs(),
+    'no-material package': {
+      candidates: listings.noMaterialListing(), mostActive: [], portfolioSnapshots: listings.NO_MATERIAL_PORTFOLIO,
+      labelWindow: {startsAtInclusive: '2026-09-25T20:00:00.000Z'}, generationTime: Date.parse('2026-09-28T10:00:57.798Z')
+    }
+  };
+  for (const [name, args] of Object.entries(cases)) {
+    const tierDropped = rankCandidates(args.mostActive, args.candidates, args.portfolioSnapshots)
+      .filter(entry => entry.dropped).map(entry => args.candidates.indexOf(entry.candidate));
+    assert.ok(tierDropped.length > 0, `${name}: something is dropped`);
+    assert.deepEqual(scoreDropPositions(args), tierDropped, name);
+    assert.deepEqual(scoreTryOrder(args).dropped, tierDropped, name);
+  }
+});
+
+test('Step 9F.2e.4a SCORE order: the REAL HEADLINES top six', () => {
+  const args = realHeadlinesArgs();
+  const result = scoreTryOrder(args);
+  assert.deepEqual(result.order.slice(0, 6).map(position => args.candidates[position].headline), [
+    'Nvidia, Broadcom, and AMD Investors Need to Have Oct. 15 Circled on Their Calendars',
+    'Microsoft’s Trillion-Dollar Quarter Shows AI Trade Won’t Quit',
+    'Dollar steadies near two-month high as US-Iran stalemate lifts oil, Fed rate hike bets',
+    'Singapore markets react as Fed raises rates',
+    'Morning Bid: Inflation relief gives bonds little reprieve',
+    'Stocks fall as Middle East stalemate boosts oil'
+  ]);
+  // The "2d ago" Russell story is old-labelled for this window: tried last.
+  assert.equal(args.candidates[result.order.at(-1)].headline, 'Russell rebounds after a volatile trading day');
+});
+
+test('Step 9F.2e.4a SCORE order: ties go to the newer article, then listing position; no label is oldest', () => {
+  const generationTime = Date.parse(TRIGGER);
+  const labelWindow = {startsAtInclusive: hoursAgo(100)};
+  const plain = (name, ageLabel) => ({headline: `Quarterly gardening tips ${name}`, publisher: 'P',
+    ...(ageLabel === null ? {} : {ageLabel})});
+  const candidates = [
+    plain('a', null), // no label: oldest within its score
+    plain('b', 'yesterday'), // unreadable label: oldest within its score
+    plain('c', '1d ago'), // exactly 24 h: 0 recency points
+    plain('d', '30h ago'),
+    plain('e', '23h ago'), // 2 recency points
+    plain('f', '53m ago'), // 4 recency points
+    plain('g', '1h ago'),
+    plain('h', '1h ago')
+  ];
+  const result = scoreTryOrder({candidates, mostActive: [], portfolioSnapshots: [], labelWindow, generationTime});
+  // 4 points: f (53 m), then g and h (1 h, listing order); 2 points: e; 0 points:
+  // c (24 h), d (30 h), then a and b (no readable label) in listing order.
+  assert.deepEqual(result.order.map(position => 'abcdefgh'[position]).join(''), 'fghecdab');
+});
+
+test('Step 9F.2e.4a SCORE order: a full tie goes by listing position, never by tier rank', () => {
+  const generationTime = Date.parse(TRIGGER);
+  // Both score 20 with no age label: a plain macro headline (tier 2) listed
+  // first, then a name on both lists (tier 1a, 8 + 12).
+  const candidates = [
+    {headline: 'Fed minutes due this week', publisher: 'P'},
+    {headline: 'Zeta Corp names a new chief', publisher: 'P'}
+  ];
+  const args = {
+    candidates, mostActive: [{symbol: 'ZETA', shortName: 'Zeta Corp', longName: 'Zeta Corp'}],
+    portfolioSnapshots: [{symbol: 'ZETA', instrumentName: 'Zeta Corp'}], labelWindow: null, generationTime
+  };
+  assert.deepEqual(tierTryOrder(args).order, [1, 0]);
+  assert.deepEqual(scoreTryOrder(args).order, [0, 1]);
+});
+
+test('Step 9F.2e.4a SCORE order: old-label rows go last, in score order inside that group', () => {
+  const generationTime = Date.parse(TRIGGER);
+  const labelWindow = {startsAtInclusive: hoursAgo(30)};
+  const candidates = [
+    {headline: 'Quarterly gardening tips', publisher: 'P', ageLabel: '3d ago'}, // old, 0 points
+    {headline: 'Garden centre opens a new branch', publisher: 'P', ageLabel: '2h ago'}, // fresh, 4 points
+    {headline: 'Fed minutes due this week', publisher: 'P', ageLabel: '5d ago'}, // old, 20 points
+    {headline: 'Fed holds rates steady', publisher: 'Reuters', ageLabel: '4d ago'} // old, 25 points
+  ];
+  const args = {candidates, mostActive: [], portfolioSnapshots: [], labelWindow, generationTime};
+  const score = scoreTryOrder(args);
+  assert.deepEqual(score.order, [1, 3, 2, 0]);
+  assert.deepEqual(score.oldLabelPositions, [3, 2, 0]);
+  // The tier order's try-last group keeps its own order (2w, 2, 3b).
+  assert.deepEqual(tierTryOrder(args).oldLabelPositions, [3, 2, 0]);
+});
+
+test('Step 9F.2e.4a: compareScoredArticles keeps its own tie rule (an unknown age falls to listing order)', () => {
+  const rows = [{score: 5, ageHours: null, listIndex: 0}, {score: 5, ageHours: 3, listIndex: 1}];
+  assert.deepEqual([...rows].sort(compareScoredArticles).map(row => row.listIndex), [0, 1]);
 });

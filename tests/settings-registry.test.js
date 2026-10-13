@@ -274,3 +274,22 @@ test('Step 9F.2d.1 settings registry: planned attempt cap, portfolio first pass,
   assert.equal(howTo.reference, true);
   assert.match(howTo.default, /HOW_TO_DROP_PREFIXES/);
 });
+
+// Step 9F.2e.4a: the one new setting -- the reader's try-order switch. Admin,
+// on by default, wired, read with the shared on/off clamp.
+test('Step 9F.2e.4a settings registry: scoreTryOrderEnabled', () => {
+  const entry = SETTINGS_REGISTRY.scoreTryOrderEnabled;
+  assert.deepEqual([entry.default, entry.admin, entry.envVar, entry.wired, entry.boolean],
+    [true, 'Admin', 'SCORE_TRY_ORDER_ENABLED', true, true]);
+  assert.ok(BOOLEAN_ADMIN_NAMES.includes('scoreTryOrderEnabled'));
+  assert.equal(settingValue('scoreTryOrderEnabled', {env: {}}), true);
+  for (const value of ['true', '1', 'on', ' On ']) {
+    assert.equal(settingValue('scoreTryOrderEnabled', {env: {SCORE_TRY_ORDER_ENABLED: value}}), true, value);
+  }
+  for (const value of ['false', '0', 'off', 'OFF']) {
+    assert.equal(settingValue('scoreTryOrderEnabled', {env: {SCORE_TRY_ORDER_ENABLED: value}}), false, value);
+  }
+  for (const value of ['', 'maybe', '2', 'no']) {
+    assert.equal(settingValue('scoreTryOrderEnabled', {env: {SCORE_TRY_ORDER_ENABLED: value}}), true, value);
+  }
+});

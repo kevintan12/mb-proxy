@@ -5299,6 +5299,20 @@ function step8kUsableArticle(candidate, publishedAt = '2026-09-08T14:30:00.000Z'
   }};
 }
 
+// Step 9F.2e.4a: the reader's try-order switch (SCORE_TRY_ORDER_ENABLED) is
+// read from process.env on every run. The tier-order tests below run with it
+// off (today's order, unchanged); each also checks the score order with it on.
+async function withScoreTryOrder(value, operation) {
+  const saved = process.env.SCORE_TRY_ORDER_ENABLED;
+  process.env.SCORE_TRY_ORDER_ENABLED = value;
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.SCORE_TRY_ORDER_ENABLED;
+    else process.env.SCORE_TRY_ORDER_ENABLED = saved;
+  }
+}
+
 async function step8kActiveRun({candidates, myStocks = [], watchlist = [], mostActive = [], acquire = null,
   discoveryExtra = {}, clock = {}}) {
   const diagnostics = [];
@@ -5494,11 +5508,14 @@ test('Step 8K.1 a neutral tier 3b headline is not dropped', async () => {
 test('Step 8K.1 tier 3a (benchmark index or broad-market term) is ranked above tier 4b', async () => {
   const tier3a = step8kCandidate('Russell rebounds after a volatile trading day');
   const tier4b = step8kCandidate('China factory data lifts sentiment');
-  const {audit, calls} = await step8kActiveRun({candidates: [tier4b, tier3a]});
+  const {audit, calls} = await withScoreTryOrder('off', () => step8kActiveRun({candidates: [tier4b, tier3a]}));
   assert.deepEqual(audit.map(entry => [entry.tier, entry.subTier, entry.headline]), [
     [3, '3a', tier3a.headline], [4, '4b', tier4b.headline]
   ]);
   assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url), [tier3a.url, tier4b.url]);
+  // Step 9F.2e.4a, switch on: Asia/Europe (3 points) is tried before generic (1 point).
+  const scored = await withScoreTryOrder('on', () => step8kActiveRun({candidates: [tier4b, tier3a]}));
+  assert.deepEqual(scored.calls.yahooCurrentNewsArticle.map(call => call.url), [tier4b.url, tier3a.url]);
 });
 
 test('Step 8K.1 tier 3b (no relevance signal) is ranked last, below tier 4b', async () => {
@@ -5775,7 +5792,7 @@ test('Step 9F.1c a candidate whose label says it is older than the reading windo
     labelled('staledays', '6d ago'), labelled('yesterday', 'yesterday'), labelled('nolabel', null),
     labelled('weeks', '3 weeks ago'), labelled('minutes', '12 min ago')
   ];
-  const {audit, calls, diagnostics} = await step8kActiveRun({candidates});
+  const {audit, calls, diagnostics} = await withScoreTryOrder('off', () => step8kActiveRun({candidates}));
   const entryOf = name => audit.find(entry => entry.headline === `Neutral ${name} story`);
   for (const name of ['fresh', 'boundary', 'stalehours', 'staledays', 'yesterday', 'nolabel', 'weeks', 'minutes']) {
     assert.equal(entryOf(name).decision, 'EXTRACTION_FAILED', name);
@@ -5791,6 +5808,12 @@ test('Step 9F.1c a candidate whose label says it is older than the reading windo
   const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
   assert.equal(acquisition.staleByLabelCount, 2);
   assert.equal(acquisition.articleFetchAttemptCount, 8);
+  // Step 9F.2e.4a, switch on: the same two go last; the rest by recency points,
+  // then the newer label, with no readable label counted as the oldest.
+  const scored = await withScoreTryOrder('on', () => step8kActiveRun({candidates}));
+  assert.deepEqual(scored.calls.yahooCurrentNewsArticle.map(candidate => candidate.headline),
+    ['minutes', 'fresh', 'boundary', 'yesterday', 'nolabel', 'weeks', 'stalehours', 'staledays']
+      .map(name => `Neutral ${name} story`));
 });
 
 test('Step 9F.1c label-old candidates go behind fresh ones and the twelve-attempt cap still applies', async () => {
@@ -5820,17 +5843,24 @@ test('Step 8K.5 tier order: portfolio, then wire market wrap, then most-active o
   const mostActiveOnly = step8kCandidate('Intel unveils a new chip line');
   const wireWrap = step8kCandidate('US stock futures slip as oil rises', {publisher: 'Reuters'});
   const portfolio = step8kCandidate('AAPL unveils a new product line');
-  const {audit, calls} = await step8kActiveRun({
+  const inputs = {
     candidates: [plainMacro, mostActiveOnly, wireWrap, portfolio],
     watchlist: [{market: 'US', symbol: 'AAPL'}],
     mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
-  });
+  };
+  const {audit, calls} = await withScoreTryOrder('off', () => step8kActiveRun(inputs));
   assert.deepEqual(audit.map(entry => [entry.headline, entry.tier, entry.subTier]), [
     [portfolio.headline, 1, '1a'], [wireWrap.headline, 2, '2w'],
     [mostActiveOnly.headline, 1, '1b'], [plainMacro.headline, 2, null]
   ]);
   assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url),
     [portfolio.url, wireWrap.url, mostActiveOnly.url, plainMacro.url]);
+  // Step 9F.2e.4a, switch on: wire macro wrap (25), plain macro (20), Most
+  // Active (12), portfolio (8); the audit rows keep their tier ranks.
+  const scored = await withScoreTryOrder('on', () => step8kActiveRun(inputs));
+  assert.deepEqual(scored.calls.yahooCurrentNewsArticle.map(call => call.url),
+    [wireWrap.url, plainMacro.url, mostActiveOnly.url, portfolio.url]);
+  assert.deepEqual(scored.audit.map(entry => [entry.rank, entry.tryRank]), [[1, 4], [2, 1], [3, 3], [4, 2]]);
 });
 
 test('Step 8K.5 a wire partner without a tier 2 term does not jump ahead of a most-active headline', async () => {
