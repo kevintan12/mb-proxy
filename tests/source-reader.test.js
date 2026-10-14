@@ -320,7 +320,7 @@ test('Step 9F.6a.4 shared reader: the pool lists every candidate in ranked order
     // Step 9F.2e.1: the shadow score (nothing scores for a fake headline).
     score: 0,
     scoreBreakdown: {usMacro: 0, mostActive: 0, portfolio: 0, wirePublishers: 0, includeWords: 0,
-      asiaEurope: 0, benchmarkOrGeneric: 0},
+      asiaEurope: 0, benchmarkOrGeneric: 0, ai: 0},
     recencyPoints: 0, recencyBasis: 'unknown', ageHours: null, dropReason: null, portfolioSlotEligible: false
   });
   assert.equal(byName.b.decision, 'FETCH_FAILED');
@@ -650,7 +650,10 @@ const auditEntriesOf = events => events.filter(event => event.stage === 'activeY
   .flatMap(event => event.candidates);
 
 test('Step 9F.2e.4a shared reader: the 12 Oct 2026 listing is tried by score with the switch on', async () => {
-  const on = await run2026_10_12({});
+  // Step 9F.2e.4b: this fixture predates the AI-theme split; it asserts the
+  // Step 9F.2e.4a AI-at-20 result, so the AI-theme value is set to 20
+  // explicitly (either/or with the macro value -- see lib/article-score.js).
+  const on = await run2026_10_12({RANKING_POINTS_AI_THEME: '20'});
   const headlineOfRow = row => listings.LOGGED_ROWS_2026_10_12[row - 1][4];
   assert.deepEqual(on.reads, [1, 3, 5, 6, 4, 7].map(headlineOfRow));
   assert.equal(on.acquiredItems.length, 6);
@@ -667,8 +670,11 @@ test('Step 9F.2e.4a shared reader: the switch is on by default and reads true/1/
   const firstRead = async env => (await run2026_10_12(env)).reads[2];
   const scoreThird = listings.LOGGED_ROWS_2026_10_12[4][4];
   const tierThird = listings.LOGGED_ROWS_2026_10_12[2][4];
+  // Step 9F.2e.4b: this fixture predates the AI-theme split; it asserts the
+  // Step 9F.2e.4a AI-at-20 result, so the AI-theme value is set to 20
+  // explicitly on every "on" run.
   for (const value of [undefined, 'true', '1', 'on', 'ON ', 'maybe', '']) {
-    const env = value === undefined ? {} : {SCORE_TRY_ORDER_ENABLED: value};
+    const env = {RANKING_POINTS_AI_THEME: '20', ...(value === undefined ? {} : {SCORE_TRY_ORDER_ENABLED: value})};
     assert.equal(await firstRead(env), scoreThird, `value ${JSON.stringify(value)}`);
   }
   for (const value of ['false', '0', 'off', ' Off']) {

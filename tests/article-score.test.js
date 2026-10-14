@@ -21,7 +21,8 @@ const POINTS = Object.freeze({
   wirePublishers: SETTINGS_REGISTRY.rankingPointsWirePublishers.default,
   includeWords: SETTINGS_REGISTRY.rankingPointsIncludeWords.default,
   asiaEurope: SETTINGS_REGISTRY.rankingPointsAsiaEurope.default,
-  benchmarkOrGeneric: SETTINGS_REGISTRY.rankingPointsBenchmarkOrGeneric.default
+  benchmarkOrGeneric: SETTINGS_REGISTRY.rankingPointsBenchmarkOrGeneric.default,
+  ai: 0
 });
 const RECENCY = Object.freeze({
   under6h: SETTINGS_REGISTRY.recencyBonusUnder6h.default,
@@ -35,9 +36,12 @@ const RECENCY = Object.freeze({
 test('Step 9F.2c.2: registry defaults match the specified points and recency values', () => {
   assert.deepEqual(POINTS, {
     usMacro: 20, mostActive: 12, portfolio: 8, wirePublishers: 5,
-    includeWords: 5, asiaEurope: 3, benchmarkOrGeneric: 1
+    includeWords: 5, asiaEurope: 3, benchmarkOrGeneric: 1, ai: 0
   });
   assert.deepEqual(RECENCY, {under6h: 4, between: 2, over24h: 0});
+  // ai is never summed alongside usMacro (either/or -- see scoreArticle), so the
+  // maximum stays 54/58 even though rankingPointsAiTheme (Step 9F.2e.4b) also
+  // defaults to a non-zero value (8).
   const maxWithoutRecency = Object.values(POINTS).reduce((sum, points) => sum + points, 0);
   assert.equal(maxWithoutRecency, 54);
   assert.equal(maxWithoutRecency + RECENCY.under6h, 58);
@@ -187,7 +191,8 @@ test('Step 9F.2c.2: a drop-only headline is excluded', () => {
   const result = score({headline: 'Singapore shoppers flock to malls this weekend'});
   assert.equal(result.excludedByDropList, true);
   assert.deepEqual(result.matched, {
-    usMacro: 0, mostActive: 0, portfolio: 0, wirePublishers: 0, includeWords: 0, asiaEurope: 0, benchmarkOrGeneric: 0
+    usMacro: 0, mostActive: 0, portfolio: 0, wirePublishers: 0, includeWords: 0, asiaEurope: 0,
+    benchmarkOrGeneric: 0, ai: 0
   });
 });
 

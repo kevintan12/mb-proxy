@@ -787,10 +787,16 @@ test('Step 9F.2e.4a SCORE order: same shape as the tier order, every candidate a
   assert.throws(() => scoreTryOrder({...args, candidates: null}), TypeError);
 });
 
+// Step 9F.2e.4b: this fixture predates the AI-theme split (Step 9F.2e.4b); it
+// asserts the Step 9F.2e.4a AI-at-20 result, so it sets the AI-theme value to
+// 20 explicitly (either/or with the macro value, so 20/20 reproduces this
+// exactly, byte for byte -- see lib/article-score.js scoreArticle).
+const AI_THEME_AT_MACRO_ENV = Object.freeze({RANKING_POINTS_AI_THEME: '20'});
+
 test('Step 9F.2e.4a SCORE order: the 12 Oct 2026 Pre-market listing', () => {
   const args = orderArgs2026_10_12();
   const row = position => position + 1;
-  const result = scoreTryOrder(args);
+  const result = scoreTryOrder({...args, env: AI_THEME_AT_MACRO_ENV});
   const scoreOrder = result.order.map(row);
   // Today (tier order): rows 1-6, all single-company chip stories.
   assert.deepEqual(tierTryOrder(args).order.map(row).slice(0, 6), [1, 2, 3, 4, 5, 6]);
@@ -805,7 +811,7 @@ test('Step 9F.2e.4a SCORE order: the 12 Oct 2026 Pre-market listing', () => {
   const portfolioIdentities = portfolioIdentitiesFrom(listings.PORTFOLIO_2026_10_12);
   const mismatches = listings.LOGGED_ROWS_2026_10_12.map(([logged], index) => [index + 1, logged,
     scoreArticle(args.candidates[index], {triggerAt: args.generationTime, portfolioIdentities,
-      mostActiveIdentities: listings.MOST_ACTIVE_2026_10_12}).score])
+      mostActiveIdentities: listings.MOST_ACTIVE_2026_10_12, env: AI_THEME_AT_MACRO_ENV}).score])
     .filter(([, logged, mine]) => logged !== mine);
   assert.deepEqual(mismatches, [[22, 25, 24]]);
   // The three drop-rule headlines are never tried; old-label fillers go last.
@@ -833,7 +839,7 @@ test("Step 9F.2e.4a SCORE order: the score's drop rule and the tier drop rule gi
 
 test('Step 9F.2e.4a SCORE order: the REAL HEADLINES top six', () => {
   const args = realHeadlinesArgs();
-  const result = scoreTryOrder(args);
+  const result = scoreTryOrder({...args, env: AI_THEME_AT_MACRO_ENV});
   assert.deepEqual(result.order.slice(0, 6).map(position => args.candidates[position].headline), [
     'Nvidia, Broadcom, and AMD Investors Need to Have Oct. 15 Circled on Their Calendars',
     'Microsoft’s Trillion-Dollar Quarter Shows AI Trade Won’t Quit',
