@@ -3936,3 +3936,205 @@ test('Step 9F.1f writer budget: an over-cap request is sent trimmed, under the c
   assert.ok(sentBytes !== null);
   assert.ok(sentBytes <= CLAUDE_ANALYSIS_PROVISIONAL_MAX_REQUEST_BYTES);
 });
+
+// ---------------------------------------------------------------------------
+// Step 8P.2(b) + 8P.3: Pre-market, Trading and After-Hours reports lead with what
+// has happened since the last close (switch sinceCloseLeadEnabled, default on).
+// ---------------------------------------------------------------------------
+
+const {
+  exchangeTimeLabel,
+  sinceLastCloseContext
+} = require('../lib/us-active-session-evidence');
+const {SETTINGS_REGISTRY: STEP_8P2B_SETTINGS} = require('../lib/settings-registry');
+
+function withSinceCloseLead(value, run) {
+  const saved = process.env.SINCE_CLOSE_LEAD_ENABLED;
+  if (value === undefined) delete process.env.SINCE_CLOSE_LEAD_ENABLED;
+  else process.env.SINCE_CLOSE_LEAD_ENABLED = value;
+  try {
+    return run();
+  } finally {
+    if (saved === undefined) delete process.env.SINCE_CLOSE_LEAD_ENABLED;
+    else process.env.SINCE_CLOSE_LEAD_ENABLED = saved;
+  }
+}
+
+const STEP_8P2B_ACTIVE_CASES = [
+  ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z', '2026-09-08T11:30:00.000Z',
+    'Fri 4 Sep, 4:00 pm ET'],
+  ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z',
+    'Fri 4 Sep, 4:00 pm ET'],
+  ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z',
+    'Tue 8 Sep, 4:00 pm ET']
+];
+
+function stripSinceCloseLead(request) {
+  const modelInput = JSON.parse(request.messages[0].content);
+  delete modelInput.sinceLastClose;
+  for (const marketPackage of modelInput.marketPackages) {
+    for (const entry of marketPackage.evidenceContext.evidence) {
+      delete entry.item.sinceLastClose;
+      delete entry.item.publishedEt;
+    }
+  }
+  const index = request.system.indexOf(' SINCE-THE-CLOSE LEAD');
+  return JSON.stringify({
+    ...request,
+    system: index === -1 ? request.system : request.system.slice(0, index),
+    messages: [{role: 'user', content: JSON.stringify(modelInput)}]
+  });
+}
+
+test('Step 8P.2(b): the since-close switch is a registered Admin on/off setting, on by default', () => {
+  const entry = STEP_8P2B_SETTINGS.sinceCloseLeadEnabled;
+  assert.equal(entry.boolean, true);
+  assert.equal(entry.admin, 'Admin');
+  assert.equal(entry.default, true);
+  assert.equal(entry.envVar, 'SINCE_CLOSE_LEAD_ENABLED');
+  assert.equal(entry.wired, true);
+});
+
+test('Step 8P.2(b): exchange-time labels are fixed ET text in summer and winter time', () => {
+  assert.equal(exchangeTimeLabel('2026-10-15T10:33:47.000Z'), 'Thu 15 Oct, 6:33 am ET');
+  assert.equal(exchangeTimeLabel('2026-10-14T20:27:22.000Z'), 'Wed 14 Oct, 4:27 pm ET');
+  assert.equal(exchangeTimeLabel('2026-12-01T17:05:00.000Z'), 'Tue 1 Dec, 12:05 pm ET');
+  assert.equal(exchangeTimeLabel('2026-12-01T05:01:00.000Z'), 'Tue 1 Dec, 12:01 am ET');
+  assert.equal(exchangeTimeLabel('not a time'), null);
+  assert.equal(exchangeTimeLabel(undefined), null);
+});
+
+test('Step 8P.2(b): PRE, REGULAR and POST name the right last close and mark each after-close article', () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt, lastCloseEt]
+    of STEP_8P2B_ACTIVE_CASES) {
+    const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
+    const modelInput = withSinceCloseLead(undefined, () => projectClaudeAnalysisInput(input));
+    assert.deepEqual(modelInput.sinceLastClose, [{
+      market: 'US', marketState, lastCloseEt, liveTelemetry: true, evidenceRefs: ['e1']
+    }], marketState);
+    const byRef = new Map(modelInput.marketPackages[0].evidenceContext.evidence
+      .map(entry => [entry.reference, entry.item]));
+    assert.equal(byRef.get('e1').sinceLastClose, true, marketState);
+    assert.equal(byRef.get('e1').publishedEt, exchangeTimeLabel(currentPublishedAt), marketState);
+    // The completed-session article is never marked.
+    assert.equal(Object.hasOwn(byRef.get('e2'), 'sinceLastClose'), false, marketState);
+    assert.equal(Object.hasOwn(byRef.get('e2'), 'publishedEt'), false, marketState);
+    const request = withSinceCloseLead(undefined, () => buildClaudeAnalysisRequest(input));
+    assert.equal(request.system.includes('SINCE-THE-CLOSE LEAD (the same for PRE, REGULAR (Trading) '
+      + `and POST (After-Hours)): the last regular close was ${lastCloseEt}.`), true, marketState);
+    // Additive: the Step 8P.2(a) lead sentence and the 12-hour sentence are still there once.
+    assert.equal(request.system.includes('open Section 1 and Section 2 by describing the current '
+      + 'session itself'), true, marketState);
+    assert.equal(request.system.split('Items with ageHoursAtGeneration above 12 are overnight '
+      + 'background').length - 1, 1, marketState);
+  }
+});
+
+test('Step 8P.2(b): the instruction covers lead order, publish times, no invention, attribution and Section 3', () => {
+  const input = activeUsInput({
+    marketState: 'PRE', generatedAt: '2026-09-08T12:00:00.000Z',
+    overlayAsOf: '2026-09-08T11:55:00.000Z', currentPublishedAt: '2026-09-08T11:30:00.000Z',
+    includeOverlay: false
+  });
+  const {system} = withSinceCloseLead(undefined, () => buildClaudeAnalysisRequest(input));
+  for (const required of [
+    'Open Section 1 and Section 2 with what has happened since the last close',
+    'give each item its publish time in plain words',
+    'Use the publishedEt time; do not work out times yourself.',
+    'give the last completed session briefly as where we left off',
+    'Do not state Treasury yields, futures, index or stock prices, percentages, economic data or causes',
+    'No pre-market, live or after-hours prices are supplied',
+    'never state or imply a pre-market, live or after-hours price or move',
+    'that article is in principalCatalysts, and then say who reported it',
+    'Otherwise report the move with no cause.',
+    'do not call it new, fresh or this morning’s news',
+    'In Section 3, discuss first the companies and sectors in the news since the last close',
+    'Never present a since-close article as the cause of the earlier completed-session move.'
+  ]) assert.equal(system.includes(required), true, required);
+  assert.equal(system.includes('Live figures are only those in currentOverlay telemetry records'), false);
+});
+
+test('Step 8P.2(b): with a live overlay the instruction limits live figures to the overlay', () => {
+  const input = activeUsInput();
+  const {system} = withSinceCloseLead(undefined, () => buildClaudeAnalysisRequest(input));
+  assert.equal(system.includes('Live figures are only those in currentOverlay telemetry records'), true);
+  assert.equal(system.includes('No pre-market, live or after-hours prices are supplied'), false);
+});
+
+test('Step 8P.2(b): no article after the close gives the one plain sentence and no lead instruction', () => {
+  const input = activeUsInput({
+    marketState: 'PRE', generatedAt: '2026-09-08T12:00:00.000Z',
+    overlayAsOf: '2026-09-08T11:55:00.000Z', currentPublishedAt: '2026-08-01T00:00:00.000Z'
+  });
+  const modelInput = withSinceCloseLead(undefined, () => projectClaudeAnalysisInput(input));
+  assert.deepEqual(modelInput.sinceLastClose, [{
+    market: 'US', marketState: 'PRE', lastCloseEt: 'Fri 4 Sep, 4:00 pm ET',
+    liveTelemetry: true, evidenceRefs: []
+  }]);
+  const {system} = withSinceCloseLead(undefined, () => buildClaudeAnalysisRequest(input));
+  assert.equal(system.includes('SINCE-THE-CLOSE LEAD: no admitted article was published after the '
+    + 'last regular close (Fri 4 Sep, 4:00 pm ET).'), true);
+  assert.equal(system.includes('"No new market news has been published since the close on Fri 4 Sep, '
+    + '4:00 pm ET."'), true);
+  assert.equal(system.includes('Open Section 1 and Section 2 with what has happened since'), false);
+  assert.equal(system.includes('ACTIVE_SESSION evidence is limited'), true);
+});
+
+test('Step 8P.2(b): switch off gives the previous writer request (on minus only the additions)', () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of STEP_8P2B_ACTIVE_CASES) {
+    for (const published of [currentPublishedAt, '2026-08-01T00:00:00.000Z']) {
+      const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt: published});
+      const on = withSinceCloseLead(undefined, () => buildClaudeAnalysisRequest(input));
+      for (const off of ['off', 'false', '0']) {
+        const offRequest = withSinceCloseLead(off, () => buildClaudeAnalysisRequest(input));
+        assert.equal(offRequest.system.includes('SINCE-THE-CLOSE'), false, marketState);
+        const offModelInput = JSON.parse(offRequest.messages[0].content);
+        assert.equal(Object.hasOwn(offModelInput, 'sinceLastClose'), false, marketState);
+        assert.equal(offRequest.messages[0].content.includes('publishedEt'), false, marketState);
+        assert.equal(JSON.stringify(offRequest), stripSinceCloseLead(on), marketState);
+      }
+    }
+  }
+});
+
+test('Step 8P.2(b): completed-day requests are byte-identical with the switch on or off', () => {
+  for (const input of [canonicalInput(), canonicalInput({includeCurrentOverlay: true}),
+    richCompletedUsWeekInput()]) {
+    const on = withSinceCloseLead('on', () => JSON.stringify(buildClaudeAnalysisRequest(input)));
+    const off = withSinceCloseLead('off', () => JSON.stringify(buildClaudeAnalysisRequest(input)));
+    assert.equal(on, off);
+    assert.equal(on.includes('SINCE-THE-CLOSE'), false);
+    assert.equal(on.includes('sinceLastClose'), false);
+  }
+});
+
+test('Step 8P.2(b): only current-session Yahoo articles published at or after the close are listed', () => {
+  const extra = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Treasury yields climb before the open',
+    summary: 'Treasury yields rose before the open.',
+    canonicalUrl: 'https://finance.yahoo.com/news/treasury-yields-climb.html',
+    publishedAt: '2026-09-08T10:15:00.000Z', symbols: [], publisher: 'Reuters'
+  });
+  const beforeClose = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Stocks drift ahead of the close',
+    summary: 'Stocks drifted before the close.',
+    canonicalUrl: 'https://finance.yahoo.com/news/stocks-drift-before-close.html',
+    publishedAt: '2026-09-04T19:30:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
+  const input = activeUsInput({
+    marketState: 'PRE', generatedAt: '2026-09-08T12:00:00.000Z',
+    overlayAsOf: '2026-09-08T11:55:00.000Z', currentPublishedAt: '2026-09-08T11:30:00.000Z',
+    additionalItems: [extra, beforeClose]
+  });
+  const [entry] = sinceLastCloseContext(input);
+  assert.equal(entry.lastCloseAt, '2026-09-04T20:00:00.000Z');
+  assert.deepEqual(entry.evidenceRefs, ['e1', 'e3']);
+  const modelInput = withSinceCloseLead(undefined, () => projectClaudeAnalysisInput(input));
+  const byRef = new Map(modelInput.marketPackages[0].evidenceContext.evidence
+    .map(item => [item.reference, item.item]));
+  assert.equal(byRef.get('e3').publishedEt, 'Tue 8 Sep, 6:15 am ET');
+  assert.equal(Object.hasOwn(byRef.get('e4'), 'sinceLastClose'), false);
+  assert.deepEqual(sinceLastCloseContext(canonicalInput()), []);
+});
