@@ -4138,3 +4138,126 @@ test('Step 8P.2(b): only current-session Yahoo articles published at or after th
   assert.equal(Object.hasOwn(byRef.get('e4'), 'sinceLastClose'), false);
   assert.deepEqual(sinceLastCloseContext(canonicalInput()), []);
 });
+
+// ---------------------------------------------------------------------------
+// Step 8P.2(b).2: since-close lead, second pass (firmer order, named sources).
+// ---------------------------------------------------------------------------
+
+function step8p2b2System(marketState = 'PRE', overrides = {}) {
+  const [, generatedAt, overlayAsOf, currentPublishedAt] =
+    STEP_8P2B_ACTIVE_CASES.find(([state]) => state === marketState);
+  const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt, ...overrides});
+  return withSinceCloseLead(undefined, () => buildClaudeAnalysisRequest(input)).system;
+}
+
+function step8p2b2Lead(system) {
+  return system.slice(system.indexOf('SINCE-THE-CLOSE LEAD'));
+}
+
+const STEP_8P2B2_EXAMPLE_MARKER = 'Format example only — it shows the order and nothing else; do not '
+  + 'copy its wording, and the bracketed placeholders are not data or facts.';
+
+test('Step 8P.2(b).2 rule 1: Section 1 opens with a timed since-close item and ends with one close sentence', () => {
+  for (const [marketState] of STEP_8P2B_ACTIVE_CASES) {
+    const lead = step8p2b2Lead(step8p2b2System(marketState));
+    for (const required of [
+      'This order is required, not optional, and it overrides any other instruction or example '
+        + 'about how Sections 1 and 2 begin.',
+      'the first sentence of Section 1 must report a since-close item with its publishedEt day and time',
+      'never open Section 1 with the close or with index figures',
+      'Section 1 ends with exactly one short last sentence on the last completed session, as where we left off',
+      'that one sentence gives the S&P 500, the NASDAQ Composite and the Dow Jones Industrial Average, '
+        + 'each with its points and percentage in the index movement pattern, and no other detail about '
+        + 'that session.',
+      'Give no other index figures from the close in Section 1.'
+    ]) assert.equal(lead.includes(required), true, `${marketState}: ${required}`);
+    // The first pass allowed "one or two sentences" of close; that is gone.
+    assert.equal(lead.includes('keep it to one or two sentences'), false, marketState);
+  }
+});
+
+test('Step 8P.2(b).2 rule 2: Section 2 opens with the timed main since-close driver, close drivers after', () => {
+  const lead = step8p2b2Lead(step8p2b2System());
+  assert.equal(lead.includes('the first sentence of Section 2 must give the main since-close driver '
+    + 'with its publishedEt day and time.'), true);
+  assert.equal(lead.includes('Drivers from the last completed session come only after every '
+    + 'since-close driver, each marked as from the close'), true);
+  assert.ok(lead.indexOf('Section 1 order:') < lead.indexOf('Section 2 order:'));
+});
+
+test('Step 8P.2(b).2 rule 3: every cause names its source; "according to reports" is not allowed', () => {
+  const lead = step8p2b2Lead(step8p2b2System());
+  for (const required of [
+    'Naming sources, in every section: any cause must name its source in the same sentence',
+    '"[Publisher] reported that [fact]."',
+    'Never use an unnamed source such as "according to reports", "reports said" or "analysts said".',
+    'If the source cannot be named from a cited admitted article, drop the cause and give the move alone.'
+  ]) assert.equal(lead.includes(required), true, required);
+  // The first pass's "according to [publisher]" example is replaced by the named form.
+  assert.equal(lead.includes('according to [publisher]'), false);
+});
+
+test('Step 8P.2(b).2 rule 4: a Section 4 cause needs an article linked to that same stock', () => {
+  const lead = step8p2b2Lead(step8p2b2System());
+  for (const required of [
+    'Section 4 causes: give a cause for a stock’s move only when an article linked to that same stock',
+    'in that security’s own evidenceRefs or upcomingEvents evidenceRefs in portfolioContext',
+    'states the cause and is cited in Section 4, with its source named.',
+    'An article linked to another stock, or cited only in another section, never supplies a cause for this stock.',
+    'Otherwise give the move alone.'
+  ]) assert.equal(lead.includes(required), true, required);
+});
+
+test('Step 8P.2(b).2 rule 5: with no article after the close the one-sentence note is unchanged', () => {
+  const system = step8p2b2System('PRE', {currentPublishedAt: '2026-08-01T00:00:00.000Z'});
+  // Word for word the a9bdf3e note.
+  assert.equal(step8p2b2Lead(system), 'SINCE-THE-CLOSE LEAD: no admitted article was published after '
+    + 'the last regular close (Fri 4 Sep, 4:00 pm ET). Open Section 1 with one plain sentence that says '
+    + 'so, for example "No new market news has been published since the close on Fri 4 Sep, 4:00 pm '
+    + 'ET." Then give the last completed session as the latest picture of the market. Do not state or '
+    + 'imply any news, price, move or cause since the close.');
+  for (const absent of ['Section 1 order:', 'Naming sources', 'Section 4 causes:', 'Format example only'])
+    assert.equal(system.includes(absent), false, absent);
+});
+
+test('Step 8P.2(b).2 rule 6: one worked example, marked format only, last, with no real numbers', () => {
+  for (const [marketState] of STEP_8P2B_ACTIVE_CASES) {
+    const system = step8p2b2System(marketState);
+    const lead = step8p2b2Lead(system);
+    assert.equal(lead.split(STEP_8P2B2_EXAMPLE_MARKER).length - 1, 1, marketState);
+    const example = lead.slice(lead.indexOf(STEP_8P2B2_EXAMPLE_MARKER) + STEP_8P2B2_EXAMPLE_MARKER.length);
+    // The example comes after every rule and ends the system text.
+    assert.ok(lead.indexOf('Section 4 causes:') < lead.indexOf(STEP_8P2B2_EXAMPLE_MARKER), marketState);
+    assert.equal(system.endsWith(example), true, marketState);
+    // Apart from the "Section 1:" / "Section 2:" labels, no digits at all, so no number,
+    // time, date or level can leak into a report.
+    const quoted = example.match(/"[^"]*"/g);
+    assert.equal(quoted.length, 2, marketState);
+    assert.equal(example.replace(/"[^"]*"/g, '').trim(), 'Section 1:  Section 2:', marketState);
+    for (const text of quoted) assert.equal(/\d/.test(text), false, `${marketState}: ${text}`);
+    for (const placeholder of ['[time]', '[day]', '[Publisher]', '[Index A]', '[Index B]', '[Index C]',
+      '[points]', '[percent]', '[level]'])
+      assert.equal(example.includes(placeholder), true, `${marketState}: ${placeholder}`);
+    // It shows the order: since-close items first, then the one "where we left off" sentence.
+    const section1 = example.slice(example.indexOf('Section 1:'), example.indexOf('Section 2:'));
+    assert.ok(section1.indexOf('[since-close fact]') < section1.indexOf('Where we left off'), marketState);
+    assert.equal(section1.slice(section1.indexOf('Where we left off')).split(/\.\s/).length, 1, marketState);
+    const section2 = example.slice(example.indexOf('Section 2:'));
+    assert.ok(section2.indexOf('[main since-close driver]') < section2.indexOf('At the close on [day]'),
+      marketState);
+  }
+});
+
+test('Step 8P.2(b).2: switch off and completed days carry none of the second-pass wording', () => {
+  const secondPass = ['This order is required, not optional', 'Section 1 order:', 'Section 2 order:',
+    'Naming sources', 'Section 4 causes:', 'Format example only'];
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of STEP_8P2B_ACTIVE_CASES) {
+    const input = activeUsInput({marketState, generatedAt, overlayAsOf, currentPublishedAt});
+    const off = withSinceCloseLead('off', () => JSON.stringify(buildClaudeAnalysisRequest(input)));
+    for (const phrase of secondPass) assert.equal(off.includes(phrase), false, `${marketState}: ${phrase}`);
+  }
+  for (const input of [canonicalInput(), richCompletedUsWeekInput()]) {
+    const on = withSinceCloseLead('on', () => JSON.stringify(buildClaudeAnalysisRequest(input)));
+    for (const phrase of secondPass) assert.equal(on.includes(phrase), false, phrase);
+  }
+});
