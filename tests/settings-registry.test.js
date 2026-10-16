@@ -263,8 +263,9 @@ for (const name of RECENCY_BONUS_NAMES_LIST) {
 // keeps today's 12 and its 6-20 range.
 test('Step 9F.2d.1 settings registry: planned attempt cap, portfolio first pass, how-to list', () => {
   const planned = SETTINGS_REGISTRY.yahooMaxArticleAttemptsPlanned;
+  // Step 9F.2e.5: wired (used while the article slots are on).
   assert.deepEqual([planned.default, planned.min, planned.max, planned.admin, planned.wired],
-    [18, 6, 24, 'Admin', false]);
+    [18, 6, 24, 'Admin', true]);
   assert.equal(planned.envVar, 'YAHOO_MAX_ARTICLE_ATTEMPTS_PLANNED');
   const live = SETTINGS_REGISTRY.yahooMaxArticleAttempts;
   assert.deepEqual([live.default, live.min, live.max, live.wired], [12, 6, 20, true]);
@@ -291,5 +292,30 @@ test('Step 9F.2e.4a settings registry: scoreTryOrderEnabled', () => {
   }
   for (const value of ['', 'maybe', '2', 'no']) {
     assert.equal(settingValue('scoreTryOrderEnabled', {env: {SCORE_TRY_ORDER_ENABLED: value}}), true, value);
+  }
+});
+
+// Step 9F.2e.5: the one new setting -- the article-slots switch. Admin, on by
+// default, wired, read with the shared on/off clamp. The general-slot rows and
+// the slots-on attempt cap are now wired.
+test('Step 9F.2e.5 settings registry: articleSlotsEnabled and the wired slot rows', () => {
+  const entry = SETTINGS_REGISTRY.articleSlotsEnabled;
+  assert.deepEqual([entry.default, entry.admin, entry.envVar, entry.wired, entry.boolean],
+    [true, 'Admin', 'ARTICLE_SLOTS_ENABLED', true, true]);
+  assert.equal(settingValue('articleSlotsEnabled', {env: {}}), true);
+  for (const value of ['false', '0', 'off', 'OFF']) {
+    assert.equal(settingValue('articleSlotsEnabled', {env: {ARTICLE_SLOTS_ENABLED: value}}), false, value);
+  }
+  for (const value of ['', 'maybe', '2']) {
+    assert.equal(settingValue('articleSlotsEnabled', {env: {ARTICLE_SLOTS_ENABLED: value}}), true, value);
+  }
+  for (const [name, value, min, max] of [['yahooSlots', 7, 0, 10], ['cnbcSlots', 3, 0, 6], ['spareAdmits', 3, 0, 5],
+    ['yahooMaxArticleAttemptsPlanned', 18, 6, 24]]) {
+    const row = SETTINGS_REGISTRY[name];
+    assert.deepEqual([row.default, row.min, row.max, row.admin, row.wired], [value, min, max, 'Admin', true], name);
+  }
+  assert.deepEqual([SETTINGS_REGISTRY.slotSpilloverEnabled.default, SETTINGS_REGISTRY.slotSpilloverEnabled.wired], [true, true]);
+  for (const name of ['portfolioSlots', 'portfolioFirstPassPerCompany', 'articleTextBudgetBytesPlanned']) {
+    assert.equal(SETTINGS_REGISTRY[name].wired, false, name);
   }
 });

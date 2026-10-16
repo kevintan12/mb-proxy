@@ -12,6 +12,7 @@ const {
   selectionSettings,
   scoreCandidates,
   fillGeneralSlots,
+  generalSlotCapacity,
   mergedPortfolioList,
   pickPortfolioSlots,
   applyWriterBudget,
@@ -68,10 +69,14 @@ test('Step 9F.2e.2: every number comes from the settings table at Kevin\'s value
     classifierMaxItems: 50,
     classifierMaxBytes: 300 * KB
   });
-  for (const name of ['yahooSlots', 'cnbcSlots', 'portfolioSlots', 'spareAdmits', 'slotSpilloverEnabled',
-    'articleTextBudgetBytesPlanned', 'portfolioFirstPassPerCompany']) {
+  for (const name of ['portfolioSlots', 'articleTextBudgetBytesPlanned', 'portfolioFirstPassPerCompany']) {
     assert.equal(SETTINGS_REGISTRY[name].wired, false, name);
     assert.match(SETTINGS_REGISTRY[name].location, /switched on in Step 9F\.2[de]\.\d/, name);
+  }
+  // Step 9F.2e.5: the general slots and spillover are wired (article slots switch).
+  for (const name of ['yahooSlots', 'cnbcSlots', 'spareAdmits', 'slotSpilloverEnabled']) {
+    assert.equal(SETTINGS_REGISTRY[name].wired, true, name);
+    assert.match(SETTINGS_REGISTRY[name].location, /generalSlotCapacity -> fillGeneralSlots \(Step 9F\.2e\.5\)/, name);
   }
 });
 
@@ -413,8 +418,12 @@ test('Step 9F.2e.3.4b: only the orchestration and the reader import the selectio
   const importLines = file => sources.get(file).split(/\r?\n/).filter(line => imports.test(line));
   assert.deepEqual(importLines(path.join('lib', 'us-analysis-package-orchestration.js')),
     ["const {checkListOrderFit} = require('./article-selection');"]);
+  // Step 9F.2e.5: the reader also takes selectionSettings and generalSlotCapacity
+  // (the import spans two lines; the second holds the require).
   assert.deepEqual(importLines(path.join('lib', 'source-reader.js')),
-    ["const {tierTryOrder, scoreTryOrder, createReaderStopRule, checkListOrderFit} = require('./article-selection');"]);
+    ["  generalSlotCapacity} = require('./article-selection');"]);
+  assert.match(sources.get(path.join('lib', 'source-reader.js')),
+    /\nconst \{tierTryOrder, scoreTryOrder, createReaderStopRule, checkListOrderFit, selectionSettings,\r?\n  generalSlotCapacity\} = require\('\.\/article-selection'\);/);
 });
 
 // Step 9F.2e.3.1: today's-mode pieces. Every position array must cover every
@@ -909,4 +918,33 @@ test('Step 9F.2e.4a SCORE order: old-label rows go last, in score order inside t
 test('Step 9F.2e.4a: compareScoredArticles keeps its own tie rule (an unknown age falls to listing order)', () => {
   const rows = [{score: 5, ageHours: null, listIndex: 0}, {score: 5, ageHours: 3, listIndex: 1}];
   assert.deepEqual([...rows].sort(compareScoredArticles).map(row => row.listIndex), [0, 1]);
+});
+
+// Step 9F.2e.5: the general-slot capacity for one source, worked out by
+// fillGeneralSlots. Sources not yet in the selection step bring no articles,
+// so their slots are unused and pass on (switch on), at most `spare` each.
+const CAPACITY_ROWS = [
+  // [yahoo, cnbc, spilloverEnabled, sparePerSource, expected {general, spare, total}]
+  [7, 3, true, 3, {general: 7, spare: 3, total: 10}],
+  [7, 3, false, 3, {general: 7, spare: 0, total: 7}],
+  [7, 0, true, 3, {general: 7, spare: 0, total: 7}],
+  [7, 3, true, 1, {general: 7, spare: 1, total: 8}],
+  [7, 6, true, 5, {general: 7, spare: 5, total: 12}],
+  [7, 2, true, 5, {general: 7, spare: 2, total: 9}],
+  [0, 3, true, 3, {general: 0, spare: 3, total: 3}],
+  [10, 6, true, 0, {general: 10, spare: 0, total: 10}]
+];
+
+test('Step 9F.2e.5 generalSlotCapacity: Yahoo slots plus CNBC slots passed on', () => {
+  for (const [yahoo, cnbc, spilloverEnabled, sparePerSource, expected] of CAPACITY_ROWS) {
+    const settings = {slotsBySource: {[YAHOO]: yahoo, [CNBC]: cnbc}, spilloverEnabled, sparePerSource};
+    assert.deepEqual({...generalSlotCapacity({sourceId: YAHOO, settings})}, expected,
+      JSON.stringify([yahoo, cnbc, spilloverEnabled, sparePerSource]));
+  }
+  // The other way round: CNBC receives Yahoo's unused slots the same way.
+  const settings = {slotsBySource: {[YAHOO]: 7, [CNBC]: 3}, spilloverEnabled: true, sparePerSource: 3};
+  assert.deepEqual({...generalSlotCapacity({sourceId: CNBC, settings})}, {general: 3, spare: 3, total: 6});
+  assert.deepEqual({...generalSlotCapacity({sourceId: YAHOO, settings: selectionSettings({env: {}})})},
+    {general: 7, spare: 3, total: 10});
+  assert.throws(() => generalSlotCapacity({sourceId: 'xx.unknown', settings}), TypeError);
 });

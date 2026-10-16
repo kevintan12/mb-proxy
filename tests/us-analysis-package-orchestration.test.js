@@ -49,14 +49,39 @@ const {
   YAHOO_RECAP_EVIDENCE_CONSTRUCTION_FAILURE_GAP,
   ORCHESTRATION_REQUEST_KEYS,
   ANALYSIS_MODES,
-  ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS,
-  ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES,
+  ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS: LOADED_MAX_ARTICLE_ATTEMPTS,
+  ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES: LOADED_MAX_ADMITTED_ARTICLES,
   analysisModeForMarketState,
   expectedLatestCompletedUsSessionDate,
   broadMarketNewsReferences,
   createUsAnalysisPackageOrchestrationService,
   validateUsAnalysisOrchestrationRequest
 } = require('../lib/us-analysis-package-orchestration');
+const {sourceLimits: readerSourceLimits} = require('../lib/source-reader');
+
+// Step 9F.2e.5: the article-slots switch (ARTICLE_SLOTS_ENABLED) is read from
+// process.env on every run. The tests that pin the previous caps (12 attempts,
+// 6 admitted) run with it off (unchanged behaviour); the slots-on caps are
+// tested in the Step 9F.2e.5 tests further down.
+const SLOTS_OFF_LIMITS = readerSourceLimits('us.yahoo-finance', {env: {ARTICLE_SLOTS_ENABLED: 'off'}});
+const ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS = SLOTS_OFF_LIMITS.maxArticleAttempts;
+const ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES = SLOTS_OFF_LIMITS.maxAdmittedArticles;
+
+async function withArticleSlots(value, operation) {
+  const saved = process.env.ARTICLE_SLOTS_ENABLED;
+  if (value === undefined) delete process.env.ARTICLE_SLOTS_ENABLED;
+  else process.env.ARTICLE_SLOTS_ENABLED = value;
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.ARTICLE_SLOTS_ENABLED;
+    else process.env.ARTICLE_SLOTS_ENABLED = saved;
+  }
+}
+
+function slotsOffTest(name, operation) {
+  test(name, () => withArticleSlots('off', operation));
+}
 
 const GENERATED_AT = '2026-09-06T10:00:00.000Z';
 const YAHOO_RECAP_ARTICLE_BOUNDS = Object.freeze({
@@ -658,7 +683,7 @@ test('maps supported US market states to explicit package-owned analysis modes',
   );
 });
 
-test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip completed-session research', async () => {
+slotsOffTest('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip completed-session research', async () => {
   for (const [marketState, generatedAt, overlayAsOf, articlePublishedAt] of [
     ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z', '2026-09-08T11:00:00.000Z'],
     ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T11:00:00.000Z'],
@@ -755,7 +780,7 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
   }
 });
 
-test('active Yahoo retains a narrow first article and later broad-market articles for classification', async () => {
+slotsOffTest('active Yahoo retains a narrow first article and later broad-market articles for classification', async () => {
   const candidates = [
     'Local retailer updates one store',
     'Chipmaker orders lift semiconductor shares',
@@ -825,7 +850,7 @@ test('active Yahoo retains a narrow first article and later broad-market article
     && entry.admittedCurrentSessionCount === 6));
 });
 
-test('duplicate and rejected active Yahoo articles do not count toward the six-article stop', async () => {
+slotsOffTest('duplicate and rejected active Yahoo articles do not count toward the six-article stop', async () => {
   const candidates = Array.from({length: 9}, (_, index) => ({
     headline: `Current Yahoo article ${index + 1}`,
     url: `https://finance.yahoo.com/news/current-bounded-${index + 1}.html`,
@@ -1362,7 +1387,7 @@ test('Step 9F.1f: an article that would push the classifier over its cap is flag
     ['ADMITTED', 'ADMITTED', 'ADMITTED', 'ADMITTED', 'ADMITTED', 'REJECTED_CLASSIFIER_PREFLIGHT']);
 });
 
-test('active Yahoo stops at the twelve-attempt ceiling even when the next candidate would be usable', async () => {
+slotsOffTest('active Yahoo stops at the twelve-attempt ceiling even when the next candidate would be usable', async () => {
   const diagnostics = [];
   const candidates = Array.from({length: ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS + 2}, (_, index) => ({
     headline: `Unusable Yahoo story ${index + 1}`,
@@ -5609,7 +5634,7 @@ test('Step 8K.1 when every candidate is dropped the limited-evidence path is unc
     gap.includes('Not enough current Yahoo Finance news')));
 });
 
-test('Step 8K.1 dropped candidates use no fetch attempts, so the twelve-attempt cap still applies to the rest', async () => {
+slotsOffTest('Step 8K.1 dropped candidates use no fetch attempts, so the twelve-attempt cap still applies to the rest', async () => {
   const dropped = Array.from({length: 5}, (_, index) => step8kCandidate(`Singapore story number ${index + 1}`));
   const neutral = Array.from({length: 16}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
   const {audit, calls} = await step8kActiveRun({candidates: dropped.concat(neutral)});
@@ -5625,7 +5650,7 @@ test('Step 8K page order stays stable inside a tier', async () => {
   assert.deepEqual(audit.map(entry => entry.tier), headlines.map(() => 5));
 });
 
-test('Step 8K.5 fetch budget: twelve attempts (raised from eight), six admissions', async () => {
+slotsOffTest('Step 8K.5 fetch budget: twelve attempts (raised from eight), six admissions', async () => {
   const many = Array.from({length: 16}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
   const unusable = await step8kActiveRun({candidates: many});
   assert.equal(unusable.calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
@@ -5655,7 +5680,7 @@ test('Step 8K candidate audit lists all candidates in numbered parts of at most 
   assert.equal(auditEvents[0].windowEndsAtInclusive, '2026-09-08T15:00:00.000Z');
 });
 
-test('Step 8K candidate audit records the decision for each rejection type', async () => {
+slotsOffTest('Step 8K candidate audit records the decision for each rejection type', async () => {
   const candidates = ['exception', 'timeout', 'extraction', 'notime', 'before', 'after', 'admitted',
     'duplicate', 'fillone', 'filltwo', 'fillthree', 'fillfour', 'last'
   ].map(name => step8kCandidate(`Neutral ${name} story`));
@@ -5816,7 +5841,7 @@ test('Step 9F.1c a candidate whose label says it is older than the reading windo
       .map(name => `Neutral ${name} story`));
 });
 
-test('Step 9F.1c label-old candidates go behind fresh ones and the twelve-attempt cap still applies', async () => {
+slotsOffTest('Step 9F.1c label-old candidates go behind fresh ones and the twelve-attempt cap still applies', async () => {
   const stale = Array.from({length: 14}, (_, index) => step8kCandidate(`Neutral old story ${index + 1}`, {ageLabel: '6d ago'}));
   const fresh = Array.from({length: 14}, (_, index) => step8kCandidate(`Neutral new story ${index + 1}`, {ageLabel: '2h ago'}));
   const {audit, calls} = await step8kActiveRun({candidates: stale.concat(fresh)});
@@ -6160,7 +6185,7 @@ for (const row of STEP_9F1D_ROWS) {
   });
 }
 
-test('Step 9F.1d retries do not use up the twelve-article cap', async () => {
+slotsOffTest('Step 9F.1d retries do not use up the twelve-article cap', async () => {
   const candidates = Array.from({length: 13}, (_, index) => step8kCandidate(`Neutral capped story ${index}`));
   const seen = new Map();
   const {audit, diagnostics, calls} = await step8kActiveRun({
@@ -6262,4 +6287,87 @@ test('Step 9F.6a.4: candidate pool handed to the optional hook, package unchange
   assert.equal(JSON.stringify(withHookOutput), JSON.stringify(withoutHookOutput));
   assert.equal(JSON.stringify(throwingHookOutput), JSON.stringify(withoutHookOutput));
   assert.throws(() => harness({onCandidatePool: 'not a function'}), TypeError);
+});
+
+// Step 9F.2e.5: the general article slots. With ARTICLE_SLOTS_ENABLED on (the
+// default) the reader admits up to 7 Yahoo slots plus CNBC's 3 unused slots
+// passed on (CNBC is not in the selection step yet) and may try 18 articles.
+test('Step 9F.2e.5 the load-time limits match the reader limits at load', () => {
+  const atLoad = readerSourceLimits('us.yahoo-finance');
+  assert.equal(LOADED_MAX_ARTICLE_ATTEMPTS, atLoad.maxArticleAttempts);
+  assert.equal(LOADED_MAX_ADMITTED_ARTICLES, atLoad.maxAdmittedArticles);
+});
+
+test('Step 9F.2e.5 article slots on: ten admitted (7 Yahoo + 3 passed on from CNBC), summary names the slots', async () => {
+  const usable = Array.from({length: 14}, (_, index) => step8kCandidate(`Oil story number ${index + 1}`));
+  const {audit, calls, diagnostics} = await withArticleSlots(undefined, () =>
+    step8kActiveRun({candidates: usable, acquire: step8kUsableArticle}));
+  assert.equal(calls.yahooCurrentNewsArticle.length, 10);
+  assert.equal(audit.filter(entry => entry.decision === 'ADMITTED').length, 10);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_MAX_ADMITTED').length, 4);
+  const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.deepEqual([acquisition.generalSlots, acquisition.spareSlots, acquisition.maxArticleAttempts,
+    acquisition.maxAdmittedArticles, acquisition.acquiredCurrentSessionCount], [7, 3, 18, 10, 10]);
+  const keys = Object.keys(acquisition);
+  assert.deepEqual(keys.slice(keys.indexOf('tryOrder'), keys.indexOf('tryOrder') + 6), ['tryOrder',
+    'generalSlots', 'spareSlots', 'maxArticleAttempts', 'maxAdmittedArticles', 'selectedCandidateCount']);
+  assert.equal(calls.evidenceRoleClassification.length, 1);
+});
+
+test('Step 9F.2e.5 article slots on: eighteen attempts when nothing is usable', async () => {
+  const many = Array.from({length: 22}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
+  const {audit, calls} = await withArticleSlots('on', () => step8kActiveRun({candidates: many}));
+  assert.equal(calls.yahooCurrentNewsArticle.length, 18);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 4);
+});
+
+test('Step 9F.2e.5 article slots off: the previous caps and no new summary fields', async () => {
+  const usable = Array.from({length: 14}, (_, index) => step8kCandidate(`Oil story number ${index + 1}`));
+  const {audit, diagnostics} = await withArticleSlots('off', () =>
+    step8kActiveRun({candidates: usable, acquire: step8kUsableArticle}));
+  assert.equal(audit.filter(entry => entry.decision === 'ADMITTED').length, 6);
+  const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  for (const key of ['generalSlots', 'spareSlots', 'maxArticleAttempts', 'maxAdmittedArticles']) {
+    assert.equal(Object.hasOwn(acquisition, key), false, key);
+  }
+});
+
+// Each row: settings -> admitted out of 20 usable candidates.
+const STEP_9F2E5_SLOT_ROWS = [
+  [{}, 10, 'defaults: 7 + 3 spare'],
+  [{SLOT_SPILLOVER_ENABLED: 'off'}, 7, 'spillover off: no spare'],
+  [{CNBC_SLOTS: '0'}, 7, 'no CNBC slots to pass on'],
+  [{SPARE_ADMITS: '1'}, 8, 'spare limit 1'],
+  [{SPARE_ADMITS: '0'}, 7, 'spare limit 0'],
+  [{CNBC_SLOTS: '6', SPARE_ADMITS: '5'}, 12, 'CNBC 6, spare limit 5'],
+  [{YAHOO_SLOTS: '4'}, 7, 'Yahoo 4 + 3 spare'],
+  [{YAHOO_SLOTS: '0', SLOT_SPILLOVER_ENABLED: 'off'}, 0, 'no Yahoo slots, no spare'],
+  [{YAHOO_SLOTS: '99'}, 13, 'Yahoo clamped to 10, + 3 spare'],
+  [{YAHOO_MAX_ADMITTED_ARTICLES: '2'}, 10, 'the slots-off admit cap is not read while slots are on']
+];
+
+test('Step 9F.2e.5 article slots: admitted cap follows the slot settings', async () => {
+  const names = Object.keys(Object.assign({}, ...STEP_9F2E5_SLOT_ROWS.map(([env]) => env)));
+  for (const [env, expected, label] of STEP_9F2E5_SLOT_ROWS) {
+    const saved = Object.fromEntries(names.map(name => [name, process.env[name]]));
+    Object.assign(process.env, env);
+    try {
+      const usable = Array.from({length: 20}, (_, index) => step8kCandidate(`Oil story number ${index + 1}`));
+      const {audit} = await withArticleSlots('on', () =>
+        step8kActiveRun({candidates: usable, acquire: step8kUsableArticle}));
+      assert.equal(audit.filter(entry => entry.decision === 'ADMITTED').length, expected, label);
+    } finally {
+      for (const name of names) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
+    }
+  }
+});
+
+test('Step 9F.2e.5 attempts cap: 18 by default, clamped to 6-24, and the slots-off cap is not read', async () => {
+  for (const [env, expected] of [[{}, 18], [{YAHOO_MAX_ARTICLE_ATTEMPTS_PLANNED: '30'}, 24],
+    [{YAHOO_MAX_ARTICLE_ATTEMPTS_PLANNED: '2'}, 6], [{YAHOO_MAX_ARTICLE_ATTEMPTS: '20'}, 18]]) {
+    assert.equal(readerSourceLimits('us.yahoo-finance', {env}).maxArticleAttempts, expected, JSON.stringify(env));
+  }
 });

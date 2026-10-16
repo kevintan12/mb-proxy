@@ -244,10 +244,12 @@ test('Step 9F.6a.3 shared reader: rejects an unknown source, mode or horizon', a
 });
 
 test('Step 9F.6a.3 shared reader: Yahoo limits come from the settings registry', () => {
-  assert.deepEqual(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {}}), {
+  // Step 9F.2e.5: article slots off gives the previous caps exactly.
+  const off = {ARTICLE_SLOTS_ENABLED: 'off'};
+  assert.deepEqual(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: off}), {
     maxArticleAttempts: 12, maxAdmittedArticles: 6, initialCandidateAttempts: 5
   });
-  assert.equal(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {YAHOO_MAX_ADMITTED_ARTICLES: '4'}})
+  assert.equal(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {...off, YAHOO_MAX_ADMITTED_ARTICLES: '4'}})
     .maxAdmittedArticles, 4);
   assert.throws(() => sourceLimits('xx.unknown'), TypeError);
 });
@@ -736,5 +738,35 @@ test('Step 9F.2e.4a shared reader: a 74-candidate audit stays under the event by
       assert.equal(event.parts, audit.length);
     }
     assert.equal(audit.flatMap(event => event.candidates).length, 74);
+  }
+});
+
+// Step 9F.2e.5: article slots on (the default) -- the admit cap is the general
+// slots plus the spare slots passed on, the attempt cap is the slots-on row.
+test('Step 9F.2e.5 shared reader: Yahoo limits with the article slots on', () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {}}))), {
+    maxArticleAttempts: 18, maxAdmittedArticles: 10, initialCandidateAttempts: 5,
+    articleSlots: {generalSlots: 7, spareSlots: 3}
+  });
+  for (const value of ['on', 'true', '1', 'maybe', '']) {
+    assert.equal(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {ARTICLE_SLOTS_ENABLED: value}}).maxAdmittedArticles, 10, value);
+  }
+  for (const value of ['off', 'false', '0', 'OFF']) {
+    assert.equal(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {ARTICLE_SLOTS_ENABLED: value}}).maxAdmittedArticles, 6, value);
+  }
+});
+
+test('Step 9F.2e.5 shared reader: the same slot caps in a completed state, with the slots in the summary', async () => {
+  const pages = Object.fromEntries(Array.from({length: 13}, (_, index) => [`s${String(index).padStart(2, '0')}`, 'OK']));
+  for (const mode of ['ACTIVE', 'COMPLETED']) {
+    const {events, acquiredItems} = await runReader(fakeSource(pages).source, {
+      mode, horizonFor: () => mode === 'COMPLETED' ? 'COMPLETED_SESSION' : 'CURRENT_SESSION',
+      limits: sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {}})
+    });
+    assert.equal(acquiredItems.length, 10, mode);
+    const summary = events.find(event => event.stage === 'activeYahooAcquisition');
+    assert.deepEqual([summary.generalSlots, summary.spareSlots, summary.maxArticleAttempts, summary.maxAdmittedArticles],
+      [7, 3, 18, 10], mode);
+    assert.equal(Object.values(decisions(events)).filter(entry => entry.decision === 'SKIPPED_MAX_ADMITTED').length, 3, mode);
   }
 });
