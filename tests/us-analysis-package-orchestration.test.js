@@ -1911,9 +1911,11 @@ function step9f1eSnapshot(symbol, marketState, latestDate) {
   });
 }
 
-async function step9f1eCompletedRun({marketState, triggerAt, latestDate, articles}) {
+// Step 9F.2d.3: optional lists, an article's own headline and a pool hook.
+async function step9f1eCompletedRun({marketState, triggerAt, latestDate, articles, myStocks = [], watchlist = [],
+  onCandidatePool}) {
   const diagnostics = [];
-  const candidates = articles.map(({name}) => step8kCandidate(`Neutral ${name} story`));
+  const candidates = articles.map(({name, headline}) => step8kCandidate(headline || `Neutral ${name} story`));
   const publishedByUrl = new Map(candidates.map((candidate, index) =>
     [candidate.url, articles[index].publishedAt]));
   const {service, calls} = harness({
@@ -1958,9 +1960,10 @@ async function step9f1eCompletedRun({marketState, triggerAt, latestDate, article
         }};
       }
     },
-    onDiagnostics: value => diagnostics.push(value)
+    onDiagnostics: value => diagnostics.push(value),
+    ...(onCandidatePool ? {onCandidatePool} : {})
   });
-  const output = await service.assemble(request());
+  const output = await service.assemble(request('US', {myStocks, watchlist}));
   return {output, calls, diagnostics,
     audit: diagnostics.filter(value => value.stage === 'activeYahooCandidateAudit')
       .flatMap(event => event.candidates)};
@@ -5339,7 +5342,7 @@ async function withScoreTryOrder(value, operation) {
 }
 
 async function step8kActiveRun({candidates, myStocks = [], watchlist = [], mostActive = [], acquire = null,
-  discoveryExtra = {}, clock = {}}) {
+  discoveryExtra = {}, clock = {}, extra = {}}) {
   const diagnostics = [];
   const {service, calls} = harness({
     createTelemetryAcquisition: () => ({
@@ -5363,6 +5366,8 @@ async function step8kActiveRun({candidates, myStocks = [], watchlist = [], mostA
     now: () => new Date('2026-09-08T15:00:00.000Z'),
     sleep: async () => {},
     ...clock,
+    // Step 9F.2d.3: e.g. the candidate-pool hook.
+    ...extra,
     onDiagnostics: value => diagnostics.push(value)
   });
   const output = await service.assemble(request('US', {myStocks, watchlist}));
@@ -6300,8 +6305,9 @@ test('Step 9F.2e.5 the load-time limits match the reader limits at load', () => 
 
 test('Step 9F.2e.5 article slots on: ten admitted (7 Yahoo + 3 passed on from CNBC), summary names the slots', async () => {
   const usable = Array.from({length: 14}, (_, index) => step8kCandidate(`Oil story number ${index + 1}`));
-  const {audit, calls, diagnostics} = await withArticleSlots(undefined, () =>
-    step8kActiveRun({candidates: usable, acquire: step8kUsableArticle}));
+  // Step 9F.2d.3: portfolio slots on (the default) for the summary-field order below.
+  const {audit, calls, diagnostics} = await withArticleSlots(undefined, () => withPortfolioSlots('on', () =>
+    step8kActiveRun({candidates: usable, acquire: step8kUsableArticle})));
   assert.equal(calls.yahooCurrentNewsArticle.length, 10);
   assert.equal(audit.filter(entry => entry.decision === 'ADMITTED').length, 10);
   assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_MAX_ADMITTED').length, 4);
@@ -6309,8 +6315,10 @@ test('Step 9F.2e.5 article slots on: ten admitted (7 Yahoo + 3 passed on from CN
   assert.deepEqual([acquisition.generalSlots, acquisition.spareSlots, acquisition.maxArticleAttempts,
     acquisition.maxAdmittedArticles, acquisition.acquiredCurrentSessionCount], [7, 3, 18, 10, 10]);
   const keys = Object.keys(acquisition);
-  assert.deepEqual(keys.slice(keys.indexOf('tryOrder'), keys.indexOf('tryOrder') + 6), ['tryOrder',
-    'generalSlots', 'spareSlots', 'maxArticleAttempts', 'maxAdmittedArticles', 'selectedCandidateCount']);
+  // Step 9F.2d.3: the portfolio-slot fields follow (portfolio slots on by default).
+  assert.deepEqual(keys.slice(keys.indexOf('tryOrder'), keys.indexOf('tryOrder') + 9), ['tryOrder',
+    'generalSlots', 'spareSlots', 'maxArticleAttempts', 'maxAdmittedArticles', 'portfolioSlots',
+    'portfolioSlotsFilled', 'portfolioCoveredSymbols', 'selectedCandidateCount']);
   assert.equal(calls.evidenceRoleClassification.length, 1);
 });
 
@@ -6369,5 +6377,89 @@ test('Step 9F.2e.5 attempts cap: 18 by default, clamped to 6-24, and the slots-o
   for (const [env, expected] of [[{}, 18], [{YAHOO_MAX_ARTICLE_ATTEMPTS_PLANNED: '30'}, 24],
     [{YAHOO_MAX_ARTICLE_ATTEMPTS_PLANNED: '2'}, 6], [{YAHOO_MAX_ARTICLE_ATTEMPTS: '20'}, 18]]) {
     assert.equal(readerSourceLimits('us.yahoo-finance', {env}).maxArticleAttempts, expected, JSON.stringify(env));
+  }
+});
+
+// Step 9F.2d.3: the portfolio slots (PORTFOLIO_SLOTS_ENABLED, read from
+// process.env on every run; on by default) over BOTH lists.
+async function withPortfolioSlots(value, operation) {
+  const saved = process.env.PORTFOLIO_SLOTS_ENABLED;
+  if (value === undefined) delete process.env.PORTFOLIO_SLOTS_ENABLED;
+  else process.env.PORTFOLIO_SLOTS_ENABLED = value;
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.PORTFOLIO_SLOTS_ENABLED;
+    else process.env.PORTFOLIO_SLOTS_ENABLED = saved;
+  }
+}
+
+const referenceOfTitle = (output, title) => output.marketPackages[0].evidenceContext.evidence
+  .find(entry => entry.item.title === title)?.reference;
+
+test('Step 9F.2d.3 portfolio slots: a Watchlist company gets a slot in a My Stocks run, then the second pass', async () => {
+  const holding = Array.from({length: 12}, (_, index) => step8kCandidate(`VEEV story number ${index + 1}`));
+  const watched = step8kCandidate('AAPL unveils a new product line');
+  const run = value => withPortfolioSlots(value, () => {
+    const pools = [];
+    return step8kActiveRun({candidates: [...holding, watched], acquire: step8kUsableArticle,
+      myStocks: [{market: 'US', symbol: 'VEEV'}], watchlist: [{market: 'US', symbol: 'AAPL'}],
+      extra: {onCandidatePool: value => pools.push(value)}}).then(result => ({...result, pools}));
+  });
+  const on = await run(undefined);
+  // 10 general (VEEV 1-10, covering VEEV), AAPL in the first pass, VEEV 11 in the second.
+  assert.deepEqual(on.calls.yahooCurrentNewsArticle.map(candidate => candidate.headline),
+    [...holding.slice(0, 10), watched, holding[10]].map(candidate => candidate.headline));
+  assert.equal(on.audit.filter(entry => entry.decision === 'ADMITTED').length, 12);
+  assert.deepEqual(on.audit.filter(entry => entry.portfolioSlot).map(entry => [entry.headline, entry.portfolioSlot]),
+    [[holding[10].headline, 'SECOND_PASS'], [watched.headline, 'FIRST_PASS']]);
+  const acquisition = on.diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.deepEqual([acquisition.portfolioSlots, acquisition.portfolioSlotsFilled, acquisition.portfolioCoveredSymbols],
+    [2, 2, ['VEEV', 'AAPL']]);
+  assert.equal(on.output.portfolioContext.watchlist[0].evidenceRefs.includes(referenceOfTitle(on.output, watched.headline)),
+    true);
+  // The pool flag uses both lists while on, the starting list only while off.
+  const flag = (result, headline) => result.pools[0].pool.find(entry => entry.headline === headline).portfolioSlotEligible;
+  assert.deepEqual([flag(on, watched.headline), flag(on, holding[0].headline)], [true, true]);
+
+  const off = await run('off');
+  assert.equal(off.calls.yahooCurrentNewsArticle.length, 10);
+  assert.equal(off.audit.filter(entry => entry.decision === 'ADMITTED').length, 10);
+  assert.equal(off.audit.some(entry => Object.hasOwn(entry, 'portfolioSlot')), false);
+  assert.deepEqual(off.output.portfolioContext.watchlist[0].evidenceRefs.length, 1);
+  assert.deepEqual([flag(off, watched.headline), flag(off, holding[0].headline)], [false, true]);
+  const offAcquisition = off.diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.equal(Object.hasOwn(offAcquisition, 'portfolioSlots'), false);
+});
+
+test('Step 9F.2d.3 portfolio slots: CLOSED, WEEKEND and HOLIDAY offer Yahoo news naming a company to Section 4', async () => {
+  const cases = [
+    {marketState: 'CLOSED', triggerAt: '2026-09-24T01:09:00.000Z', latestDate: '2026-09-23', close: '2026-09-23T20:00:00.000Z'},
+    {marketState: 'WEEKEND', triggerAt: '2026-09-27T12:00:00.000Z', latestDate: '2026-09-25', close: '2026-09-25T20:00:00.000Z'},
+    {marketState: 'HOLIDAY', triggerAt: '2026-09-07T16:00:00.000Z', latestDate: '2026-09-04', close: '2026-09-04T20:00:00.000Z'}
+  ];
+  for (const {marketState, triggerAt, latestDate, close} of cases) {
+    const at = offsetMs => new Date(Date.parse(close) + offsetMs).toISOString();
+    const articles = [
+      {name: 'holding', headline: 'VEEV lifts guidance after a strong quarter', publishedAt: at(-3600000)},
+      {name: 'watched', headline: 'AAPL unveils a new product line', publishedAt: at(3600000)},
+      {name: 'neutral', publishedAt: at(-7200000)}
+    ];
+    const run = value => withPortfolioSlots(value, () => step9f1eCompletedRun({marketState, triggerAt, latestDate,
+      articles, myStocks: [{market: 'US', symbol: 'VEEV'}], watchlist: [{market: 'US', symbol: 'AAPL'}]}));
+    const on = await run(undefined);
+    const holdingRef = referenceOfTitle(on.output, articles[0].headline);
+    const watchedRef = referenceOfTitle(on.output, articles[1].headline);
+    const neutralRef = referenceOfTitle(on.output, 'Neutral neutral story');
+    assert.deepEqual(on.output.portfolioContext.myStocks[0].evidenceRefs.slice(1), [holdingRef], marketState);
+    assert.deepEqual(on.output.portfolioContext.watchlist[0].evidenceRefs.slice(1), [watchedRef], marketState);
+    assert.equal(JSON.stringify(on.output.portfolioContext).includes(`"${neutralRef}"`), false, marketState);
+    // The after-close article stays a subsequent development.
+    assert.ok(on.output.marketPackages[0].evidenceContext.subsequentDevelopments.includes(watchedRef), marketState);
+    const off = await run('off');
+    assert.deepEqual(off.output.portfolioContext.myStocks[0].evidenceRefs.length, 1, marketState);
+    assert.deepEqual(off.output.portfolioContext.watchlist[0].evidenceRefs.length, 1, marketState);
+    // Off and on hold the same evidence; only Section 4's offer differs.
+    assert.equal(JSON.stringify(off.output.marketPackages), JSON.stringify(on.output.marketPackages), marketState);
   }
 });

@@ -245,7 +245,8 @@ test('Step 9F.6a.3 shared reader: rejects an unknown source, mode or horizon', a
 
 test('Step 9F.6a.3 shared reader: Yahoo limits come from the settings registry', () => {
   // Step 9F.2e.5: article slots off gives the previous caps exactly.
-  const off = {ARTICLE_SLOTS_ENABLED: 'off'};
+  // Step 9F.2d.3: with the portfolio slots off as well.
+  const off = {ARTICLE_SLOTS_ENABLED: 'off', PORTFOLIO_SLOTS_ENABLED: 'off'};
   assert.deepEqual(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: off}), {
     maxArticleAttempts: 12, maxAdmittedArticles: 6, initialCandidateAttempts: 5
   });
@@ -746,7 +747,9 @@ test('Step 9F.2e.4a shared reader: a 74-candidate audit stays under the event by
 test('Step 9F.2e.5 shared reader: Yahoo limits with the article slots on', () => {
   assert.deepEqual(JSON.parse(JSON.stringify(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {}}))), {
     maxArticleAttempts: 18, maxAdmittedArticles: 10, initialCandidateAttempts: 5,
-    articleSlots: {generalSlots: 7, spareSlots: 3}
+    articleSlots: {generalSlots: 7, spareSlots: 3},
+    // Step 9F.2d.3: the portfolio slots, on by default.
+    portfolioSlots: {slots: 2, firstPassPerCompany: 1}
   });
   for (const value of ['on', 'true', '1', 'maybe', '']) {
     assert.equal(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {ARTICLE_SLOTS_ENABLED: value}}).maxAdmittedArticles, 10, value);
@@ -769,4 +772,100 @@ test('Step 9F.2e.5 shared reader: the same slot caps in a completed state, with 
       [7, 3, 18, 10], mode);
     assert.equal(Object.values(decisions(events)).filter(entry => entry.decision === 'SKIPPED_MAX_ADMITTED').length, 3, mode);
   }
+});
+
+// Step 9F.2d.3: the portfolio slots in the shared reader. `named` maps a short
+// name to its listing headline (all pages succeed unless `pages` says
+// otherwise). The names come from portfolioSlotSnapshots (both lists in the
+// pipeline); stockSnapshots stays empty here so the try order is the listing
+// order and the slot rules are seen on their own.
+const PORTFOLIO_NVDA = Object.freeze({symbol: 'NVDA', instrumentName: 'NVIDIA Corporation'});
+const PORTFOLIO_AAPL = Object.freeze({symbol: 'AAPL', instrumentName: 'Apple Inc.'});
+const PORTFOLIO_LIMITS = Object.freeze({maxArticleAttempts: 18, maxAdmittedArticles: 3, initialCandidateAttempts: 5,
+  portfolioSlots: Object.freeze({slots: 2, firstPassPerCompany: 1})});
+
+function portfolioRun(named, {pages = {}, snapshots = [PORTFOLIO_NVDA, PORTFOLIO_AAPL], limits = PORTFOLIO_LIMITS,
+  mode = 'ACTIVE'} = {}) {
+  const names = Object.keys(named);
+  const {source, reads} = fakeSource(Object.fromEntries(names.map(name => [name, pages[name] || 'OK'])));
+  const findCandidates = source.findCandidates;
+  source.findCandidates = async input => {
+    const result = await findCandidates(input);
+    return {...result, candidates: result.candidates.map((candidate, index) =>
+      ({...candidate, headline: named[names[index]]}))};
+  };
+  return runReader(source, {
+    mode, horizonFor: () => mode === 'COMPLETED' ? 'COMPLETED_SESSION' : 'CURRENT_SESSION',
+    portfolioSlotSnapshots: snapshots, limits, env: {SCORE_TRY_ORDER_ENABLED: 'off'}
+  }).then(run => ({...run, reads: reads.map(read => read.name),
+    summary: run.events.find(event => event.stage === 'activeYahooAcquisition'),
+    audit: decisions(run.events)}));
+}
+
+const GENERIC = Object.freeze({g1: 'Oil steadies in quiet trade', g2: 'Gold edges higher', g3: 'Bond yields slip',
+  g4: 'Copper holds its gains', g5: 'Freight rates ease'});
+
+test('Step 9F.2d.3 shared reader: after the general slots, one article per uncovered company from either list', async () => {
+  for (const mode of ['ACTIVE', 'COMPLETED']) {
+    const run = await portfolioRun({...GENERIC, n1: 'Nvidia names a new finance chief',
+      a1: 'Apple opens its biggest store', n2: 'Nvidia supplier expands'}, {mode});
+    assert.deepEqual(run.reads, ['g1', 'g2', 'g3', 'n1', 'a1'], mode);
+    assert.equal(run.acquiredItems.length, 5, mode);
+    assert.deepEqual([run.audit.n1.portfolioSlot, run.audit.a1.portfolioSlot], ['FIRST_PASS', 'FIRST_PASS'], mode);
+    for (const name of ['g4', 'g5', 'n2']) assert.equal(run.audit[name].decision, 'SKIPPED_MAX_ADMITTED', name);
+    assert.equal(Object.hasOwn(run.audit.g1, 'portfolioSlot'), false);
+    assert.deepEqual([run.summary.portfolioSlots, run.summary.portfolioSlotsFilled, run.summary.portfolioCoveredSymbols],
+      [2, 2, ['NVDA', 'AAPL']], mode);
+  }
+});
+
+test('Step 9F.2d.3 shared reader: a general article covers its company; the second pass fills an empty slot', async () => {
+  const run = await portfolioRun({n0: 'Nvidia unveils a chip', g1: GENERIC.g1, g2: GENERIC.g2,
+    n1: 'Nvidia supplier expands', g3: GENERIC.g3, a1: 'Apple opens its biggest store'});
+  // n0 holds a general slot and covers Nvidia, so n1 waits; Apple takes the
+  // first pass; n1 then takes the empty slot in the second pass.
+  assert.deepEqual(run.reads, ['n0', 'g1', 'g2', 'a1', 'n1']);
+  assert.deepEqual([run.audit.a1.portfolioSlot, run.audit.n1.portfolioSlot], ['FIRST_PASS', 'SECOND_PASS']);
+  assert.equal(run.audit.g3.decision, 'SKIPPED_MAX_ADMITTED');
+  assert.deepEqual(run.summary.portfolioCoveredSymbols, ['NVDA', 'AAPL']);
+});
+
+test('Step 9F.2d.3 shared reader: a company on both lists counts once; an empty list fills no slot', async () => {
+  const both = await portfolioRun({...GENERIC, n1: 'Nvidia names a new finance chief', n2: 'Nvidia supplier expands',
+    n3: 'Nvidia wins a contract'}, {snapshots: [PORTFOLIO_NVDA, PORTFOLIO_AAPL, PORTFOLIO_NVDA]});
+  assert.deepEqual(both.reads, ['g1', 'g2', 'g3', 'n1', 'n2']);
+  assert.deepEqual([both.audit.n1.portfolioSlot, both.audit.n2.portfolioSlot], ['FIRST_PASS', 'SECOND_PASS']);
+  assert.equal(both.audit.n3.decision, 'SKIPPED_MAX_ADMITTED');
+  assert.deepEqual(both.summary.portfolioCoveredSymbols, ['NVDA']);
+  const empty = await portfolioRun({...GENERIC, n1: 'Nvidia names a new finance chief'}, {snapshots: []});
+  assert.deepEqual(empty.reads, ['g1', 'g2', 'g3']);
+  assert.deepEqual([empty.summary.portfolioSlotsFilled, empty.summary.portfolioCoveredSymbols], [0, []]);
+  assert.equal(empty.audit.n1.decision, 'SKIPPED_MAX_ADMITTED');
+});
+
+test('Step 9F.2d.3 shared reader: a failed portfolio download leaves the company uncovered; caps still stop the slots', async () => {
+  const failed = await portfolioRun({...GENERIC, n1: 'Nvidia names a new finance chief', n2: 'Nvidia supplier expands'},
+    {pages: {n1: 'TIMEOUT'}});
+  assert.deepEqual(failed.reads.filter((name, index, all) => all.indexOf(name) === index), ['g1', 'g2', 'g3', 'n1', 'n2']);
+  assert.equal(failed.audit.n1.decision, 'FETCH_FAILED');
+  assert.equal(failed.audit.n2.portfolioSlot, 'FIRST_PASS');
+  const capped = await portfolioRun({...GENERIC, n1: 'Nvidia names a new finance chief', a1: 'Apple opens its biggest store'},
+    {limits: {...PORTFOLIO_LIMITS, maxArticleAttempts: 4}});
+  assert.deepEqual(capped.reads, ['g1', 'g2', 'g3', 'n1']);
+  assert.equal(capped.audit.a1.decision, 'SKIPPED_MAX_ATTEMPTS');
+  assert.equal(capped.summary.portfolioSlotsFilled, 1);
+});
+
+test('Step 9F.2d.3 shared reader: portfolio slots off reads exactly as before', async () => {
+  const named = {...GENERIC, n1: 'Nvidia names a new finance chief'};
+  const {portfolioSlots, ...offLimits} = PORTFOLIO_LIMITS;
+  const off = await portfolioRun(named, {limits: offLimits});
+  assert.deepEqual(off.reads, ['g1', 'g2', 'g3']);
+  for (const key of ['portfolioSlots', 'portfolioSlotsFilled', 'portfolioCoveredSymbols']) {
+    assert.equal(Object.hasOwn(off.summary, key), false, key);
+  }
+  assert.equal(off.audit.n1.decision, 'SKIPPED_MAX_ADMITTED');
+  assert.deepEqual(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {PORTFOLIO_SLOTS_ENABLED: 'off'}}).portfolioSlots, undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(sourceLimits(YAHOO_NEWS_SOURCE_ID,
+    {env: {ARTICLE_SLOTS_ENABLED: 'off', PORTFOLIO_SLOTS: '9'}}))).portfolioSlots, {slots: 4, firstPassPerCompany: 1});
 });

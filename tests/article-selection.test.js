@@ -69,9 +69,14 @@ test('Step 9F.2e.2: every number comes from the settings table at Kevin\'s value
     classifierMaxItems: 50,
     classifierMaxBytes: 300 * KB
   });
-  for (const name of ['portfolioSlots', 'articleTextBudgetBytesPlanned', 'portfolioFirstPassPerCompany']) {
+  for (const name of ['articleTextBudgetBytesPlanned']) {
     assert.equal(SETTINGS_REGISTRY[name].wired, false, name);
     assert.match(SETTINGS_REGISTRY[name].location, /switched on in Step 9F\.2[de]\.\d/, name);
+  }
+  // Step 9F.2d.3: the portfolio slots are wired (portfolio slots switch).
+  for (const name of ['portfolioSlots', 'portfolioFirstPassPerCompany']) {
+    assert.equal(SETTINGS_REGISTRY[name].wired, true, name);
+    assert.match(SETTINGS_REGISTRY[name].location, /createPortfolioSlotTracker \(Step 9F\.2d\.3\)/, name);
   }
   // Step 9F.2e.5: the general slots and spillover are wired (article slots switch).
   for (const name of ['yahooSlots', 'cnbcSlots', 'spareAdmits', 'slotSpilloverEnabled']) {

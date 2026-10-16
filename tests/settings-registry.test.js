@@ -270,7 +270,8 @@ test('Step 9F.2d.1 settings registry: planned attempt cap, portfolio first pass,
   const live = SETTINGS_REGISTRY.yahooMaxArticleAttempts;
   assert.deepEqual([live.default, live.min, live.max, live.wired], [12, 6, 20, true]);
   const firstPass = SETTINGS_REGISTRY.portfolioFirstPassPerCompany;
-  assert.deepEqual([firstPass.default, firstPass.admin, firstPass.wired], [1, 'Fixed', false]);
+  // Step 9F.2d.3: wired (used while the portfolio slots are on).
+  assert.deepEqual([firstPass.default, firstPass.admin, firstPass.wired], [1, 'Fixed', true]);
   const howTo = SETTINGS_REGISTRY.headlineListHowToPatterns;
   assert.equal(howTo.reference, true);
   assert.match(howTo.default, /HOW_TO_DROP_PREFIXES/);
@@ -315,7 +316,8 @@ test('Step 9F.2e.5 settings registry: articleSlotsEnabled and the wired slot row
     assert.deepEqual([row.default, row.min, row.max, row.admin, row.wired], [value, min, max, 'Admin', true], name);
   }
   assert.deepEqual([SETTINGS_REGISTRY.slotSpilloverEnabled.default, SETTINGS_REGISTRY.slotSpilloverEnabled.wired], [true, true]);
-  for (const name of ['portfolioSlots', 'portfolioFirstPassPerCompany', 'articleTextBudgetBytesPlanned']) {
+  // Step 9F.2d.3 wired the two portfolio rows; the article budget stays unwired.
+  for (const name of ['articleTextBudgetBytesPlanned']) {
     assert.equal(SETTINGS_REGISTRY[name].wired, false, name);
   }
 });

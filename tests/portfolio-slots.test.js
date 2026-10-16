@@ -168,3 +168,21 @@ test('Step 9F.2e.2: a company already covered by a general slot waits for the se
   assert.throws(() => pickPortfolioArticles({articles, portfolioSlotList: STARTING_LIST, coveredSymbols: 'NVDA'}),
     /coveredSymbols must be an array/);
 });
+
+// Step 9F.2d.3: the shared slot rules the reader uses one decision at a time.
+test('Step 9F.2d.3: the slot tracker names companies once, counts general coverage, fills and stops', () => {
+  const {createPortfolioSlotTracker} = require('../lib/portfolio-slots');
+  const tracker = createPortfolioSlotTracker({portfolioSlotList: [NVDA, AAPL, NVDA], slots: 2, firstPassPerCompany: 1});
+  assert.deepEqual(tracker.symbolsNamed('Nvidia and Apple strike a deal'), ['NVDA', 'AAPL']);
+  assert.deepEqual(tracker.symbolsNamed('Gold edges higher'), []);
+  assert.equal(tracker.firstPassWants([]), false);
+  tracker.noteCovered(['NVDA']);
+  assert.equal(tracker.firstPassWants(['NVDA']), false);
+  assert.equal(tracker.firstPassWants(['NVDA', 'AAPL']), true);
+  tracker.take(['AAPL']);
+  assert.deepEqual([tracker.filled(), tracker.full(), tracker.coveredSymbols()], [1, false, ['NVDA', 'AAPL']]);
+  tracker.take(['NVDA']);
+  assert.equal(tracker.full(), true);
+  assert.throws(() => createPortfolioSlotTracker({portfolioSlotList: [], slots: 1.5, firstPassPerCompany: 1}), TypeError);
+  assert.throws(() => createPortfolioSlotTracker({portfolioSlotList: [], slots: 1, firstPassPerCompany: 0}), TypeError);
+});
