@@ -16,6 +16,7 @@ const {
   mergedPortfolioList,
   pickPortfolioSlots,
   applyWriterBudget,
+  applyWriterTextBudgetToNewsItems,
   checkClassifierFit,
   selectArticles,
   selectionSummary,
@@ -69,9 +70,10 @@ test('Step 9F.2e.2: every number comes from the settings table at Kevin\'s value
     classifierMaxItems: 50,
     classifierMaxBytes: 300 * KB
   });
+  // Step 9F.2e.6: the writer text budget is wired (article text budget switch).
   for (const name of ['articleTextBudgetBytesPlanned']) {
-    assert.equal(SETTINGS_REGISTRY[name].wired, false, name);
-    assert.match(SETTINGS_REGISTRY[name].location, /switched on in Step 9F\.2[de]\.\d/, name);
+    assert.equal(SETTINGS_REGISTRY[name].wired, true, name);
+    assert.match(SETTINGS_REGISTRY[name].location, /applyWriterBudget.*Step 9F\.2e\.6/, name);
   }
   // Step 9F.2d.3: the portfolio slots are wired (portfolio slots switch).
   for (const name of ['portfolioSlots', 'portfolioFirstPassPerCompany']) {
@@ -313,6 +315,62 @@ test('Step 9F.2e.2 writer budget: the default is 150 KB and article text is neve
   assert.throws(() => applyWriterBudget({articles: [{key: 'z', slot: 'OTHER', textBytes: 1}]}), /unknown slot/);
 });
 
+// Step 9F.2e.6: the wrapper a reader's own admitted items go through.
+// `items`/`meta` are the parallel arrays lib/source-reader.js returns.
+function newsItem(title, textKb) {
+  return {sourceId: YAHOO, market: 'US', evidenceCategory: 'news', title, summary: 'x'.repeat(textKb * KB),
+    canonicalUrl: `https://finance.yahoo.com/${title}`, publishedAt: hoursAgo(2), symbols: []};
+}
+test('Step 9F.2e.6: applyWriterTextBudgetToNewsItems drops lowest-scored general then portfolio, keeps order', () => {
+  const items = [newsItem('a', 60), newsItem('b', 60), newsItem('c', 60)];
+  const meta = [{score: 30, ageHours: 1, slot: SLOT.GENERAL}, {score: 10, ageHours: 1, slot: SLOT.GENERAL},
+    {score: 50, ageHours: 1, slot: SLOT.PORTFOLIO}];
+  const result = applyWriterTextBudgetToNewsItems({items, meta, budgetBytes: 130 * KB});
+  assert.deepEqual(result.items.map(item => item.title), ['a', 'c']);
+  assert.deepEqual(result.meta, [meta[0], meta[2]]);
+  assert.equal(result.dropped.length, 1);
+  assert.deepEqual(result.dropped[0],
+    {headline: 'b', slot: SLOT.GENERAL, score: 10, textBytes: 60 * KB, reason: 'OVER_WRITER_TEXT_BUDGET'});
+  assert.equal(result.overBudget, false);
+  assert.equal(result.totalBytesBefore, 180 * KB);
+  assert.equal(result.totalBytesAfter, 120 * KB);
+});
+
+test('Step 9F.2e.6: applyWriterTextBudgetToNewsItems counts neverDropBytes but never returns or drops it', () => {
+  const items = [newsItem('a', 60), newsItem('b', 60)];
+  const meta = [{score: 30, ageHours: 1, slot: SLOT.GENERAL}, {score: 10, ageHours: 1, slot: SLOT.GENERAL}];
+  // CNBC + both recaps together weigh 60 KB -- counted, never in items/dropped.
+  const result = applyWriterTextBudgetToNewsItems({
+    items, meta, neverDropBytes: 60 * KB, budgetBytes: 150 * KB
+  });
+  assert.deepEqual(result.dropped.map(entry => entry.headline), ['b']);
+  assert.equal(result.items.length, 1);
+  assert.equal(result.totalBytesBefore, 180 * KB);
+  assert.equal(result.totalBytesAfter, 120 * KB);
+  assert.equal(result.overBudget, false);
+});
+
+test('Step 9F.2e.6: applyWriterTextBudgetToNewsItems flags, never drops, when the never-drop weight alone is over', () => {
+  const items = [newsItem('a', 10)];
+  const meta = [{score: 30, ageHours: 1, slot: SLOT.GENERAL}];
+  const result = applyWriterTextBudgetToNewsItems({
+    items, meta, neverDropBytes: 200 * KB, budgetBytes: 150 * KB
+  });
+  assert.deepEqual(result.dropped.map(entry => entry.headline), ['a']);
+  assert.equal(result.items.length, 0);
+  assert.equal(result.overBudget, true);
+});
+
+test('Step 9F.2e.6: applyWriterTextBudgetToNewsItems with nothing to drop returns the input items unchanged', () => {
+  const items = [newsItem('a', 10), newsItem('b', 10)];
+  const meta = [{score: 30, ageHours: 1, slot: SLOT.GENERAL}, {score: 10, ageHours: 1, slot: SLOT.PORTFOLIO}];
+  const result = applyWriterTextBudgetToNewsItems({items, meta});
+  assert.deepEqual(result.items, items);
+  assert.equal(result.items[0], items[0]);
+  assert.equal(result.items[1], items[1]);
+  assert.deepEqual(result.dropped, []);
+});
+
 // Classifier fit: 50 items and 300 KB.
 function classifierItems({protectedCount, generalCount, portfolioCount, bytesEach = KB, protectedBytes = KB}) {
   const items = [];
@@ -421,8 +479,9 @@ test('Step 9F.2e.3.4b: only the orchestration and the reader import the selectio
   ]);
   assert.ok(importers.every(file => !file.startsWith(`api${path.sep}`)));
   const importLines = file => sources.get(file).split(/\r?\n/).filter(line => imports.test(line));
+  // Step 9F.2e.6: the orchestration also takes applyWriterTextBudgetToNewsItems.
   assert.deepEqual(importLines(path.join('lib', 'us-analysis-package-orchestration.js')),
-    ["const {checkListOrderFit} = require('./article-selection');"]);
+    ["const {checkListOrderFit, applyWriterTextBudgetToNewsItems} = require('./article-selection');"]);
   // Step 9F.2e.5: the reader also takes selectionSettings and generalSlotCapacity
   // (the import spans two lines; the second holds the require).
   assert.deepEqual(importLines(path.join('lib', 'source-reader.js')),

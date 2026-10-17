@@ -2168,9 +2168,13 @@ test('accepts the provisional request-size boundary and rejects one byte above w
   );
   const diagnostics = [];
   let oversizedFetches = 0;
+  // Step 9F.2e.6: pinned to the Step 9F.1f temporary trim (switch off) --
+  // this exercises fitWriterArticleBudget's own DOES_NOT_FIT_AT_FLOOR event,
+  // which only runs while articleTextBudgetEnabled is off.
   const oversized = await invokeClaudeAnalysis({
     input: oversizedInput,
     apiKey: 'test-key',
+    env: {ARTICLE_TEXT_BUDGET_ENABLED: 'false'},
     onDiagnostics(value) { diagnostics.push(value); },
     fetchImpl: async () => { oversizedFetches++; }
   });
@@ -3936,12 +3940,17 @@ test('Step 9F.1f writer budget: an article is never cut before the focus subject
   assert.equal(validateClaudeAnalysisInput(fitted), true);
 });
 
+// Step 9F.2e.6: pinned to the switch off -- these two exercise
+// fitWriterArticleBudget through the full invocation path, which only runs
+// while articleTextBudgetEnabled is off (on, the budget already ran upstream
+// and this temporary trim is skipped entirely).
 test('Step 9F.1f writer budget: when even the 4 KB floor does not fit it is flagged and the writer is not called', async () => {
   const input = step9F1fOverCapInput({yahooBytes: [16384, 9000, 3000]}, 40000);
   const diagnostics = [];
   let fetches = 0;
   const result = await invokeClaudeAnalysis({
-    input, apiKey: 'test-key', onDiagnostics: value => diagnostics.push(value),
+    input, apiKey: 'test-key', env: {ARTICLE_TEXT_BUDGET_ENABLED: 'false'},
+    onDiagnostics: value => diagnostics.push(value),
     fetchImpl: async () => { fetches++; }
   });
   assert.equal(result.type, 'REQUEST_TOO_LARGE');
@@ -3958,7 +3967,7 @@ test('Step 9F.1f writer budget: an over-cap request is sent trimmed, under the c
   const input = step9F1fOverCapInput({yahooBytes: [16384, 12000, 9000]}, 10000);
   let sentBytes = null;
   await invokeClaudeAnalysis({
-    input, apiKey: 'test-key', onDiagnostics: () => {},
+    input, apiKey: 'test-key', env: {ARTICLE_TEXT_BUDGET_ENABLED: 'false'}, onDiagnostics: () => {},
     fetchImpl: async (url, options) => {
       sentBytes = Buffer.byteLength(options.body, 'utf8');
       throw new Error('stop after capture');

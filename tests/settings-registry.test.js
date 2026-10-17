@@ -316,8 +316,22 @@ test('Step 9F.2e.5 settings registry: articleSlotsEnabled and the wired slot row
     assert.deepEqual([row.default, row.min, row.max, row.admin, row.wired], [value, min, max, 'Admin', true], name);
   }
   assert.deepEqual([SETTINGS_REGISTRY.slotSpilloverEnabled.default, SETTINGS_REGISTRY.slotSpilloverEnabled.wired], [true, true]);
-  // Step 9F.2d.3 wired the two portfolio rows; the article budget stays unwired.
-  for (const name of ['articleTextBudgetBytesPlanned']) {
-    assert.equal(SETTINGS_REGISTRY[name].wired, false, name);
+});
+
+// Step 9F.2e.6 + 9F.2g: the writer text budget switched on. articleTextBudgetBytesPlanned
+// is now wired; nonArticleOverheadBytesPlanned stays unwired (cross-check only);
+// the new switch is Admin, on by default, wired.
+test('Step 9F.2e.6 settings registry: articleTextBudgetEnabled and the now-wired budget row', () => {
+  const entry = SETTINGS_REGISTRY.articleTextBudgetEnabled;
+  assert.deepEqual([entry.default, entry.admin, entry.envVar, entry.wired, entry.boolean],
+    [true, 'Admin', 'ARTICLE_TEXT_BUDGET_ENABLED', true, true]);
+  assert.equal(settingValue('articleTextBudgetEnabled', {env: {}}), true);
+  for (const value of ['false', '0', 'off', 'OFF']) {
+    assert.equal(settingValue('articleTextBudgetEnabled', {env: {ARTICLE_TEXT_BUDGET_ENABLED: value}}), false, value);
   }
+  for (const value of ['', 'maybe', '2']) {
+    assert.equal(settingValue('articleTextBudgetEnabled', {env: {ARTICLE_TEXT_BUDGET_ENABLED: value}}), true, value);
+  }
+  assert.equal(SETTINGS_REGISTRY.articleTextBudgetBytesPlanned.wired, true);
+  assert.equal(SETTINGS_REGISTRY.nonArticleOverheadBytesPlanned.wired, false);
 });

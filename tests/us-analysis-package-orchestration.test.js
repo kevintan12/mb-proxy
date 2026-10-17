@@ -6607,3 +6607,174 @@ test('Step 9F.2d.3 portfolio slots: CLOSED, WEEKEND and HOLIDAY offer Yahoo news
     assert.equal(JSON.stringify(off.output.marketPackages), JSON.stringify(on.output.marketPackages), marketState);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Step 9F.2e.6 + 9F.2g: the 150 KB writer text budget switched on
+// (ARTICLE_TEXT_BUDGET_ENABLED). It runs on the reader's own admitted Yahoo
+// news before any card, horizon or reference is built for it, so a dropped
+// article never reaches classification -- no citation anywhere ever points at
+// it, and there is nothing to clean up. CNBC news and both recaps count
+// toward the budget but are never themselves dropped. Off: the Step 9F.1f
+// temporary trim runs exactly as before (covered by the pinned tests in
+// tests/claude-analysis-invocation.test.js).
+// ---------------------------------------------------------------------------
+
+async function withArticleTextBudgetBytes(bytes, operation) {
+  const saved = process.env.ARTICLE_TEXT_BUDGET_BYTES_PLANNED;
+  if (bytes === undefined) delete process.env.ARTICLE_TEXT_BUDGET_BYTES_PLANNED;
+  else process.env.ARTICLE_TEXT_BUDGET_BYTES_PLANNED = String(bytes);
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.ARTICLE_TEXT_BUDGET_BYTES_PLANNED;
+    else process.env.ARTICLE_TEXT_BUDGET_BYTES_PLANNED = saved;
+  }
+}
+
+async function withArticleTextBudgetEnabled(value, operation) {
+  const saved = process.env.ARTICLE_TEXT_BUDGET_ENABLED;
+  if (value === undefined) delete process.env.ARTICLE_TEXT_BUDGET_ENABLED;
+  else process.env.ARTICLE_TEXT_BUDGET_ENABLED = value;
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.ARTICLE_TEXT_BUDGET_ENABLED;
+    else process.env.ARTICLE_TEXT_BUDGET_ENABLED = saved;
+  }
+}
+
+function step9F2e6Text(sizeKb, label) {
+  let text = `${label}. `;
+  while (Buffer.byteLength(text, 'utf8') < sizeKb * 1024) text += 'More detail follows here. ';
+  return text.slice(0, sizeKb * 1024);
+}
+
+// One macro-scored article (kept) and one neutral, zero-scored article
+// (lowest score, dropped first) through the CLOSED completed-session path,
+// with CNBC's own (never-drop) news present from the default harness.
+function step9F2e6CompletedHarness({onDiagnostics}) {
+  const macro = step8kCandidate('Federal Reserve signals its next rate path');
+  const neutral = step8kCandidate('A quiet regional retailer opens a new store');
+  const candidates = [macro, neutral];
+  const texts = new Map([[macro.url, step9F2e6Text(40, 'Macro')], [neutral.url, step9F2e6Text(40, 'Neutral')]]);
+  const {service} = harness({
+    now: () => new Date(GENERATED_AT),
+    yahooLatestNewsDiscovery: {async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }},
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url, headline: candidate.headline,
+          publisher: 'Yahoo Finance', publishedAt: '2026-09-04T19:00:00.000Z', updatedAt: null,
+          articleText: texts.get(candidate.url)
+        }};
+      }
+    },
+    onDiagnostics
+  });
+  return {service, macro, neutral};
+}
+
+test('Step 9F.2e.6 + 9F.2g: CLOSED drops the lowest-scored Yahoo article, keeps CNBC, logs the drop', async () => {
+  const diagnostics = [];
+  const {service, macro, neutral} = step9F2e6CompletedHarness({onDiagnostics: value => diagnostics.push(value)});
+  // Note: the Yahoo reader itself caps stored article text to the articleKb
+  // setting (16 KB by default), regardless of this fixture's 40 KB source
+  // text, so the two articles' real contribution is 2 x 16 KB -- the budget
+  // below is set accordingly.
+  const output = await withArticleTextBudgetEnabled('true',
+    () => withArticleTextBudgetBytes(20 * 1024, () => service.assemble(request())));
+  const evidence = output.marketPackages[0].evidenceContext.evidence;
+  const titles = evidence.map(entry => entry.item.title);
+  assert.ok(titles.includes(macro.headline), 'the higher-scored article is kept');
+  assert.ok(!titles.includes(neutral.headline), 'the lowest-scored article is dropped');
+  assert.ok(titles.some(title => title.startsWith('CNBC market news item')), 'CNBC (never-drop) is kept');
+  // No citation anywhere points at the dropped article -- it never reached
+  // classification, so there is nothing to clean up.
+  assert.equal(JSON.stringify(output).includes(neutral.headline), false);
+  const drop = diagnostics.find(value => value.stage === 'writerTextBudgetDrop');
+  assert.ok(drop, 'the drop is logged');
+  assert.equal(drop.droppedCount, 1);
+  assert.equal(drop.dropped.length, 1);
+  assert.equal(drop.dropped[0].headline, neutral.headline);
+  assert.equal(drop.dropped[0].slot, 'GENERAL');
+  assert.equal(drop.dropped[0].reason, 'OVER_WRITER_TEXT_BUDGET');
+  assert.ok(drop.totalBytesBefore > drop.totalBytesAfter);
+  assert.equal(JSON.stringify(drop).includes('More detail'), false, 'no article text in the log line');
+});
+
+test('Step 9F.2e.6 + 9F.2g: CLOSED, a generous budget drops nothing and logs no drop event', async () => {
+  const diagnostics = [];
+  const {service, macro, neutral} = step9F2e6CompletedHarness({onDiagnostics: value => diagnostics.push(value)});
+  const output = await withArticleTextBudgetEnabled('true', () => service.assemble(request()));
+  const titles = output.marketPackages[0].evidenceContext.evidence.map(entry => entry.item.title);
+  assert.ok(titles.includes(macro.headline));
+  assert.ok(titles.includes(neutral.headline));
+  assert.equal(diagnostics.some(value => value.stage === 'writerTextBudgetDrop'), false);
+});
+
+test('Step 9F.2e.6 + 9F.2g: switch off drops nothing even at a tiny budget (byte-identical to the temporary trim path)', async () => {
+  const diagnostics = [];
+  const {service, macro, neutral} = step9F2e6CompletedHarness({onDiagnostics: value => diagnostics.push(value)});
+  const output = await withArticleTextBudgetEnabled('false',
+    () => withArticleTextBudgetBytes(32 * 1024, () => service.assemble(request())));
+  const titles = output.marketPackages[0].evidenceContext.evidence.map(entry => entry.item.title);
+  assert.ok(titles.includes(macro.headline));
+  assert.ok(titles.includes(neutral.headline), 'nothing is dropped while the switch is off');
+  assert.equal(diagnostics.some(value => value.stage === 'writerTextBudgetDrop'), false);
+});
+
+// Active states (PRE, REGULAR, POST) share the identical ACTIVE_SESSION code
+// path for the budget (lib/us-analysis-package-orchestration.js reads only
+// analysisMode/completedSessionMode here, never the specific market state),
+// so one representative active-state run exercises all three; REGULAR is
+// used because step9F1fHarness already builds it.
+test('Step 9F.2e.6 + 9F.2g: REGULAR (active) also drops the lowest-scored Yahoo article', async () => {
+  const articles = step9F1fArticles(3);
+  const {service, diagnostics} = step9F1fHarness(articles);
+  const output = await withArticleTextBudgetEnabled('true',
+    () => withArticleTextBudgetBytes(20 * 1024, () => service.assemble(request())));
+  const titles = output.marketPackages[0].evidenceContext.evidence.map(entry => entry.item.title);
+  const keptCount = articles.filter(article => titles.includes(article.title)).length;
+  assert.ok(keptCount < 3, 'at least one article was dropped under the tight active-state budget');
+  const drop = diagnostics.find(value => value.stage === 'writerTextBudgetDrop');
+  assert.ok(drop, 'the drop is logged in the active-session path too');
+});
+
+// Degenerate case (Kevin's point 4): the only article naming a Watchlist
+// company is dropped by the budget. What the reader would see: Section 4
+// shows no reason at all for that stock this run (the existing Step 21D.1
+// rule -- a reason is shown only when an article linked to the stock is
+// cited), exactly as if no article about it had ever been admitted. The
+// report still assembles; nothing fails.
+test('Step 9F.2e.6 + 9F.2g: dropping a stock\'s only article leaves no Section 4 reason for it (never a failure)', async () => {
+  const watched = step8kCandidate('AAPL unveils a new product line that excites investors');
+  const macro = step8kCandidate('Federal Reserve holds rates steady at latest meeting');
+  const candidates = [macro, watched];
+  const texts = new Map([
+    [macro.url, step9F2e6Text(40, 'Macro')],
+    [watched.url, step9F2e6Text(40, 'Watched')]
+  ]);
+  const {service} = harness({
+    now: () => new Date(GENERATED_AT),
+    yahooLatestNewsDiscovery: {async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }},
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url, headline: candidate.headline,
+          publisher: 'Yahoo Finance', publishedAt: '2026-09-04T19:00:00.000Z', updatedAt: null,
+          articleText: texts.get(candidate.url)
+        }};
+      }
+    }
+  });
+  // Note: the Yahoo reader caps stored text to articleKb (16 KB default)
+  // regardless of this fixture's 40 KB source text.
+  const output = await withArticleTextBudgetEnabled('true', () => withArticleTextBudgetBytes(20 * 1024,
+    () => service.assemble(request('US', {watchlist: [{market: 'US', symbol: 'AAPL'}]}))));
+  const titles = output.marketPackages[0].evidenceContext.evidence.map(entry => entry.item.title);
+  assert.ok(!titles.includes(watched.headline), 'the Watchlist article (lower score) was dropped');
+  assert.ok(titles.includes(macro.headline));
+  // No reason at all for AAPL this run -- only its telemetry reference remains.
+  assert.equal(output.portfolioContext.watchlist[0].evidenceRefs.length, 1);
+  assert.equal(JSON.stringify(output).includes(watched.headline), false);
+});
