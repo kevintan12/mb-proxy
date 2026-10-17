@@ -920,7 +920,20 @@ test('Step 9D.1: RECORDED AS-IS, NOT A DECISION -- active day, older evidence, n
 
 test('Step 9D.1: writer request size on the rich completed fixture is unchanged', () => {
   const input = richCompletedUsWeekInput();
-  const request = buildClaudeAnalysisRequest(input);
-  assert.equal(Buffer.byteLength(request.system, 'utf8'), 19700);
-  assert.equal(Buffer.byteLength(JSON.stringify(request), 'utf8'), 31893);
+  // Step 21D.1: the 9D.1 figures hold with the Section 4 cause check off; on adds only its one
+  // instruction (717 bytes).
+  const saved = process.env.SECTION_FOUR_CAUSE_CHECK_ENABLED;
+  try {
+    process.env.SECTION_FOUR_CAUSE_CHECK_ENABLED = 'off';
+    const request = buildClaudeAnalysisRequest(input);
+    assert.equal(Buffer.byteLength(request.system, 'utf8'), 19700);
+    assert.equal(Buffer.byteLength(JSON.stringify(request), 'utf8'), 31893);
+    delete process.env.SECTION_FOUR_CAUSE_CHECK_ENABLED;
+    const onRequest = buildClaudeAnalysisRequest(input);
+    assert.equal(Buffer.byteLength(onRequest.system, 'utf8'), 19700 + 717);
+    assert.equal(Buffer.byteLength(JSON.stringify(onRequest), 'utf8'), 31893 + 729);
+  } finally {
+    if (saved === undefined) delete process.env.SECTION_FOUR_CAUSE_CHECK_ENABLED;
+    else process.env.SECTION_FOUR_CAUSE_CHECK_ENABLED = saved;
+  }
 });

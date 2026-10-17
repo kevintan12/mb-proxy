@@ -662,6 +662,12 @@ test('Section 4 provider input lists only the selected portfolio refs, including
 });
 
 test('Section 4 accepts selected refs and (Step 9B) trims refs from the other list or from outside both lists', async () => {
+  // Step 21D.1: pinned with the Section 4 cause check off. Its general sentence names no stock, so
+  // with the check on it is about the whole list, and the Watchlist case has a stock with no linked
+  // article cited (the cut is tested in tests/section-four-causes.test.js).
+  const savedCauseCheck = process.env.SECTION_FOUR_CAUSE_CHECK_ENABLED;
+  process.env.SECTION_FOUR_CAUSE_CHECK_ENABLED = 'off';
+  try {
   for (const initiatingList of ['myStocks', 'watchlist']) {
     const input = overlappingFocusInput();
     input.analysisRequest.initiatingList = initiatingList;
@@ -703,6 +709,10 @@ test('Section 4 accepts selected refs and (Step 9B) trims refs from the other li
     assert.deepEqual(sectionEvents, [
       ['NON_INITIATING_EVIDENCE', 2, 'TRIMMED'], ['NON_INITIATING_TELEMETRY', 2, 'TRIMMED']
     ]);
+  }
+  } finally {
+    if (savedCauseCheck === undefined) delete process.env.SECTION_FOUR_CAUSE_CHECK_ENABLED;
+    else process.env.SECTION_FOUR_CAUSE_CHECK_ENABLED = savedCauseCheck;
   }
 });
 
