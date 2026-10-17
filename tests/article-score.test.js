@@ -108,6 +108,64 @@ test('Step 9F.2c.2: three lists together are additive (portfolio + asiaEurope + 
   assert.equal(result.score, POINTS.portfolio + POINTS.asiaEurope + POINTS.benchmarkOrGeneric);
 });
 
+// Step 9F.2d.4: the Wet/Dry AMD exclusion (Step 9F.2c.1b) protected the macro
+// term match but not the portfolio/most-active ticker-identity match, so a
+// user holding AMD stock would get a portfolio-match bonus from an eye-disease
+// headline. headlineMatchesIdentity now shares the same exclusion phrases.
+const AMD_ITEM = Object.freeze({symbol: 'AMD', shortName: 'Advanced Micro Devices', longName: 'Advanced Micro Devices, Inc.'});
+
+test('Step 9F.2d.4: "Wet AMD" does not match the AMD ticker as a portfolio or most-active identity', () => {
+  const wetAmd = score(
+    {headline: 'Kodiak Sciences shares climb on new Wet AMD trial data'},
+    {portfolioIdentities: [AMD_ITEM], mostActiveIdentities: [AMD_ITEM]}
+  );
+  assert.equal(wetAmd.matched.portfolio, 0);
+  assert.equal(wetAmd.matched.mostActive, 0);
+  const dryAmd = score(
+    {headline: 'New therapy targets Dry AMD in late-stage trial'},
+    {portfolioIdentities: [AMD_ITEM]}
+  );
+  assert.equal(dryAmd.matched.portfolio, 0);
+});
+
+test('Step 9F.2d.4: a real AMD chip story still matches the AMD ticker identity', () => {
+  const result = score(
+    {headline: 'AMD unveils its next-generation chip lineup'},
+    {portfolioIdentities: [AMD_ITEM], mostActiveIdentities: [AMD_ITEM]}
+  );
+  assert.equal(result.matched.portfolio, POINTS.portfolio);
+  assert.equal(result.matched.mostActive, POINTS.mostActive);
+});
+
+// Step 9F.2c.4(a): the bare word "earnings" matched any single-company
+// earnings story regardless of size, crowding out stronger macro stories on
+// the 16 Oct Trading run. Replaced with "earnings season", "bank earnings"
+// and "earnings boost" -- narrow enough to keep the broad-market/sector
+// signal without the single-company false positives.
+test('Step 9F.2c.4(a): bare "earnings" no longer scores macro points on its own', () => {
+  for (const headline of [
+    "ASML's Q3 Earnings Coming Up",
+    'Domino’s Pizza Releases Earnings Pre-Market on Tuesday, Oct. 13',
+    'Equity Bancshares (EQBK) Stock Price Edges Higher After Q3 Earnings Strength',
+    'Demae Can (TSE:2484) Stock Sinks As Q4 Earnings Losses Deepen'
+  ]) {
+    const result = score({headline});
+    assert.equal(result.matched.usMacro, 0, headline);
+  }
+});
+
+test('Step 9F.2c.4(a): "earnings season", "bank earnings" and "earnings boost" still score macro points', () => {
+  for (const headline of [
+    'Goldman Strategists Upgrade Global Stocks on Earnings Boost',
+    'European shares climb on bank gains, focus turns to earnings season',
+    'Earnings season will fight the real world for attention',
+    'Bank earnings beat expectations across the board'
+  ]) {
+    const result = score({headline});
+    assert.equal(result.matched.usMacro, POINTS.usMacro, headline);
+  }
+});
+
 // Maximum without recency (54) and with the biggest recency bonus (58).
 const MAX_HEADLINE = 'Acme Inc and Zeta Corp surge as Fed flags inflation; '
   + 'Nikkei dips while stocks rally and moonshot plan excites traders';

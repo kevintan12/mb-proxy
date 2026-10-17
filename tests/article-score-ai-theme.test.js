@@ -88,7 +88,9 @@ test('Step 9F.2e.4b: AI-plus-real-macro-word scores the full macro value at ever
   }
 });
 
-const MACRO_WORD_ROWS = ['earnings', 'Fed', 'S&P 500', 'oil'];
+// Step 9F.2c.4(a): bare "earnings" no longer matches on its own; "earnings
+// season" is one of the three narrower phrases that replaced it.
+const MACRO_WORD_ROWS = ['earnings season', 'Fed', 'S&P 500', 'oil'];
 for (const word of MACRO_WORD_ROWS) {
   test(`Step 9F.2e.4b: AI plus the real macro word "${word}" scores macro, not AI-theme`, () => {
     const result = score({headline: `Nvidia and AMD slip as ${word} weighs on sentiment`}, {env: env(8)});

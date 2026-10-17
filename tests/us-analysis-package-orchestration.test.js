@@ -2080,7 +2080,7 @@ test('unsupported special session fails closed before any news research path', a
   assert.equal(calls.cnbc.length, 0);
 });
 
-test('assembles a canonical US package with supplied benchmarks and deterministic refs', async () => {
+cnbcFilterOffTest('assembles a canonical US package with supplied benchmarks and deterministic refs', async () => {
   const {service, calls} = harness();
   const output = await service.assemble(request('US', {
     benchmarkAnchors: [
@@ -2158,7 +2158,7 @@ test('assembles a canonical US package with supplied benchmarks and deterministi
   ]);
 });
 
-test('classifies package-owned ordered evidence refs once and derives both role arrays', async () => {
+cnbcFilterOffTest('classifies package-owned ordered evidence refs once and derives both role arrays', async () => {
   let classifierCalls = 0;
   let classifierInput;
   const {service} = harness({
@@ -2614,7 +2614,7 @@ test('attributes Yahoo recap timings without hiding or double-counting them in f
     + timing.packageAssemblyFinalizationMs, timing.packageRuntimeTotalMs);
 });
 
-test('integrates a validated Yahoo recap with package-owned ordering, identity and horizon', async () => {
+cnbcFilterOffTest('integrates a validated Yahoo recap with package-owned ordering, identity and horizon', async () => {
   const article = yahooRecapArticle();
   const articleCalls = [];
   const evidenceCalls = [];
@@ -2978,7 +2978,7 @@ test('validated Yahoo focus survives general CNBC classifier-capacity rejection'
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
-test('real Yahoo validation, article acquisition and evidence construction reach Further Readings', async () => {
+cnbcFilterOffTest('real Yahoo validation, article acquisition and evidence construction reach Further Readings', async () => {
   const url = 'https://finance.yahoo.com/markets/live/stock-market-today-september-4.html';
   const title = 'Stock market today: September 4 recap';
   const publishedAt = '2026-09-04T20:03:54Z';
@@ -3034,7 +3034,7 @@ test('real Yahoo validation, article acquisition and evidence construction reach
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
-test('later second-fetch Yahoo dateModified becomes authoritative through evidence construction', async () => {
+cnbcFilterOffTest('later second-fetch Yahoo dateModified becomes authoritative through evidence construction', async () => {
   const url = 'https://finance.yahoo.com/markets/live/stock-market-today-september-4.html';
   const title = 'Stock market today: September 4 recap';
   const publishedAt = '2026-09-04T20:03:54Z';
@@ -3206,7 +3206,7 @@ test('Yahoo orchestration accepts an added or a removed update timestamp', async
 });
 
 // Step 9F.1g: a 503 is retried by the shared helper (3 attempts, fake pauses).
-test('real Yahoo article retrieval failure remains optional after validated research', async () => {
+cnbcFilterOffTest('real Yahoo article retrieval failure remains optional after validated research', async () => {
   let fetches = 0;
   const pauses = [];
   const {service} = harness({
@@ -3281,7 +3281,7 @@ function step9f1gRecapHarness(url, pageStatuses, extra = {}) {
   return {service, pageRequests};
 }
 
-test('Step 9F.1g: a recap at a new-style address is accepted by content and reaches Further Readings', async () => {
+cnbcFilterOffTest('Step 9F.1g: a recap at a new-style address is accepted by content and reaches Further Readings', async () => {
   const url = 'https://finance.yahoo.com/markets/stocks/articles/stocks-close-higher-september-4.html';
   const {service, pageRequests} = step9f1gRecapHarness(url, []);
   const output = await service.assemble(request());
@@ -3325,7 +3325,7 @@ test('Step 9F.1g: the recap article download uses the shared retries', async () 
   }
 });
 
-test('places a recap published inside the completed-session boundary in supporting evidence', async () => {
+cnbcFilterOffTest('places a recap published inside the completed-session boundary in supporting evidence', async () => {
   const publishedAt = '2026-09-04T19:45:00.000Z';
   const article = yahooRecapArticle({publishedAt});
   const research = yahooRecapResearchSuccess({publishedAt});
@@ -3907,7 +3907,7 @@ test('integrates completed and subsequent CNBC evidence after Yahoo and Fed with
   assert.equal(JSON.stringify(output).includes('c2'), false);
 });
 
-test('filters five provisional CNBC items and compacts every retained reference-bearing path', async () => {
+cnbcFilterOffTest('filters five provisional CNBC items and compacts every retained reference-bearing path', async () => {
   let repairInput;
   const {service} = harness({
     cnbcNewsResearch: {
@@ -3972,6 +3972,52 @@ test('filters five provisional CNBC items and compacts every retained reference-
   assert.equal(JSON.stringify(output).includes('CNBC market news item 3'), false);
   assert.equal(JSON.stringify(output).includes('CNBC market news item 5'), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+// Step 9F.2f on (default): the same five provisional CNBC items as above are
+// no longer gated by materiality/role -- all five are retained, same as a
+// Yahoo news item or a base evidence item would be.
+test('Step 9F.2f on (default): all five provisional CNBC items are retained, none gated by materiality or role', async () => {
+  const {service} = harness({
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, [
+          'COMPLETED_SESSION', 'COMPLETED_SESSION', 'COMPLETED_SESSION',
+          'SUBSEQUENT_DEVELOPMENT', 'SUBSEQUENT_DEVELOPMENT'
+        ]);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(
+          input,
+          {
+            e5: ['MATERIAL_EVENT'],
+            e7: ['MATERIAL_EVENT'],
+            e8: ['MATERIAL_EVENT']
+          },
+          {
+            e5: [],
+            e7: [{kind: 'SECTOR', name: 'CNBC market news item 4'}],
+            e8: [{kind: 'COMPANY', name: 'CNBC market news item 5'}]
+          },
+          {e4: 'LOW', e5: 'HIGH', e6: 'MEDIUM', e7: 'MEDIUM', e8: 'LOW'}
+        );
+      },
+      async repairEvidenceSubjects(input) {
+        return {ok: true, type: 'SUCCESS', output: {repairs: [{
+          reference: 'e4', subjects: [{kind: 'COMPANY', name: 'CNBC market news item 2'}]
+        }]}};
+      }
+    }
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  const titles = JSON.stringify(output);
+  for (let item = 1; item <= 5; item++) {
+    assert.equal(titles.includes(`CNBC market news item ${item}`), true, `item ${item} missing`);
+  }
+  assert.equal(context.evidence.filter(entry => entry.item.sourceId === 'us.cnbc').length, 5);
 });
 
 test('excludes generic market and broad-index labels from broad-market focus', async () => {
@@ -4369,13 +4415,24 @@ test('keeps oversized provisional CNBC evidence optional at the classifier prefl
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
-test('roleless low-materiality CNBC provisional evidence adds no final evidence or gap', async () => {
+cnbcFilterOffTest('roleless low-materiality CNBC provisional evidence adds no final evidence or gap', async () => {
   const {service} = harness();
   const output = await service.assemble(request());
   const context = output.marketPackages[0].evidenceContext;
   assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
   assert.deepEqual(context.unresolvedGaps, [YAHOO_RECAP_UNAVAILABLE_GAP, CNBC_RECAP_UNAVAILABLE_GAP]);
   assert.deepEqual(context.furtherReadings, []);
+});
+
+// Step 9F.2f (10 Oct 2026 decision: CNBC gets no special conditions). While
+// cnbcNoSpecialConditionsEnabled is on (the default), the same roleless,
+// LOW-materiality general CNBC item as above is no longer gated out -- it is
+// admitted on the same terms as Yahoo news and the base evidence items.
+test('Step 9F.2f on (default): roleless low-materiality general CNBC evidence is admitted like any other source', async () => {
+  const {service} = harness();
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), true);
 });
 
 test('non-portfolio company and sector CNBC evidence survives package roles without stock telemetry and follows recap anchors in Further Readings', async () => {
@@ -4935,7 +4992,7 @@ test('requires non-empty normalized US anchors without any backend symbol assump
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
-test('continues with one deterministic unresolved gap when Federal Reserve acquisition fails', async () => {
+cnbcFilterOffTest('continues with one deterministic unresolved gap when Federal Reserve acquisition fails', async () => {
   const {service} = harness({
     federalReserveEvidenceAcquisition: {async acquireEvidence() { throw new Error('unavailable'); }}
   });
@@ -6010,8 +6067,9 @@ test('Step 9F.2c.1b "AMD" the eye disease does not match the AMD macro term, but
 });
 
 // ---- Step 9F.2c.3: new macro terms, the "dollar" currency fix, "Wall Street" removal ----
-// Rows 8 and 10 are still macro overall (via "earnings" and "Fed"/"rate hike"
-// respectively) even though the dollar match is suppressed for that headline.
+// Rows 8 and 10 are still macro overall (via "earnings season" -- Step
+// 9F.2c.4(a) -- and "Fed"/"rate hike" respectively) even though the dollar
+// match is suppressed for that headline.
 // Row 12 is still macro overall (via "Nvidia") even though "Wall Street" no
 // longer matches.
 const STEP_9F2C3_ROWS = [
@@ -6022,7 +6080,7 @@ const STEP_9F2C3_ROWS = [
   {headline: 'Dollar slips as Treasury yields ease', macro: true},
   {headline: 'Costco is booming as Americans rethink where every dollar goes', macro: false},
   {headline: 'Dollar General raises its full-year forecast', macro: false},
-  {headline: 'Dollar Tree shares jump on earnings', macro: true},
+  {headline: 'Dollar Tree shares jump on earnings season', macro: true},
   {headline: 'Start-up raises billion-dollar round', macro: false},
   {headline: 'Dollar General and Fed rate hike fears', macro: true},
   {headline: "The Dividend Battle Wall Street Didn't See Coming", macro: false},
@@ -6033,6 +6091,67 @@ test('Step 9F.2c.3 new macro terms, the dollar currency fix, and the Wall Street
   const candidates = STEP_9F2C3_ROWS.map(row => step8kCandidate(row.headline));
   const {audit} = await step8kActiveRun({candidates});
   for (const row of STEP_9F2C3_ROWS) {
+    const key = row.headline.slice(0, 80);
+    const entry = audit.find(e => e.headline === key);
+    assert.ok(entry, row.headline);
+    if (row.macro) {
+      assert.equal(entry.tier, 2, row.headline);
+    } else {
+      assert.notEqual(entry.tier, 2, row.headline);
+    }
+  }
+});
+
+// ---- Step 9F.2c.4(b): "trillion-dollar" exclusion also catches compound ----
+// prefixes like "multitrillion-dollar" (no non-letter boundary before
+// "trillion"), not just the bare phrase. Row 1 is the real false-positive case
+// (a Fortune headline that scored macro 20 on "dollar" alone). Row 2 confirms a
+// compound dollar exclusion does not suppress an unrelated macro term in the
+// same headline. Row 3 confirms the existing bare "trillion-dollar" exclusion
+// (a non-alphanumeric boundary before the phrase) still works as before.
+const STEP_9F2C4B_ROWS = [
+  {headline: 'Does a robot cost $2 or $35 an hour? A multitrillion-dollar market depends on how', macro: false},
+  {headline: 'Nvidia leads a multitrillion-dollar rally in chip stocks', macro: true},
+  {headline: 'Start-up raises trillion-dollar round for new venture', macro: false}
+];
+
+test('Step 9F.2c.4(b) "multitrillion-dollar" and other trillion-dollar compounds are excluded from the dollar match', async () => {
+  const candidates = STEP_9F2C4B_ROWS.map(row => step8kCandidate(row.headline));
+  const {audit} = await step8kActiveRun({candidates});
+  for (const row of STEP_9F2C4B_ROWS) {
+    const key = row.headline.slice(0, 80);
+    const entry = audit.find(e => e.headline === key);
+    assert.ok(entry, row.headline);
+    if (row.macro) {
+      assert.equal(entry.tier, 2, row.headline);
+    } else {
+      assert.notEqual(entry.tier, 2, row.headline);
+    }
+  }
+});
+
+// ---- Step 9F.2c.4(a): bare "earnings" removed, three narrower phrases added ----
+// Rows 1-3 are the real false positives from the 16 Oct Trading run: single-
+// company earnings stories (not broad-market/sector) that bare "earnings"
+// wrongly promoted and must stay non-macro now. Rows 4-6 are the genuinely
+// broad-market/sector earnings-season stories the three new phrases keep.
+// Row 7 still scores macro via "oil"/"inflation" independently, and also now
+// matches "bank earnings" -- either way it stays macro (unaffected by this
+// change, listed for completeness).
+const STEP_9F2C4A_ROWS = [
+  {headline: "ASML's Q3 Earnings Coming Up", macro: false},
+  {headline: 'Domino’s Pizza Releases Earnings Pre-Market on Tuesday, Oct. 13', macro: false},
+  {headline: 'Equity Bancshares (EQBK) Stock Price Edges Higher After Q3 Earnings Strength', macro: false},
+  {headline: 'Goldman Strategists Upgrade Global Stocks on Earnings Boost', macro: true},
+  {headline: 'European shares climb on bank gains, focus turns to earnings season', macro: true},
+  {headline: 'Earnings season will fight the real world for attention', macro: true},
+  {headline: 'Oil Prices Decline as Investors Await US Inflation Data and Bank Earnings Amid Gulf tensions', macro: true}
+];
+
+test('Step 9F.2c.4(a) bare "earnings" no longer matches, but "earnings season", "bank earnings" and "earnings boost" do', async () => {
+  const candidates = STEP_9F2C4A_ROWS.map(row => step8kCandidate(row.headline));
+  const {audit} = await step8kActiveRun({candidates});
+  for (const row of STEP_9F2C4A_ROWS) {
     const key = row.headline.slice(0, 80);
     const entry = audit.find(e => e.headline === key);
     assert.ok(entry, row.headline);
@@ -6392,6 +6511,27 @@ async function withPortfolioSlots(value, operation) {
     if (saved === undefined) delete process.env.PORTFOLIO_SLOTS_ENABLED;
     else process.env.PORTFOLIO_SLOTS_ENABLED = saved;
   }
+}
+
+// Step 9F.2f: the CNBC-no-special-conditions switch (CNBC_NO_SPECIAL_CONDITIONS_ENABLED)
+// is read from process.env on every run; on by default. Pre-existing tests that
+// pin the previous materiality/role gate on general CNBC evidence (907aacf
+// behaviour, incidentally exercised by the default harness's one low-materiality
+// roleless CNBC candidate) run with it off; the on behaviour is tested separately.
+async function withCnbcNoSpecialConditions(value, operation) {
+  const saved = process.env.CNBC_NO_SPECIAL_CONDITIONS_ENABLED;
+  if (value === undefined) delete process.env.CNBC_NO_SPECIAL_CONDITIONS_ENABLED;
+  else process.env.CNBC_NO_SPECIAL_CONDITIONS_ENABLED = value;
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.CNBC_NO_SPECIAL_CONDITIONS_ENABLED;
+    else process.env.CNBC_NO_SPECIAL_CONDITIONS_ENABLED = saved;
+  }
+}
+
+function cnbcFilterOffTest(name, operation) {
+  test(name, () => withCnbcNoSpecialConditions('off', operation));
 }
 
 const referenceOfTitle = (output, title) => output.marketPackages[0].evidenceContext.evidence

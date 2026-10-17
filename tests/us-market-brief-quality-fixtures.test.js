@@ -1096,6 +1096,25 @@ test('plain-English normalization covers the active-session analyst phrases with
   }
 });
 
+// Step 8X: the replacement text hardcodes a subject ("investors' ..."), but
+// the old pattern matched only the bare phrase. When the original prose
+// already carried its own subject right before the phrase (e.g. "investor
+// risk appetite"), that subject was left in place and the new one bolted on,
+// doubling it ("investor investors' willingness..."). Both patterns now
+// optionally consume a leading investor/investors' subject.
+test('Step 8X: plain-English normalization does not double the subject on "risk appetite" / "risk-taking appetite"', () => {
+  for (const [raw, expected] of [
+    ['Strong investor risk appetite drove the rally.', "Strong investors' willingness to take risk drove the rally."],
+    ["Weak investors' risk appetite weighed on shares.", "Weak investors' willingness to take risk weighed on shares."],
+    ["Investor's risk-taking appetite returned.", "Investors' willingness to take risks returned."],
+    ['Market risk appetite improved.', "Market investors' willingness to take risk improved."]
+  ]) {
+    const normalized = normalizePlainEnglishText(raw);
+    assert.equal(normalized, expected, raw);
+    assert.doesNotMatch(normalized, /investors?'?s?\s+investors'/i, raw);
+  }
+});
+
 test('plain-English guard rewrites only safe phrases, detects contextual jargon and blocks only broken prose', () => {
   for (const [raw, expected] of [
     ['Growth-oriented stocks gained.', 'Shares of companies expected to grow quickly gained.'],

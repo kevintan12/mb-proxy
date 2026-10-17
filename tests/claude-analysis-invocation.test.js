@@ -1815,6 +1815,15 @@ test('completed US report retains the pre-fail-soft executive-summary survival b
   assert.equal(noSupport.type, 'CONTRACT_FAILURE');
 });
 
+// Step 8J.2: the empty-whole-package fallback (noCurrentSessionEvidenceOutput)
+// used two different old sentences for its Section 1 content and its
+// per-section uncertainty/evidenceGaps note. Kevin approved one replacement
+// wording for both: "Not enough data to produce an analysis."
+test('Step 8J.2: the empty current-session fallback uses the approved plain wording for both the summary and the gap', () => {
+  assert.equal(NO_CURRENT_SESSION_SUMMARY, 'Not enough data to produce an analysis.');
+  assert.equal(NO_CURRENT_SESSION_EVIDENCE_GAP, 'Not enough data to produce an analysis.');
+});
+
 test('PRE, REGULAR and POST can synthesize a grounded section when current news is unavailable', async () => {
   for (const [marketState, generatedAt, overlayAsOf] of [
     ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:55:00.000Z'],

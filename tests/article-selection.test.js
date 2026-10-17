@@ -820,14 +820,20 @@ test('Step 9F.2e.4a SCORE order: the 12 Oct 2026 Pre-market listing', () => {
   assert.deepEqual(scoreOrder.slice(0, 6), [1, 3, 5, 6, 4, 7]);
   assert.deepEqual(scoreOrder.slice(0, 10), [1, 3, 5, 6, 4, 7, 2, 8, 9, 33]);
   assert.equal(scoreOrder.indexOf(25) + 1, 11);
-  // Every logged score is reproduced except row 22: as listed it has no
-  // generic word, so it scores 24, not the logged 25.
+  // Every logged score is reproduced except row 22 (as listed it has no
+  // generic word, so it scores 24, not the logged 25 -- pre-existing, not
+  // from this step) and rows 21 and 29 (Step 9F.2c.4(a): these two logged
+  // scores included the bare word "earnings", since removed; neither
+  // headline matches one of the three narrower replacement phrases, so each
+  // now loses its macro-20 points -- the real false positives this step
+  // fixes: "ASML's Q3 Earnings Coming Up" and "Domino's Pizza Releases
+  // Earnings Pre-Market...").
   const portfolioIdentities = portfolioIdentitiesFrom(listings.PORTFOLIO_2026_10_12);
   const mismatches = listings.LOGGED_ROWS_2026_10_12.map(([logged], index) => [index + 1, logged,
     scoreArticle(args.candidates[index], {triggerAt: args.generationTime, portfolioIdentities,
       mostActiveIdentities: listings.MOST_ACTIVE_2026_10_12, env: AI_THEME_AT_MACRO_ENV}).score])
     .filter(([, logged, mine]) => logged !== mine);
-  assert.deepEqual(mismatches, [[22, 25, 24]]);
+  assert.deepEqual(mismatches, [[21, 20, 0], [22, 25, 24], [29, 23, 3]]);
   // The three drop-rule headlines are never tried; old-label fillers go last.
   assert.deepEqual(result.dropped.map(row), [38, 39, 40]);
   for (const position of result.oldLabelPositions) assert.equal(args.candidates[position].ageLabel, '5d ago');
