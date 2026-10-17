@@ -12,7 +12,15 @@
 // list is the last-resort step's extra checker categories (active days only).
 'use strict';
 
-const test = require('node:test');
+const {startingListTests} = require('./fixtures/section-four-switch');
+// Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
+const test = startingListTests(require('node:test'), [
+  "Step 9D.5b: every cleanup rule firing at once keeps today's event order, in every state",
+  "Step 9D.5b: Section 2's rules 14 then 15 on the same section keep today's order, in every state",
+  "Step 9D.5b: rule 12 empties Section 2 before the causal rules can act, on active days only",
+  "Step 9D.5b: Section 3's rule 19 trim comes before rule 21's final-blank events, in every state",
+  "Step 9D.5b: last-resort events follow section order and keep the active-only detail"
+]);
 const assert = require('node:assert/strict');
 
 const {

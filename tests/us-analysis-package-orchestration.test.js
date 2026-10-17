@@ -1,4 +1,8 @@
-const test = require('node:test');
+const {startingListTests} = require('./fixtures/section-four-switch');
+// Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
+const test = startingListTests(require('node:test'), [
+  "Step 9F.2d.3 portfolio slots: a Watchlist company gets a slot in a My Stocks run, then the second pass"
+]);
 const assert = require('node:assert/strict');
 const {
   createCompletedRegularSession,

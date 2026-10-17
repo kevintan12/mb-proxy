@@ -1,5 +1,27 @@
-const test = require('node:test');
+const {startingListTests} = require('./fixtures/section-four-switch');
+// Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
+const test = startingListTests(require('node:test'), [
+  "Step 8U.2: in every state group each rule break empties one section, not the report",
+  "Step 8U.5: in every state a made-up ref in Section 5 empties only Section 5",
+  "Step 8U.5: a made-up ref beside the empty-list Section 4 text keeps the exact text",
+  "Step 8U.6: in every state an ungrounded Section 6 opportunity sentence is removed and the risk is kept",
+  "Step 8U.6: in every state an all-ungrounded Section 6 is still emptied and a grounded one is unchanged",
+  "Step 8U.8: in every state an uncatalyzed causal sentence in Sections 1 and 3-7 is removed and the section kept",
+  "Step 8U.8: in every state a section with only uncatalyzed causal text is emptied, except completed Section 1",
+  "Step 8U.8: in every state a causal sentence backed by the needed catalyst is unchanged",
+  "Step 8U.7: in every state Section 4 drops refs from the other list and keeps the section",
+  "Step 8U.7: in every state Section 4 is still emptied when it keeps no initiating ref or only unrelated text",
+  "Step 9B: in every state one unrelated stock sentence is removed and the other nine stocks are kept",
+  "Step 9B: in every state an index reference in Section 4 is dropped and the section is kept",
+  "Step 9B: in every state a Section 4 with only unrelated content is emptied with the Step 8J wording",
+  "gives Claude explicit validator-sensitive Section 4 and Further Readings instructions",
+  "keeps an empty initiating Section 4 allowlist even when the other list has refs",
+  "gives Section 3 non-causal broad-market session-association instructions",
+  "builds one deterministic server-owned request with a projected package and no tools",
+  "active optional section defects localize together without retaining unsupported prose"
+]);
 const assert = require('node:assert/strict');
+const {emptySectionFour} = require('./fixtures/section-four-empty');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
@@ -200,7 +222,7 @@ function reportContext(input) {
 function sections(content = 'Supported analysis.') {
   return REPORT_SECTION_NAMES.map((name, index) => ({
     name,
-    content: index === 7 ? null : index === 3 ? EMPTY_INITIATING_LIST_CONTENT.myStocks
+    content: index === 7 ? null : index === 3 ? emptySectionFour()
       : content === null ? null : index === 2 ? 'Supported Technology analysis.' : content,
     evidenceRefs: index === 7 || index === 3 || content === null ? [] : ['e1'],
     telemetryRefs: index === 7 || index === 3 || content === null ? [] : ['t1'],

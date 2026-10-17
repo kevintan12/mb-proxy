@@ -9,6 +9,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const {emptySectionFour} = require('./section-four-empty');
 
 const {createEvidenceItem} = require('../../lib/evidence-items');
 const {createEvidenceCollection} = require('../../lib/evidence-collections');
@@ -159,7 +160,7 @@ function reportContext(input) {
 function sections(content = 'Supported analysis.') {
   return REPORT_SECTION_NAMES.map((name, index) => ({
     name,
-    content: index === 7 ? null : index === 3 ? EMPTY_INITIATING_LIST_CONTENT.myStocks
+    content: index === 7 ? null : index === 3 ? emptySectionFour()
       : content === null ? null : index === 2 ? 'Supported Technology analysis.' : content,
     evidenceRefs: index === 7 || index === 3 || content === null ? [] : ['e1'],
     telemetryRefs: index === 7 || index === 3 || content === null ? [] : ['t1'],

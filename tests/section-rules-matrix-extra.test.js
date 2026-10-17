@@ -15,7 +15,13 @@
 // guards the "byte for byte" requirement.
 'use strict';
 
-const test = require('node:test');
+const {startingListTests} = require('./fixtures/section-four-switch');
+// Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
+const test = startingListTests(require('node:test'), [
+  "Step 9D.5a: R3 a repeated evidence ref is removed silently, in every state",
+  "Step 9D.5a: R12 Section 2 needs a current-session driver on active days only",
+  "Step 9D.5a: R2 analyst-desk jargon is rewritten in plain English, in every state"
+]);
 const assert = require('node:assert/strict');
 
 const {validateClaudeAnalysisOutput} = require('../lib/claude-analysis-contract');

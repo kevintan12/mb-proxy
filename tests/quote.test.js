@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const {emptySectionFour} = require('./fixtures/section-four-empty');
 
 const handler = require('../api/quote');
 const analysisPackageRuntime = require('../lib/analysis-package-runtime');
@@ -120,7 +121,7 @@ function claudeAnalysisOutput(input) {
     sections: REPORT_SECTION_NAMES.map((name, index) => ({
       name,
       content: index === 7 ? null : index === 3
-        ? EMPTY_INITIATING_LIST_CONTENT.myStocks : index === 2
+        ? emptySectionFour() : index === 2
           ? 'Technology led the broad market.' : 'Supported analysis.',
       evidenceRefs: index === 7 || index === 3 ? [] : ['e1'],
       telemetryRefs: index === 7 || index === 3 ? [] : ['t1'],

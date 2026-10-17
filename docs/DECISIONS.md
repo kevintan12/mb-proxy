@@ -1533,3 +1533,39 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Must not change (kept):** fixed benchmark anchors and their exclusion from Settings rows; Dashboard, Market Brief package, Investment AI and PDF code; per-list saved briefs (switching lists still shows each list's own brief; 21D decides whether that stays); every version string and `?rev=` token.
 - **Tests:** 170/170 across nine files run in isolated processes (163 before; 7 new Step 20B tests in `tests/settings-persistence.test.js`). One existing test changed: "list-aware add and remove mutate only the requested list" used AAPL in both lists; it now adds MSFT to My Stocks. `node --check app.js` OK. `git diff --check` clean.
 - **Supersedes:** none.
+
+## Step 21D.2 — Section 4 covers My Stocks and the Watchlist together (proxy) (repo: mb-proxy)
+
+- **Date:** 17 Oct 2026 · **Branch:** step-9-integration (from `ad61dd6`) · **Status:** IMPLEMENTED, tests passing; not yet committed. One new switch, `sectionFourBothListsEnabled` (Admin, default on, env `SECTION_FOUR_BOTH_LISTS_ENABLED`). Off: the starting-list-only Section 4 of `ad61dd6`. Byte-identical proof is Prompt 2.
+- **Why:** Step 21D (Kevin): a brief started from either tab should cover the user's whole set of stocks. Section 4 is already headed "MY STOCKS & WATCHLIST", but it covered only the list that started the brief. Two briefs, one per list, cost two runs for one market story. Step 20B (one ticker, one list) is done, so the two lists can be joined without duplicates. Step 21D.1 has made the per-stock reason rule strict enough to run across both lists.
+- **Decision (Kevin, 17 Oct 2026, Step 21D.2 plan, approved with changes):**
+  1. Section 4 covers every My Stocks security, then every Watchlist security, each in its saved order, as one section with no headings or subsections. This applies whichever list started the brief. A security in both lists counts once, in My Stocks. Step 20B prevents that case anyway.
+  2. The writer is told the order (`stockOrder` in the Section 4 allowlist) and may begin the Watchlist part with the plain lead-in "On your Watchlist," and nothing more.
+  3. Section 4 may cite the references of every stock in both lists. References from outside both lists (an index, broad-market news, another stock's telemetry) are still dropped, and sentences naming a stock in neither list are still removed (Step 9B, unchanged).
+  4. The Step 21D.1 reason check runs over both lists. A stock gives a reason only when Section 4 cites an article linked to that stock. A sentence that names no stock is about the whole of Section 4 (both lists).
+  5. A stock with no linked article shows its move only, grounded by its own market-data reference. Section 4 is never emptied for lack of articles.
+  6. Both lists empty: exactly "No securities are configured in My Stocks or the Watchlist." One list empty: the other list is covered and the empty one is not mentioned.
+  7. When nothing is left after the checks (for example, only unsupported reasons with no move facts), Section 4 is emptied with "Not enough data to comment on your stocks." This replaces "…on the stocks in this list."
+  8. Market-wide reasons stay strict (Kevin): a market-wide article never supplies a stock's reason in Section 4. Nothing was built for them.
+  9. **Step 9L (planned, not built; the empty-section retry that will replace 8R.B): Section 4 is never retried by 9L.**
+  10. The app still sends the starting list, and the proxy still requires and checks it, so older app versions keep working. While the switch is on, the starting list no longer decides Section 4's scope. The app's one-shared-brief change is Prompt 3. Removing the field is later work.
+- **Where:** `lib/section-rules.js` (the shared module): `sectionFourPortfolio`, `sectionFourEmptyContent`, `sectionFourNoDataMessage`, `sectionFourBothListsOn` and the two new texts. The empty-list detector (rule 23) now reads `sectionFourPortfolio`.
+  - `lib/claude-model-input-projection.js`: the both-lists allowlist (`lists`, `stockOrder`, refs) and the Section 4 purpose the writer reads. The canonical input and its validated `outputRequirements` are unchanged.
+  - `lib/claude-analysis-invocation.js`: four Section 4 writer lines and one Section 3/4 phrase swapped while on, plus the allowlist instruction. The cleanup, the Step 9B trim, the Step 21D.1 reason check and every empty-list path read the shared helpers.
+  - `lib/claude-analysis-contract.js`: the final check reads the same helpers.
+  - `lib/us-analysis-package-orchestration.js`: the candidate pool's portfolio flag uses both lists even with the portfolio slots off. With the slots on (the default) it already did.
+  - `lib/settings-registry.js`: the switch.
+  - The same code runs in PRE, REGULAR, POST, CLOSED, WEEKEND and HOLIDAY, with no per-state copies.
+- **Numbers (new):** `sectionFourBothListsEnabled` default on (Admin, boolean, on/off). No other new number.
+  - Writer request on the rich test fixture (one stock per list): system +132 bytes, whole request +204 bytes.
+  - 16 stocks (8 + 8): under 2 KB more than off (test-checked). Both lists' prices and articles were already sent.
+  - Section 4 output grows with the Watchlist, about 250–450 words for 16 stocks. That's within the 2,500-word cap and the 4,000 output tokens.
+- **Known limits:** as in Step 21D.1, a stock is recognised in prose by its ticker (two letters or more), its name, or its name without the legal suffix and trailing generic words. A one-letter ticker written alone ("V rose …") is not recognised; "Visa" or "(V)" is. A name like "Verisk" for "Verisk Analytics, Inc." is not recognised either. A reason sentence using such a name is dropped rather than shortened.
+- **Must not change (kept):** the Step 21D.1 rule and its switch; the Step 9B trim for stocks in neither list; the exact empty-list text when the switch is off; the Step 8J empty wording; protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f`; the Step 8L one-retry rule; the frozen 8-section structure; Section 7 empty when unsupported. CNBC acquisition code, `lib/reading-window.js`, `timed`/`monotonicNow`/`sleep`, every `?rev=` token and Neon code are untouched.
+- **Tests:**
+  - Full suite 1391/1391 with the switch on and 1391/1391 with `SECTION_FOUR_BOTH_LISTS_ENABLED=off` (1379 before).
+  - 12 new tests in `tests/section-four-both-lists.test.js`: the switch; order and allowlist for either starting list; writer text; a My Stocks brief keeping a Watchlist stock; the reason check across both lists; move-only stocks; one list empty (either brief); both lists empty; the both-lists empty wording; a stock in neither list trimmed; 16 stocks (8 + 8) in order with 12 reasons cut and 4 kept, plus the request-size bound; switch off restoring the starting-list behaviour.
+  - 54 existing tests pin the starting-list rule through their fixtures (a Watchlist stock with no article beside prose about "the list", the old writer text and request size, other-list trims). They run with the switch off, by name, through `tests/fixtures/section-four-switch.js`. Five fixture builders now take the empty-list text from the switch (`tests/fixtures/section-four-empty.js`).
+  - Syntax check 59 files (`api/*.js`, `lib/*.js`), no FAIL. `git diff --check` clean.
+- **Proof still to do (Prompt 2):** byte-identical against `ad61dd6` with the switch off (9C.1 kit + `compare.js`); the full replay with the switch on and off; up to 8 planted mistakes with the same-answer script; before and after Section 4 on the saved packages.
+- **Supersedes:** the starting-list-only Section 4 rule ("Section 4 covers only the list that initiated generation", and "Section 4 covers only the initiating list" in the must-not-change notes of Steps 8I, 8U.7, 9B and 21D.1). Section 4 now covers both lists while the switch is on. The rest of those entries is kept.

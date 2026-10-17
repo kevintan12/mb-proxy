@@ -1,4 +1,25 @@
-const test = require('node:test');
+const {startingListTests} = require('./fixtures/section-four-switch');
+// Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
+const test = startingListTests(require('node:test'), [
+  "Step 9B: drops non-initiating Section 4 benchmark telemetry and keeps the section text",
+  "preserves the deterministic empty initiating-list statement",
+  "T4 completed CLOSED, WEEKEND and HOLIDAY sections survive style-only jargon unchanged",
+  "CLOSED, WEEKEND and HOLIDAY retain completed broad-market depth across Sections 2, 3, 6 and 7",
+  "Section 6 keeps risk-only output while localizing unsupported or generic opportunities",
+  "rich and thin fixtures survive the complete final invocation boundary without network access",
+  "Step 8O Section 3 trims a portfolio reference and keeps the section with its focus references",
+  "Step 8O Section 3 is still localized when no focus reference remains after trimming",
+  "Step 8R.A Section 3 trims an unlinked stock telemetry ref alongside a Step 8O evidence trim",
+  "Step 8R.A Section 3 trims an unlinked stock telemetry ref and keeps the section",
+  "Section 4 provider input lists only the selected portfolio refs, including its upcoming events",
+  "Section 4 accepts selected refs and (Step 9B) trims refs from the other list or from outside both lists",
+  "a repaired broad-market focus package preserves valid causal and initiating-list sections",
+  "localizes uncited driver causality and (Step 9B) trims broad-market evidence leaking into Section 4 independently",
+  "Step 8U.1: a completed driver claim naming only a day or date survives, while a genuine uncatalyzed cause still localizes",
+  "Step 8U.3: completed CLOSED, WEEKEND and HOLIDAY Section 2 drops only the uncatalyzed causal sentence",
+  "Step 8U.3: weekend with a failed CNBC recap and only post-close news keeps descriptive drivers and drops the causal sentence",
+  "Step 8U.4: completed-session duplicate telemetry refs, uncertainties and gaps are canonicalized, not only in active sessions"
+]);
 const assert = require('node:assert/strict');
 const {
   validateClaudeAnalysisInput,

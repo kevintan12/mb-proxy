@@ -1,5 +1,12 @@
-const test = require('node:test');
+const {startingListTests} = require('./fixtures/section-four-switch');
+// Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
+const test = startingListTests(require('node:test'), [
+  "limits Section 4 references to the initiating list without changing portfolio membership",
+  "allows only initiating-list upcoming-event evidence in Section 4",
+  "requires the deterministic empty-list Section 4 statement without downgrade or substitution"
+]);
 const assert = require('node:assert/strict');
+const {emptySectionFour} = require('./fixtures/section-four-empty');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
@@ -178,7 +185,7 @@ function sections({content = 'Supported analysis.', evidenceRefs = ['e1'], telem
   return REPORT_SECTION_NAMES.map((name, index) => ({
     name,
     content: index === REPORT_SECTION_NAMES.length - 1 ? null
-      : index === 3 ? EMPTY_INITIATING_LIST_CONTENT[initiatingList]
+      : index === 3 ? emptySectionFour(initiatingList)
         : content === null ? null : index === 2 ? 'Supported Technology analysis.' : content,
     evidenceRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 3 ? [] : evidenceRefs.slice(),
     telemetryRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 3 ? [] : telemetryRefs.slice(),

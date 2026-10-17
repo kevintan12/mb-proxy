@@ -17,6 +17,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const {emptySectionFour} = require('./fixtures/section-four-empty');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
@@ -184,7 +185,7 @@ function marketInput(market) {
 function marketOutput(input, duplicateTelemetry = false) {
   const sections = REPORT_SECTION_NAMES.map((name, index) => ({
     name,
-    content: index === 7 ? null : index === 3 ? EMPTY_INITIATING_LIST_CONTENT.myStocks
+    content: index === 7 ? null : index === 3 ? emptySectionFour()
       : index === 2 ? 'Technology shares were broadly supported.' : 'Readings remained stable overall.',
     evidenceRefs: index === 7 || index === 3 ? [] : ['e1'],
     telemetryRefs: index === 7 || index === 3 ? [] : (index === 4 && duplicateTelemetry ? ['t1', 't1'] : ['t1']),

@@ -4,7 +4,12 @@
 // sectionFourCauseCheckEnabled (default on). Off gives the 3d5f595 behaviour.
 'use strict';
 
-const test = require('node:test');
+const {startingListTests} = require('./fixtures/section-four-switch');
+// Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
+const test = startingListTests(require('node:test'), [
+  "Step 21D.1: in every state a Section 4 with only unsupported reasons is emptied as before",
+  "Step 21D.1: in every state a supported reason and the empty-list statement are unchanged"
+]);
 const assert = require('node:assert/strict');
 
 const {splitReportSentences, EMPTY_INITIATING_LIST_CONTENT} = require('../lib/claude-analysis-contract');
