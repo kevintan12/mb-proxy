@@ -1018,3 +1018,48 @@ test('Step 9F.2e.5 generalSlotCapacity: Yahoo slots plus CNBC slots passed on', 
     {general: 7, spare: 3, total: 10});
   assert.throws(() => generalSlotCapacity({sourceId: 'xx.unknown', settings}), TypeError);
 });
+
+// Step 9F.6d Build A (Kevin, 18 Oct 2026): CNBC 3 general slots, Yahoo 7 plus
+// CNBC's unused ones (total 10). CNBC's admitted articles are never slots Yahoo
+// can take: only what CNBC left unused passes on.
+test('Step 9F.6d Build A generalSlotCapacity: no context gives exactly the 9F.2e.5 rows', () => {
+  for (const [yahoo, cnbc, spilloverEnabled, sparePerSource, expected] of CAPACITY_ROWS) {
+    const settings = {slotsBySource: {[YAHOO]: yahoo, [CNBC]: cnbc}, spilloverEnabled, sparePerSource};
+    for (const context of [{}, {readSources: {}}, {pendingSources: []}, {readSources: {}, pendingSources: []}]) {
+      assert.deepEqual({...generalSlotCapacity({sourceId: YAHOO, settings, ...context})}, expected,
+        JSON.stringify([yahoo, cnbc, spilloverEnabled, sparePerSource, context]));
+    }
+  }
+});
+
+test('Step 9F.6d Build A generalSlotCapacity: CNBC read first, then Yahoo gets only the unused CNBC slots', () => {
+  const settings = selectionSettings({env: {}});
+  // CNBC first, Yahoo still to read (counts as full): 3 general, no spare.
+  assert.deepEqual({...generalSlotCapacity({sourceId: CNBC, settings, pendingSources: [YAHOO]})},
+    {general: 3, spare: 0, total: 3});
+  const yahooAfter = admitted => ({...generalSlotCapacity({sourceId: YAHOO, settings, readSources: {[CNBC]: admitted}})});
+  assert.deepEqual(yahooAfter(3), {general: 7, spare: 0, total: 7});
+  assert.deepEqual(yahooAfter(2), {general: 7, spare: 1, total: 8});
+  assert.deepEqual(yahooAfter(1), {general: 7, spare: 2, total: 9});
+  assert.deepEqual(yahooAfter(0), {general: 7, spare: 3, total: 10});
+  // Spill-over off: Yahoo stays at its own 7 whatever CNBC admits.
+  const noSpill = {...settings, spilloverEnabled: false};
+  for (const admitted of [0, 1, 3]) {
+    assert.deepEqual({...generalSlotCapacity({sourceId: YAHOO, settings: noSpill, readSources: {[CNBC]: admitted}})},
+      {general: 7, spare: 0, total: 7});
+  }
+  // The spare cap still holds: spare 1 means at most one CNBC slot passes on.
+  assert.deepEqual({...generalSlotCapacity({sourceId: YAHOO, settings: {...settings, sparePerSource: 1},
+    readSources: {[CNBC]: 0}})}, {general: 7, spare: 1, total: 8});
+});
+
+test('Step 9F.6d Build A generalSlotCapacity: bad context is refused', () => {
+  const settings = selectionSettings({env: {}});
+  for (const context of [
+    {readSources: {[YAHOO]: 1}}, {readSources: {'xx.unknown': 1}}, {readSources: {[CNBC]: -1}},
+    {readSources: {[CNBC]: 1.5}}, {readSources: []}, {pendingSources: [YAHOO]}, {pendingSources: ['xx.unknown']},
+    {pendingSources: {}}, {readSources: {[CNBC]: 1}, pendingSources: [CNBC]}
+  ]) {
+    assert.throws(() => generalSlotCapacity({sourceId: YAHOO, settings, ...context}), TypeError, JSON.stringify(context));
+  }
+});

@@ -13,6 +13,7 @@ const {
   createYahooCurrentNewsArticleContentAcquisitionService
 } = require('../lib/yahoo-current-news-article-content-acquisition');
 const {createCnbcArticleContentAcquisitionService} = require('../lib/cnbc-article-content-acquisition');
+const {createCnbcRssSource} = require('../lib/sources/cnbc-rss');
 
 const KB = 1024;
 const ARTICLE_BYTES = readingSettings({market: 'US', env: {}}).articleKb * KB;
@@ -64,6 +65,18 @@ const READERS = [
     create: fetchImpl => {
       const service = createCnbcArticleContentAcquisitionService({fetchImpl, env: {}});
       return (url, headline) => service.readPage({url, headline});
+    }
+  },
+  // Step 9F.6d Build A: the CNBC source object itself, as the shared reader
+  // calls it -- readPage(url, {headline}) handed on to the CNBC page reader.
+  {
+    name: 'CNBC source object',
+    pageUrl: slug => `https://www.cnbc.com/2026/09/29/${slug}.html`,
+    page: jsonLdPage,
+    create: fetchImpl => {
+      const pageReader = createCnbcArticleContentAcquisitionService({fetchImpl, env: {}});
+      const source = createCnbcRssSource({fetchImpl, env: {}, pageReader});
+      return (url, headline) => source.readPage(url, {headline});
     }
   }
 ];

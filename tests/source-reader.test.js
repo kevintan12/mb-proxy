@@ -869,3 +869,255 @@ test('Step 9F.2d.3 shared reader: portfolio slots off reads exactly as before', 
   assert.deepEqual(JSON.parse(JSON.stringify(sourceLimits(YAHOO_NEWS_SOURCE_ID,
     {env: {ARTICLE_SLOTS_ENABLED: 'off', PORTFOLIO_SLOTS: '9'}}))).portfolioSlots, {slots: 4, firstPassPerCompany: 1});
 });
+
+// --- Step 9F.6d Build A: CNBC's limits row, log names and page reader, run end
+// to end through the shared reader on made-up lists and pages. Nothing in the
+// pipeline reads CNBC yet (Build B); these tests call the pieces directly.
+const {createCnbcRssSource, CNBC_RSS_SOURCE_ID, CNBC_RSS_LIST_URL_PREFIX} = require('../lib/sources/cnbc-rss');
+const {createCnbcArticleContentAcquisitionService} = require('../lib/cnbc-article-content-acquisition');
+const {sourceStageNames} = require('../lib/source-audit');
+
+const CNBC_LIST_IDS = ['100003114', '20910258', '10000664', '15839069', '15839135', '19854910', '10001147'];
+const cnbcUrl = slug => `https://www.cnbc.com/2026/09/28/${slug}.html`;
+const rfc822 = ms => new Date(ms).toUTCString();
+
+function cnbcListItem(slug, {title = `Made up CNBC story ${slug}`, listedAt = LAST_CLOSE, link = cnbcUrl(slug),
+  type = 'cnbcnewsstory'} = {}) {
+  return `<item><link>${link}</link><guid isPermaLink="false">id-${slug}</guid>`
+    + `<metadata:type>${type}</metadata:type><metadata:id>id-${slug}</metadata:id>`
+    + `<metadata:sponsored>false</metadata:sponsored><title>${title}</title>`
+    + `<pubDate>${rfc822(listedAt)}</pubDate></item>`;
+}
+
+function cnbcList(items) {
+  return '<?xml version="1.0" encoding="UTF-8"?>'
+    + '<rss xmlns:metadata="http://search.cnbc.com/rss/2.0/modules/siteContentMetadata" version="2.0">'
+    + `<channel><title>Made up list</title>${items.join('')}</channel></rss>`;
+}
+
+function cnbcPage({headline, url, publishedAt}) {
+  const node = {'@context': 'https://schema.org', '@type': 'NewsArticle', headline, url,
+    datePublished: publishedAt, articleBody: `${headline}. Made up body text about widgets.`};
+  return `<html><head><script type="application/ld+json">${JSON.stringify(node)}</script></head>`
+    + '<body><p>Page chrome.</p></body></html>';
+}
+
+function cnbcResponse(body, {status = 200, type = 'text/html; charset=utf-8', url} = {}) {
+  return {ok: status >= 200 && status < 300, status, url,
+    headers: {get: name => (name.toLowerCase() === 'content-type' ? type : null)}, text: async () => body};
+}
+
+// Two lists with stories, five empty. `pages` maps a slug to 'OK', 'NOT_FOUND'
+// or 'BUSY_ONCE' (429, then fine). The first list also holds a movers page, an
+// excluded family and a story listed before the window; the second repeats the
+// first story (a cross-list duplicate).
+function cnbcFixture(pages) {
+  const slugs = Object.keys(pages);
+  const lists = {
+    100003114: cnbcList([
+      cnbcListItem('stocks-making-the-biggest-moves-midday-made-up', {title: 'Stocks making the biggest moves midday'}),
+      cnbcListItem('select-made-up', {link: 'https://www.cnbc.com/select/made-up-guide.html'}),
+      cnbcListItem('old-story', {listedAt: WINDOW_START - 3600000}),
+      ...slugs.map((slug, index) => cnbcListItem(slug, {listedAt: LAST_CLOSE - index * 60000}))
+    ]),
+    20910258: cnbcList([cnbcListItem(slugs[0])])
+  };
+  const calls = [];
+  const busy = new Set();
+  const fetchImpl = async url => {
+    calls.push(url);
+    if (url.startsWith(CNBC_RSS_LIST_URL_PREFIX)) {
+      const id = url.slice(CNBC_RSS_LIST_URL_PREFIX.length);
+      return cnbcResponse(lists[id] || cnbcList([]), {type: 'application/rss+xml'});
+    }
+    const slug = slugs.find(key => cnbcUrl(key) === url);
+    const kind = pages[slug];
+    if (kind === 'NOT_FOUND') return cnbcResponse('', {status: 404, url});
+    if (kind === 'BUSY_ONCE' && !busy.has(slug)) {
+      busy.add(slug);
+      return cnbcResponse('', {status: 429, url});
+    }
+    return cnbcResponse(cnbcPage({headline: `Made up CNBC story ${slug}`, url,
+      publishedAt: iso(LAST_CLOSE - 3600000)}), {url});
+  };
+  return {fetchImpl, calls};
+}
+
+function cnbcSource(fetchImpl) {
+  const pageReader = createCnbcArticleContentAcquisitionService({fetchImpl, env: {}});
+  return createCnbcRssSource({fetchImpl, env: {}, pageReader});
+}
+
+function cnbcDecisions(events) {
+  return Object.fromEntries(events.filter(event => event.stage === 'sourceNewsCandidateAudit')
+    .flatMap(event => event.candidates)
+    .map(entry => [entry.slug.replace('.html', ''), entry]));
+}
+
+const cnbcLimits = () => sourceLimits(CNBC_RSS_SOURCE_ID,
+  {env: {}, slotContext: {pendingSources: [YAHOO_NEWS_SOURCE_ID]}});
+
+test('Step 9F.6d Build A: CNBC limits row and neutral log names; Yahoo rows unchanged', () => {
+  assert.deepEqual({...SOURCE_LIMIT_SETTINGS[YAHOO_NEWS_SOURCE_ID]}, {
+    readingBudgetSeconds: 'yahooReadingBudgetSeconds', maxArticleAttempts: 'yahooMaxArticleAttempts',
+    maxAdmittedArticles: 'yahooMaxAdmittedArticles', initialCandidateAttempts: 'yahooInitialCandidateAttempts',
+    maxArticleAttemptsWithSlots: 'yahooMaxArticleAttemptsPlanned'
+  });
+  assert.deepEqual({...SOURCE_LIMIT_SETTINGS[CNBC_RSS_SOURCE_ID]}, {
+    readingBudgetSeconds: 'cnbcReadingBudgetSeconds', maxArticleAttempts: 'cnbcMaxArticleAttempts',
+    maxAdmittedArticles: 'cnbcSlots', initialCandidateAttempts: 'cnbcInitialCandidateAttempts',
+    maxArticleAttemptsWithSlots: 'cnbcMaxArticleAttempts', portfolioSlots: false
+  });
+  assert.deepEqual({...sourceStageNames(YAHOO_NEWS_SOURCE_ID)}, {
+    summary: 'activeYahooAcquisition', audit: 'activeYahooCandidateAudit',
+    listingTiming: 'yahooLatestNewsDiscoveryMs', downloadTiming: 'yahooCurrentNewsArticleAcquisitionMs'
+  });
+  assert.deepEqual({...sourceStageNames(CNBC_RSS_SOURCE_ID)}, {
+    summary: 'sourceNewsReading', audit: 'sourceNewsCandidateAudit',
+    listingTiming: 'cnbcNewsResearchMs', downloadTiming: 'cnbcNewsResearchMs', summarySourceId: true
+  });
+});
+
+test('Step 9F.6d Build A: CNBC limits -- 3 general slots with Yahoo still to read, 6 attempts, no portfolio slots', () => {
+  const pending = {slotContext: {pendingSources: [YAHOO_NEWS_SOURCE_ID]}};
+  assert.deepEqual(JSON.parse(JSON.stringify(cnbcLimits())), {
+    maxArticleAttempts: 6, maxAdmittedArticles: 3, initialCandidateAttempts: 3,
+    articleSlots: {generalSlots: 3, spareSlots: 0}
+  });
+  assert.equal(settingValue(SOURCE_LIMIT_SETTINGS[CNBC_RSS_SOURCE_ID].readingBudgetSeconds, {env: {}}), 20);
+  // Slots off: CNBC's general slots are its admitted cap; still no portfolio slots.
+  assert.deepEqual(JSON.parse(JSON.stringify(sourceLimits(CNBC_RSS_SOURCE_ID,
+    {env: {ARTICLE_SLOTS_ENABLED: 'off'}, ...pending}))), {
+    maxArticleAttempts: 6, maxAdmittedArticles: 3, initialCandidateAttempts: 3
+  });
+  assert.equal(sourceLimits(CNBC_RSS_SOURCE_ID, {env: {CNBC_MAX_ARTICLE_ATTEMPTS: '99'}, ...pending})
+    .maxArticleAttempts, 12);
+  assert.equal(sourceLimits(CNBC_RSS_SOURCE_ID, {env: {CNBC_SLOTS: '2'}, ...pending}).maxAdmittedArticles, 2);
+});
+
+test('Step 9F.6d Build A: Yahoo limits -- no slot context equals today; CNBC already read decides the spare slots', () => {
+  const today = JSON.parse(JSON.stringify(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {}})));
+  assert.deepEqual(today, {
+    maxArticleAttempts: 18, maxAdmittedArticles: 10, initialCandidateAttempts: 5,
+    articleSlots: {generalSlots: 7, spareSlots: 3}, portfolioSlots: {slots: 2, firstPassPerCompany: 1}
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(sourceLimits(YAHOO_NEWS_SOURCE_ID, {env: {}, slotContext: {}}))), today);
+  const yahooAfter = admitted => sourceLimits(YAHOO_NEWS_SOURCE_ID,
+    {env: {}, slotContext: {readSources: {[CNBC_RSS_SOURCE_ID]: admitted}}});
+  assert.equal(yahooAfter(0).maxAdmittedArticles, 10);
+  assert.equal(yahooAfter(1).maxAdmittedArticles, 9);
+  assert.equal(yahooAfter(3).maxAdmittedArticles, 7);
+  assert.deepEqual({...yahooAfter(3).articleSlots}, {generalSlots: 7, spareSlots: 0});
+  assert.deepEqual({...yahooAfter(3).portfolioSlots}, {slots: 2, firstPassPerCompany: 1});
+});
+
+test('Step 9F.6d Build A: the shared reader reads CNBC end to end on made-up lists and pages', async () => {
+  const pages = {
+    'made-up-alpha': 'OK', 'made-up-busy': 'BUSY_ONCE', 'made-up-missing': 'NOT_FOUND',
+    'stock-market-today-live-updates': 'OK', 'made-up-beta': 'OK', 'made-up-gamma': 'OK', 'made-up-delta': 'OK'
+  };
+  const {fetchImpl, calls} = cnbcFixture(pages);
+  const recap = createEvidenceItem({
+    sourceId: 'us.cnbc', market: 'US', evidenceCategory: 'news', title: 'Made up CNBC recap',
+    summary: 'Made up recap text.', canonicalUrl: cnbcUrl('stock-market-today-live-updates'),
+    publishedAt: iso(LAST_CLOSE + 600000), symbols: []
+  });
+  const {result, events, timings, acquiredItems} = await runReader(cnbcSource(fetchImpl), {
+    mode: 'COMPLETED',
+    horizonFor: publishedAt => publishedAt > LAST_CLOSE ? 'SUBSEQUENT_DEVELOPMENT' : 'COMPLETED_SESSION',
+    requiredItems: [recap],
+    limits: cnbcLimits()
+  });
+
+  // The 7 fixed lists, read once each.
+  const listIds = calls.filter(url => url.startsWith(CNBC_RSS_LIST_URL_PREFIX))
+    .map(url => url.slice(CNBC_RSS_LIST_URL_PREFIX.length));
+  assert.deepEqual(listIds.sort(), [...CNBC_LIST_IDS].sort());
+  const summary = events[0];
+  assert.equal(summary, result.stats);
+  assert.deepEqual(Object.keys(summary).slice(0, 3), ['stage', 'sourceId', 'outcome']);
+  assert.equal(summary.stage, 'sourceNewsReading');
+  assert.equal(summary.sourceId, 'us.cnbc');
+  // The finder's own outcome sits in its place as listingOutcome, never over the reading outcome.
+  assert.equal(summary.outcome, 'SUCCESS');
+  assert.equal(summary.listingOutcome, 'OK');
+  // The finder dropped the movers page, the excluded family, the item before
+  // the window and the cross-list duplicate before any download.
+  assert.equal(summary.moversDroppedCount, 1);
+  assert.equal(summary.excludedFamilyCount, 1);
+  assert.equal(summary.beforeWindowDroppedCount, 1);
+  assert.equal(summary.duplicateCount, 1);
+  assert.equal(summary.latestNewsCandidateCount, 7);
+  assert.equal(summary.maxAdmittedArticles, 3);
+  assert.equal(summary.maxArticleAttempts, 6);
+  assert.equal('portfolioSlots' in summary, false);
+
+  const byName = cnbcDecisions(events);
+  assert.equal(byName['made-up-alpha'].decision, 'ADMITTED');
+  assert.equal(byName['made-up-busy'].decision, 'ADMITTED');
+  assert.equal(byName['made-up-busy'].attempts, 2);
+  assert.equal(byName['made-up-missing'].decision, 'FETCH_FAILED');
+  assert.equal(byName['made-up-missing'].attempts, 1);
+  // Today's recap is on the list too: a duplicate, never a second item.
+  assert.equal(byName['stock-market-today-live-updates'].decision, 'REJECTED_DUPLICATE');
+  assert.equal(byName['made-up-beta'].decision, 'ADMITTED');
+  assert.equal(byName['made-up-gamma'].decision, 'SKIPPED_MAX_ADMITTED');
+  assert.equal(byName['made-up-delta'].decision, 'SKIPPED_MAX_ADMITTED');
+  assert.ok(events.filter(event => event.stage === 'sourceNewsCandidateAudit')
+    .every(event => event.sourceId === 'us.cnbc'));
+
+  assert.equal(acquiredItems.length, 3);
+  for (const item of acquiredItems) {
+    assert.equal(item.sourceId, 'us.cnbc');
+    assert.equal(item.provenance.publisher, 'CNBC');
+  }
+  assert.deepEqual(result.horizons, ['COMPLETED_SESSION', 'COMPLETED_SESSION', 'COMPLETED_SESSION']);
+  assert.ok(result.meta.every(row => row.slot === 'GENERAL'));
+  // Both CNBC timings go into the existing CNBC total; no Yahoo timing name.
+  assert.ok(timings.length > 0 && timings.every(name => name === 'cnbcNewsResearchMs'));
+  // No paid call: every request went to a CNBC list or a CNBC page.
+  assert.ok(calls.every(url => url.startsWith(CNBC_RSS_LIST_URL_PREFIX) || url.startsWith('https://www.cnbc.com/')));
+});
+
+test('Step 9F.6d Build A: the CNBC attempt cap (6) stops the reading', async () => {
+  const pages = Object.fromEntries(Array.from({length: 8}, (_, index) => [`made-up-gone-${index + 1}`, 'NOT_FOUND']));
+  const {fetchImpl} = cnbcFixture(pages);
+  const {events} = await runReader(cnbcSource(fetchImpl), {mode: 'COMPLETED',
+    horizonFor: () => 'COMPLETED_SESSION', limits: cnbcLimits()});
+  assert.equal(events[0].articleFetchAttemptCount, 6);
+  assert.equal(events[0].outcome, 'NOT_FOUND');
+  const skipped = Object.values(cnbcDecisions(events)).filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS');
+  assert.equal(skipped.length, 2);
+});
+
+test('Step 9F.6d Build A: CNBC lists all blocked, or no page reader, give results and never a throw', async () => {
+  const blocked = await runReader(createCnbcRssSource({fetchImpl: async () => cnbcResponse('', {status: 403}), env: {}}),
+    {mode: 'COMPLETED', horizonFor: () => 'COMPLETED_SESSION', limits: cnbcLimits()});
+  assert.equal(blocked.events[0].outcome, 'NOT_FOUND');
+  assert.equal(blocked.events[0].listingOutcome, 'ALL_LISTS_FAILED');
+  assert.equal(blocked.events[0].latestNewsCandidateCount, 0);
+  assert.equal(blocked.events[0].lists.length, 7);
+  assert.ok(blocked.events[0].lists.every(list => list.outcome === 'HTTP_FAILURE' && list.httpStatus === 403));
+  assert.equal(blocked.acquiredItems.length, 0);
+
+  const {fetchImpl} = cnbcFixture({'made-up-alpha': 'OK'});
+  const noReader = createCnbcRssSource({fetchImpl, env: {}});
+  assert.deepEqual({...await noReader.readPage(cnbcUrl('made-up-alpha'), {headline: 'x'})},
+    {ok: false, type: 'DISABLED', articleContent: null});
+  const read = await runReader(noReader, {mode: 'COMPLETED', horizonFor: () => 'COMPLETED_SESSION', limits: cnbcLimits()});
+  assert.equal(cnbcDecisions(read.events)['made-up-alpha'].decision, 'EXTRACTION_FAILED');
+  assert.equal(cnbcDecisions(read.events)['made-up-alpha'].failureType, 'DISABLED');
+
+  const throwing = createCnbcRssSource({fetchImpl, env: {},
+    pageReader: {readPage: async () => { throw new Error('made up'); }}});
+  const thrown = await throwing.readPage(cnbcUrl('made-up-alpha'), {headline: 'x'});
+  assert.equal(thrown.ok, false);
+  assert.equal(thrown.type, 'NO_USABLE_ARTICLE');
+});
+
+test('Step 9F.6d Build A: the Yahoo reading summary keeps its fields and order (no source id)', async () => {
+  const {events} = await runReader(fakeSource({a: 'OK'}).source);
+  assert.equal(events[0].stage, 'activeYahooAcquisition');
+  assert.equal('sourceId' in events[0], false);
+  assert.equal(Object.keys(events[0])[1], 'outcome');
+});

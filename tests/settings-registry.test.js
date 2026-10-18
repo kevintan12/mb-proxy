@@ -335,3 +335,21 @@ test('Step 9F.2e.6 settings registry: articleTextBudgetEnabled and the now-wired
   assert.equal(SETTINGS_REGISTRY.articleTextBudgetBytesPlanned.wired, true);
   assert.equal(SETTINGS_REGISTRY.nonArticleOverheadBytesPlanned.wired, false);
 });
+
+// Step 9F.6d Build A: CNBC's shared-reader rows. Nothing reads CNBC through the
+// shared reader yet, so these change no report.
+test('Step 9F.6d Build A settings registry: CNBC reading budget, attempt cap, admitted cap, first pass', () => {
+  const budget = SETTINGS_REGISTRY.cnbcReadingBudgetSeconds;
+  assert.deepEqual([budget.default, budget.min, budget.max, budget.admin, budget.envVar, budget.wired],
+    [20, 10, 60, 'Admin', 'CNBC_READING_BUDGET_SECONDS', true]);
+  const attempts = SETTINGS_REGISTRY.cnbcMaxArticleAttempts;
+  assert.deepEqual([attempts.default, attempts.min, attempts.max, attempts.admin, attempts.envVar, attempts.wired],
+    [6, 3, 12, 'Admin', 'CNBC_MAX_ARTICLE_ATTEMPTS', true]);
+  const slots = SETTINGS_REGISTRY.cnbcSlots;
+  assert.deepEqual([slots.default, slots.min, slots.max, slots.admin], [3, 0, 6, 'Admin']);
+  const firstPass = SETTINGS_REGISTRY.cnbcInitialCandidateAttempts;
+  assert.deepEqual([firstPass.default, firstPass.admin, firstPass.wired], [3, 'Fixed', true]);
+  assert.equal(settingValue('cnbcReadingBudgetSeconds', {env: {CNBC_READING_BUDGET_SECONDS: '5'}}), 10);
+  assert.equal(settingValue('cnbcReadingBudgetSeconds', {env: {CNBC_READING_BUDGET_SECONDS: '999'}}), 60);
+  assert.equal(settingValue('cnbcReadingBudgetSeconds', {env: {}}), 20);
+});

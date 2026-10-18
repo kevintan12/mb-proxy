@@ -1902,3 +1902,87 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Supersedes:**
   - The Step 9F.6b entry's note that "Step 9F.6c must supersede" the test forbidding "RSS" in the old CNBC runtime (`tests/cnbc-news-research-runtime.test.js`). This step does not touch that runtime, so the test stays as it is; it is superseded when 9F.6f retires that runtime.
   - The Step 9F.6b entry's "Could not share" note on the CNBC page-reader hand-off: the hand-off shape now exists, and only the connection waits for 9F.6d.
+
+## Step 9F.6d Build A — CNBC shared-reader groundwork (not connected, zero report change) (repo: mb-proxy)
+
+- **Date:** 2026-10-18 · **Branch:** step-9f6d-cnbc-completed (from `17e4ef1`) · **Status:** IMPLEMENTED, tests passing; not yet committed. Not connected: nothing reads CNBC through the shared reader until Build B, so every report, log line and cost is unchanged.
+- **Why:** in completed states CNBC news still comes from the paid AI search (about 6 US cents a run; both searches failed with "too many uses" on the 17 Oct Weekend run). One method for every source (Kevin, 10 Oct 2026). Step 9F.6d has two builds: A adds the shared plumbing and proves it changes nothing; B connects CNBC in Closed, Weekend and Holiday states.
+- **Kevin's decisions (18 Oct 2026), with reasons:**
+  1. **Slots:** CNBC gets 3 general slots; Yahoo gets 7 plus CNBC's unused slots (total 10). Reason: one shared method, the same total as today.
+  2. **CNBC's quota is protected:** CNBC's admitted articles (at most 3, ranked by the same shared score and rules as Yahoo) are never pushed out by Yahoo. Only the slots CNBC leaves unused pass to Yahoo. Reason: CNBC must keep its own quota. Governs Build B; Build A's slot sum is built for it.
+  3. **Classifier failure:** CNBC news is kept on a total classifier failure, like Yahoo (Build B).
+  4. **Fallback:** the paid CNBC search runs only when all 7 CNBC lists failed (Build B).
+  5. **Two builds:** this is Build A.
+  6. **Budget and names:** CNBC reading budget 20 s (Admin). Neutral CNBC log names: summary `sourceNewsReading` (with the source id `us.cnbc` in the line), audit `sourceNewsCandidateAudit`; both CNBC timings go into the existing `cnbcNewsResearchMs` total. Yahoo's log names do not change.
+- **What changed:**
+  1. `lib/sources/cnbc-rss.js`: the CNBC source gains `readPage(url, {headline})`, which hands the shared reader's call to the Step 9F.6c page reader's one bundled input (`readPage({url, headline})`). The CNBC article service is passed in as `pageReader`, not required, so the finder file still loads no CNBC acquisition module. With no page reader it returns the shared `DISABLED` failure; a page reader that throws gives the shared `NO_USABLE_ARTICLE` failure. Never throws. The finder is unchanged.
+  2. `lib/source-reader.js`:
+     - a CNBC limits row: budget `cnbcReadingBudgetSeconds`, attempts `cnbcMaxArticleAttempts` (slots on or off), admitted cap with slots off `cnbcSlots`, first pass `cnbcInitialCandidateAttempts`, and `portfolioSlots: false` (the 2 portfolio slots stay Yahoo's);
+     - `sourceLimits` takes an optional slot context (sources already read, sources still to read), passed to the slot sum; left out, the result is today's;
+     - the reading summary carries the source id right after the stage name, only for a source whose log names ask for it (CNBC);
+     - **two fixes found by the new end-to-end CNBC test** (both would have broken Build B; neither touches Yahoo's behaviour):
+       - **(a) the publisher field.** The reader passed every page's publisher name into the evidence item, but the evidence rules allow an editorial publisher for Yahoo news only, so every CNBC article would have been rejected. The reader now asks the evidence rule (`permitsEditorialPublisher`, moved unchanged into an export of `lib/evidence-items.js`). Yahoo news still passes its publisher. CNBC's publisher comes from its source registry entry ("CNBC").
+       - **(b) the outcome field.** A source's listing count named like one of the reader's own summary fields (CNBC's finder reports `outcome`) used to overwrite the reading outcome. It is now written in the same place as `listing` + its name (`listingOutcome`). Yahoo's listing counts use none of those names, so its line is unchanged.
+  3. `lib/source-audit.js`: a CNBC log-names row (above) with `summarySourceId: true`. The Yahoo row is untouched.
+  4. `lib/article-selection.js`: `generalSlotCapacity` accepts `readSources` ({source: admitted}) and `pendingSources`. A source already read counts by what it actually admitted; a source still to read counts as full; any other source brings nothing (today's rule). Both default to empty, which gives exactly the Step 9F.2e.5 result. CNBC read first, with Yahoo still to read, gets 3 general and no spare; Yahoo after CNBC admits N gets 7 + (3 − N), within `spareAdmits`.
+  5. `lib/evidence-items.js`: the editorial-publisher test is now the exported function `permitsEditorialPublisher` (same test, same result).
+  6. `lib/settings-registry.js`: the new and changed rows below.
+- **Numbers:**
+
+  | Name | Default | Safe range | Admin/Fixed | Env |
+  |---|---|---|---|---|
+  | `cnbcReadingBudgetSeconds` (new) | 20 | 10–60 | Admin | `CNBC_READING_BUDGET_SECONDS` |
+  | `cnbcMaxArticleAttempts` (existing; now wired) | 6 | 3–12 | Admin | `CNBC_MAX_ARTICLE_ATTEMPTS` |
+  | `cnbcSlots` (existing; also the admitted cap with slots off) | 3 | 0–6 | Admin | `CNBC_SLOTS` |
+  | `cnbcInitialCandidateAttempts` (new) | 3 | — | Fixed | — |
+
+  - **Reused unchanged:** download attempts 3, retry pauses, page time limit 4 s, 16 KB article text, list time limit 4 s, 40 candidates, spare 3.
+  - **No switch in Build A;** Build B adds it.
+- **Tests:** full suite 1524 tests: 1523 pass, 0 fail, 1 to-do (1504 before; 20 new). The to-do is the known Yahoo header gap from Step 9F.6c. No existing test was edited; the contract test's reader list gained a third entry.
+  - `tests/source-reader.test.js` (7 new):
+    - the CNBC limits row and neutral log names, with the Yahoo rows unchanged;
+    - CNBC limits (3 general slots with Yahoo still to read; 6 attempts; no portfolio slots; slots off; clamps);
+    - Yahoo limits with no context equal today, and CNBC admitted 0/1/3 gives Yahoo 10/9/7;
+    - the shared reader runs CNBC end to end on made-up lists and pages. It checks the 7 lists, the finder drops, `sourceId` and `listingOutcome` in the summary, a 429 then success retried, a 404 tried once, the recap live blog rejected as a duplicate, the cap of 3, the publisher from the registry, and every timing under `cnbcNewsResearchMs`;
+    - the attempt cap of 6;
+    - all lists blocked, no page reader, and a throwing page reader;
+    - the Yahoo summary keeps its fields and order.
+  - `tests/article-selection.test.js` (3 new):
+    - no context gives exactly every 9F.2e.5 row;
+    - CNBC first, then Yahoo gets only CNBC's unused slots (spill-over off and the spare cap respected);
+    - bad context is refused.
+  - `tests/source-reader-contract.test.js`: every universal rule now also runs against the CNBC source object.
+  - `tests/settings-registry.test.js` (1 new, plus the automatic checks for the new Admin row).
+  - **Switches flipped one at a time (working tree):**
+    - portfolio slots off: 0 fail;
+    - article slots off: 1 fail;
+    - slot spill-over off: 3 fail.
+    - These are old orchestration tests that assume those switches on: "Step 9F.2e.5 article slots on: ten admitted (7 Yahoo + 3 passed on from CNBC), summary names the slots", "Step 9F.2e.5 article slots: admitted cap follows the slot settings" and "Step 9F.2d.3 portfolio slots: a Watchlist company gets a slot in a My Stocks run, then the second pass". The same tests fail the same way on `17e4ef1` with the same switch flipped, so they are not caused by this step.
+    - CNBC finder off: 0 fail. CNBC page reader off: 0 fail.
+    - All 16 switches flipped at once: 13 fail on the working tree and the same 13, by name, on `17e4ef1`. Each is an old test that pins one switch's "on" behaviour (Step 21D.2 both lists ×6, 9F.2f ×2, 9F.2e.5 ×2, and 9F.2d.3, 9F.2e.1 and 9F.2e.6 + 9F.2g), so none is caused by this step.
+- **Free replay (scratch only, not committed):** `Replay Packages\harness\compare.js` over all 14 saved packages × 6 scenarios = 84 runs, with `17e4ef1` exported read-only by `git archive`.
+  - `17e4ef1` against itself: 65 identical and 19 different. The 19 are the known "candidate pool vs audit" run-to-run differences.
+  - The working tree against `17e4ef1`: the same 65/19, and the two output files are **byte-identical**. So this step changes nothing the harness measures.
+  - Outputs: `compare-9F.6dA-old-vs-old-output.txt`, `compare-9F.6dA-new-output.txt`. Scripts: `switch-suites-9F.6dA.sh`, `cnbc-9F.6d-list-timing-probe.js`.
+  - Free list check (18 Oct 2026, this PC): all 7 lists answered 200 in 1.2 s; 210 items, 48 kept, cut to 40.
+- **Not available for the replay:** no HOLIDAY package exists. TRADING-2026-10-15 is the only Trading package besides TRADING-2026-10-17. No saved CNBC list bodies exist, so the CNBC path is proven by made-up fixtures only. Build B's live Weekend run is the first real check.
+- **Could not share:**
+  - CNBC's list reading and page parsing (source-specific by design);
+  - portfolio-slot coverage across sources (a CNBC article naming a company does not yet count as covering it for Yahoo's portfolio pass; a later step);
+  - the recap paths, which keep their own session checks.
+- **Known limits:**
+  - CNBC list items have no age label, so a CNBC candidate gets no recency points; ties fall back to list order (newest list time first). The list time is never used for the score or for admission.
+  - Today's CNBC recap also appears in the lists. The shared duplicate check rejects it after download, which costs one CNBC attempt.
+- **Must not change:**
+  - CNBC's 3-slot quota is protected (decision 2);
+  - Yahoo's log stage names, timing names and field order;
+  - the slot sum with no context gives exactly the Step 9F.2e.5 result;
+  - the list time never admits anything;
+  - `lib/reading-window.js`, `timed`/`monotonicNow`/`sleep`, every `?rev=` token and Neon are untouched;
+  - the paid-search modules, the recap modules, `lib/cnbc-article-content-acquisition.js` and `lib/cnbc-rss-probe.js` are untouched;
+  - the rules-every-source list (Step 9F.6c);
+  - the protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f` stand.
+- **Supersedes:**
+  - The Step 9F.6c entry's "CNBC's reading budget and attempt cap rows come with 9F.6d" and "CNBC's limits row and log stage names in the shared reader (9F.6d)": delivered here (Build A); the connection waits for Build B.
+  - The Step 9F.6b and 9F.6a entries' "neutral log stage names in 9F.6d": the CNBC names are set here; Yahoo keeps its names.
+  - The Step 9F.2e.5 note that CNBC "brings no articles" so its slots always pass to Yahoo: still true until Build B passes CNBC's actual admitted count.
