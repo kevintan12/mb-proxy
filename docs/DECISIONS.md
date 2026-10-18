@@ -1824,3 +1824,81 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - **The CNBC sitemap plan (Step 21A, a Master-document rule):** CNBC candidates come from the RSS lists instead of CNBC's sitemaps.
   - **The "no RSS fallback" rule (Steps 8D.7B and 8D.7G, Master-document rules):** RSS is now the planned way CNBC finds candidates, under the conditions released on 11 Oct 2026 (filter movers pages; use each page's own publish time; test from Vercel; a new file, with the existing CNBC acquisition code untouched in this step).
   - **The Step 9F.6a.1–9F.6a.3 and 9F.6a.4–9F.6a.6 entries' clauses on log stage names:** "the Yahoo stage names until 9F.6b" and "neutral names come with CNBC in 9F.6b". They now read "until 9F.6d" and "in 9F.6d" (Kevin, 18 Oct 2026). The Yahoo stage names are unchanged in this step.
+
+## Step 9F.6c — CNBC page reader for the shared source reader: shared retries, first 16 KB, publish time only, wire stories (repo: mb-proxy)
+
+- **Date:** 2026-10-18 · **Branch:** step-9f6c-cnbc-reader (from `0d477b6`) · **Status:** IMPLEMENTED, tests passing; not yet committed. Not connected: nothing calls the new reader until Step 9F.6d, so every report and its cost are unchanged.
+- **Trigger:** Kevin's 10 Oct 2026 decision (restated 18 Oct): one method for every source. Yahoo's evidence rules are the baseline, and the reading window applies to every source, including CNBC, replacing CNBC's own age rules. The protection on existing CNBC acquisition code was lifted for the page reader only, and for this step only.
+- **What changed:**
+  1. `lib/cnbc-article-content-acquisition.js` gains a fourth method, `readPage({url, headline})`, next to the three older ones (full candidate with a horizon; recap; paid-search page). Their behaviour is unchanged. Two internal helpers take a new optional "story types" input whose default is the old single type, so the older methods pass exactly what they passed before. The new method:
+     - reuses this file's extraction, time parsing and bounded body reading;
+     - reuses the shared `firstBytes` and `articleKb` (`lib/reading-window.js`, imported, not edited);
+     - downloads once with the shared failure types: TIMEOUT, RETRIEVAL_FAILURE, RESPONSE_READ_FAILURE, HTTP_FAILURE with the status, RESPONSE_TOO_LARGE, INVALID_CONTENT_TYPE, NO_USABLE_ARTICLE with the shared extraction-failure names, INVALID_INPUT, RESULT_TOO_LARGE, and DISABLED. The shared reader's retry helper decides what is retried. A redirect stays final;
+     - keeps the first 16 KB of text on a whole character instead of rejecting a long article;
+     - returns the page's own publish time, or a blank when it is missing or unreadable, so the shared reader rejects the page and counts it;
+     - returns the modified time blank when it is unreadable or earlier than the publish time, and never rejects on it;
+     - writes the address as the 9F.6b finder writes it (https cnbc.com, no query, no fragment);
+     - reads CNBC wire stories;
+     - never throws.
+  2. `lib/settings-registry.js`: a new switch row, `cnbcPageReaderAlignedEnabled`; the `pageTimeoutMs` description now also covers this read.
+  3. Tests:
+     - New `tests/cnbc-page-reader.test.js` covers CNBC's own parsing, wire stories, live blogs, the switch, the address rule, every failure type, the 1,536 KB limit, the shared size setting and the shared timeout.
+     - New `tests/source-reader-contract.test.js` holds the universal rules, run identically against Yahoo's reader and the new CNBC reader.
+     - No existing test changed.
+- **CNBC age rules the reading window supersedes, for the new reader only** (the older three methods keep them until Step 9F.6f retires them):
+  - **R1:** the publish and modified times must both fall inside a caller-supplied horizon.
+  - **R2:** a modified time earlier than the publish time rejects the page.
+  - **R3:** the recap's publish date, or its headline date, must equal the target session day.
+  - **R4:** an unreadable modified time rejects the page.
+  - In their place, the page's own publish time alone, judged by the shared reader against the reading window.
+- **Kevin's decisions (18 Oct 2026), with reasons:**
+  1. **Wire stories:** accept them when the text is on the page; with no readable text, the normal no-usable-article failure. No text is invented, and no other website is fetched. Reason: one rule for every story on a source.
+  2. **Page size limit:** 1,536 KB (Yahoo's) for the new reader; the older three keep 1,280 KB. Reason: live pages already reach about 1,140 KB.
+  3. **Live blogs:** keep today's extraction: the first usable update's text and that update's own publish time.
+  4. **Switch:** on by default, Admin, environment variable `CNBC_PAGE_READER_ALIGNED_ENABLED`, read on each call. Off: the new reader downloads nothing and answers "disabled"; old CNBC rules are not replayed inside it. With either setting, reports are identical to `0d477b6`, because nothing calls the reader yet.
+  5. **Universal source rules:** a shared conformance test and the section below. The shared reader is not changed.
+- **Wire-story result (free check, 18 Oct 2026):**
+  - 224 current list pages were checked, and 9 were wire stories. In all 9, the text sits on the same CNBC address, in the same page-state modules as CNBC's own stories; only the story type differs ("wirestory").
+  - Before: 0 of 9 readable. After: 9 of 9 readable by the new reader.
+  - A wider free run of the new reader on 40 current list candidates: 40 of 40 read; 0 publish times later than the list time; 0 blank publish times; none over 16 KB (largest 11.2 KB); 18.4 s in total, one after another.
+- **Rules every source must follow** (checked for each reader in `tests/source-reader-contract.test.js`). A new source adds only its finder and its own page parsing; everything else is shared and is not copied.
+  1. Never throw: every outcome is a result.
+  2. Return the shared success shape (source, clean address, page headline, publisher, publish time, modified time, text) or the shared failure shape (type, plus the HTTP status or the extraction reason).
+  3. Report the failure types the shared retry recognises: timeout, failed request, failed body read, HTTP failure with its status.
+  4. Let the shared retry helper retry only temporary failures (timeout, failed request, failed body read, 429, 5xx), up to the shared attempt count, with the shared pauses, and never past the reading budget. A 404, a redirect, an extraction failure or an oversize page is tried once.
+  5. Keep the first 16 KB (the shared `articleKb`) on a whole character; never reject a long article for its length. The classifier reads the first 8 KB, downstream, for every source.
+  6. A missing or unreadable publish time is a blank; the shared reader rejects the page and counts it.
+  7. The page's own publish time alone admits or rejects it, against the shared reading window. A list time or an age label never admits anything.
+  8. The modified time is carried, never judged.
+  9. Write the address clean, with no query and no fragment, so the shared duplicate check works across sources.
+  10. Make no paid call: a page read is a plain web request to the source's own pages.
+- **Universal rules the older CNBC paths still do not follow** (recap and paid-search page; both completed states only):
+  - **Article text over 8 KB is rejected, not cut:** rule 5. Retired by 9F.6f for the paid-search path. The recap stays on its own path until a later step moves it.
+  - **No retries:** rule 4. Retired by 9F.6d (completed states) and 9F.6f.
+  - **Age rules R1–R4 instead of the reading window:** rule 7. R1 and R2 retire with the paid search in 9F.6f. R3 is the recap's own session check, retired only if a later step moves the recap onto the shared reader.
+  - **Failures raised as errors, not results:** rules 1–3. Retired by 9F.6f.
+  - **Wire stories not read:** retired by 9F.6f.
+  - **Address keeps its query string:** rule 9. Retired by 9F.6f.
+- **Found while testing (not changed; Yahoo's reader was off-limits):** Yahoo's page reader throws when a response header cannot be read. The shared reader catches it as a fetch failure ("EXCEPTION") and does not retry it. The conformance test lists this as a known Yahoo gap (a to-do, not a skip). A later step should fix it in Yahoo's reader.
+- **Limits:**
+  - No new tunable number.
+  - Shared values reused: article text 16 KB (Admin, 2–32); download attempts 3 (Admin, 1–5); retry pauses 0.25 s and 0.75 s (Fixed); classifier read 8 KB (Fixed); page timeout 4,000 ms (Admin, 2,000–8,000); result cap of text plus 4 KB (Fixed).
+  - The 1,536 KB page limit and the 512-byte headline limit are Fixed constants in the reader.
+  - Worst case per page with retries: about 13 s (3 × 4 s plus 1 s of pauses). Per source: the reading budget plus at most one timeout.
+  - CNBC's reading budget and attempt cap rows come with 9F.6d.
+- **Risks:**
+  - The story-type input on the shared extraction could leak into the older methods. Mitigation: the default is the old single type, and all old CNBC tests pass unchanged.
+  - For a live blog, the time is the first update's, not the whole page's.
+  - A malformed streamed body chunk is reported as a failed body read, and so is retried.
+  - CNBC page layouts can change. The reader then fails with the normal no-usable-article failure, never with invented text.
+- **Could not share in this step:**
+  - CNBC's own page parsing (standard block, live blog, page state) and its address rule, which are source-specific by design.
+  - CNBC's limits row and log stage names in the shared reader (9F.6d).
+- **Must not change:**
+  - The three older CNBC methods and their 1,280 KB bound until 9F.6f.
+  - The 9F.6b finder (`lib/sources/cnbc-rss.js`, `lib/cnbc-rss-probe.js`), the paid CNBC search code, `lib/reading-window.js`, `lib/source-reader.js`, `lib/source-audit.js`, `timed`/`monotonicNow`/`sleep`, Yahoo's page reader, every `?rev=` token and Neon (all untouched).
+  - The rules-every-source list above, unless a superseding entry changes it.
+  - The protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f` stand.
+- **Supersedes:**
+  - The Step 9F.6b entry's note that "Step 9F.6c must supersede" the test forbidding "RSS" in the old CNBC runtime (`tests/cnbc-news-research-runtime.test.js`). This step does not touch that runtime, so the test stays as it is; it is superseded when 9F.6f retires that runtime.
+  - The Step 9F.6b entry's "Could not share" note on the CNBC page-reader hand-off: the hand-off shape now exists, and only the connection waits for 9F.6d.
