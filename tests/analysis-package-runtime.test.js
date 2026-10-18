@@ -97,3 +97,20 @@ test('runtime owns the exact deeply immutable Yahoo recap package bounds', () =>
   assert.equal(Object.isFrozen(YAHOO_RECAP_PACKAGE_PRODUCTION_BOUNDS.articleContentBounds), true);
   assert.equal(Object.isFrozen(YAHOO_RECAP_PACKAGE_PRODUCTION_BOUNDS.evidenceConstructionBounds), true);
 });
+
+// Step 9F.6d Build B: the runtime connects the CNBC source for the shared reader
+// (the free lists, the Step 9F.6c page reader and the live-blog skip). Without
+// it the orchestration would silently keep the paid path (decision 7).
+test('Step 9F.6d Build B: runtime connects the CNBC source with the page reader and the live-blog skip', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'analysis-package-runtime.js'), 'utf8');
+  assert.match(source, /require\('\.\/sources\/cnbc-rss'\)/);
+  assert.match(source, /const cnbcNewsSource = createCnbcRssSource\(\{\s*fetchImpl,\s*env,\s*pageReader: createCnbcArticleContentAcquisitionService\(\{fetchImpl, onDiagnostics, env\}\),\s*excludeLiveBlog: true\s*\}\);/);
+  assert.match(source, /cnbcNewsResearch,\s*cnbcNewsSource,\s*evidenceRoleClassification,/);
+  // And building the runtime makes no request.
+  let fetches = 0;
+  createAnalysisPackageRuntime({
+    postgresRuntime: {async query() { throw new Error('not expected'); }, async transaction() { throw new Error('not expected'); }},
+    fetchImpl: async () => { fetches++; throw new Error('not expected'); }
+  });
+  assert.equal(fetches, 0);
+});

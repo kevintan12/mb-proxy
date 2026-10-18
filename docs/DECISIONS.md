@@ -1986,3 +1986,126 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - The Step 9F.6c entry's "CNBC's reading budget and attempt cap rows come with 9F.6d" and "CNBC's limits row and log stage names in the shared reader (9F.6d)": delivered here (Build A); the connection waits for Build B.
   - The Step 9F.6b and 9F.6a entries' "neutral log stage names in 9F.6d": the CNBC names are set here; Yahoo keeps its names.
   - The Step 9F.2e.5 note that CNBC "brings no articles" so its slots always pass to Yahoo: still true until Build B passes CNBC's actual admitted count.
+
+## Step 9F.6d Build B — CNBC connected through the shared reader in Closed, Weekend and Holiday reports (repo: mb-proxy)
+
+- **Date:** 2026-10-18 · **Branch:** step-9f6d-cnbc-connect (from `2532952`) · **Status:** Sitting 1 of 2 IMPLEMENTED, tests passing; not committed. Sitting 2 (2,000 generated cases, planted mistakes, six-state replay with the switch on) is still to be added here before any commit, then one live Weekend or Closed Preview run.
+- **Why:** completed-state CNBC news still came from the paid AI search (about 6 US cents a run, and "too many uses" failures on the 17 Oct Weekend run). Build A added the shared plumbing and proved it changed nothing; Build B connects it.
+- **Kevin's decisions (18 Oct 2026), with reasons:**
+  1. **Slots:** CNBC fills its 3 general slots; Yahoo gets 7 plus CNBC's unused slots (total 10). Reason: one shared method, the same total.
+  2. **CNBC's quota is protected:** CNBC's admitted articles (at most 3, ranked by the shared score and rules) are never pushed out by Yahoo. The existing "CNBC and both recaps are never dropped; lowest-scored Yahoo goes first" budget rule stays. Reason: CNBC's quota is its own.
+  3. **Classifier failure keeps CNBC,** like Yahoo, including paid-fallback CNBC. Reason: one rule for every source.
+  4. **Paid search only when every list failed** (the finder's outcome `ALL_LISTS_FAILED`, or `FAILED` when the list reader threw); never when any list loaded. One log line `{stage: 'cnbcPaidSearchFallback', reason}`. Reason: lists loaded but nothing qualified is a real "no CNBC news", not a failure.
+  5. **The fallback follows the same slot rule** (its first 3 results in its own order). Whenever CNBC fails or yields fewer than 3, the unused slots go to Yahoo (CNBC 2 gives Yahoo 8; CNBC 0 gives Yahoo 10). Reason: one rule everywhere.
+  6. **Still over 150 KB after every droppable Yahoo article went:** send it anyway; `writerTextBudgetDrop` gains `overBudget: true` and is written even when nothing was dropped. The writer's own request-size check is the backstop. Reason: only extreme Admin values can cause it (at the defaults the never-dropped worst case is 3 × 16 KB CNBC + 16 KB Yahoo recap + 8 KB CNBC recap = 72 KB).
+  7. **No CNBC source connected = the old path** (as with the switch off). The runtime always connects it. Reason: the ~36 existing CNBC tests stay unchanged and are the switch-off proof.
+  8. **CNBC's live blog** (`/YYYY/MM/DD/stock-market-today-live-updates.html`) is skipped in the lists before download, as an excluded family. The recap path stays its only owner. Reason: saves an attempt and keeps the recap's session checks.
+  9. **One new Admin switch** `cnbcSharedReaderCompletedEnabled` (default on, `CNBC_SHARED_READER_COMPLETED_ENABLED`), read once per run in completed states only. Off = `2532952` exactly. Reason: a safe way back.
+- **What changed:**
+  1. `lib/us-analysis-package-orchestration.js`:
+     - optional `cnbcNewsSource` input (checked when given);
+     - completed states with the switch on and a source connected:
+       - Most Active is fetched once, before CNBC;
+       - CNBC is read with the shared reader (Build A's CNBC limits, Yahoo still to read; the same horizon rule as Yahoo, after the close = subsequent development);
+       - the fallback check (decision 4, then decision 5's cap);
+       - the admitted items become today's CNBC record shape (`c1..cN`, the matching canonical horizon object, a validated evidence item) in the existing `cnbcConstructedEvidence`, so references (base, then CNBC, then Yahoo), the classifier fit, retention, Further Readings and gap lines run exactly as before;
+       - Yahoo is read with `slotContext.readSources {us.cnbc: N}`;
+       - the CNBC candidate pool joins the pool hook;
+       - classifier failure (or no classification) keeps CNBC;
+       - `overBudget`;
+       - `method: 'SHARED_READER'` (or `'PAID_SEARCH_FALLBACK'`) on the `cnbcNewsResearchIntegration` line.
+     - **Unchanged:**
+       - the switch-off path (today's paid-search code, moved unchanged into one inner function, logs as before);
+       - the active states (no CNBC reading);
+       - the definitions of `yahooItems`, the recap and Fed item lists and the completed-state horizon rule were moved above the CNBC reading, unchanged and side-effect free.
+  2. `lib/analysis-package-runtime.js`: builds `createCnbcRssSource({fetchImpl, env, pageReader: createCnbcArticleContentAcquisitionService({fetchImpl, onDiagnostics, env}), excludeLiveBlog: true})` and passes it as `cnbcNewsSource`.
+  3. `lib/sources/cnbc-rss.js`:
+     - the live-blog skip (decision 8) as an opt-in `excludeLiveBlog` (counted in `excludedFamilyCount`, plus `liveBlogSkippedCount` only with the option);
+     - left out (the probe, the Build A tests), the finder is exactly as before;
+     - comments.
+     - It is an option, not a change to `isExcludedFamily`'s default, because Build A's end-to-end test (`tests/source-reader.test.js`, "the shared reader reads CNBC end to end on made-up lists and pages") expects the live blog to be downloaded and rejected as a duplicate, and no existing test may change.
+  4. `lib/settings-registry.js`: the switch row; descriptions of `cnbcSlots`, `cnbcRssFinderEnabled`, `cnbcPageReaderAlignedEnabled` and the text-budget rows say CNBC is now connected.
+  5. `lib/source-audit.js`: comment only.
+- **Numbers:** one new number, the switch (default on, Admin). Everything else is reused:
+  - CNBC budget 20 s, attempts 6, slots 3, first pass 3;
+  - list timeout 4 s, page timeout 4 s, 16 KB;
+  - 40 candidates, spare 3, 150 KB.
+- **Not shared:**
+  - CNBC's list reading and page parsing;
+  - the paid fallback;
+  - the recap paths;
+  - portfolio slots and the Section 4 company-news offer (Yahoo only);
+  - the live-blog skip (CNBC only).
+- **Tests (Sitting 1):**
+  - `tests/cnbc-completed-shared-reader.test.js` (15 new, made-up fixtures);
+  - `tests/settings-registry.test.js` (1 new, plus the automatic on/off check);
+  - `tests/analysis-package-runtime.test.js` (1 new).
+  - No existing test was edited.
+  - Full suite at defaults: 1542 tests, 1541 pass, 0 fail, 1 to-do (the known Yahoo header gap from Step 9F.6c). Before: 1524. Syntax 63/63; `git diff --check` clean.
+  - **Switches flipped one at a time (full suite):**
+    - `cnbcSharedReaderCompletedEnabled`, CNBC finder, CNBC page reader or portfolio slots off: 0 fail.
+    - Article slots off: 1 fail; slot spill-over off: 3; CNBC no-special-conditions off: 3; text budget off: 0.
+    - Each of these is an old test pinning that switch's "on" behaviour. The same tests fail by name on `2532952` with the same switch flipped.
+    - All switches flipped at once: the same 13 old tests by name as on `2532952`.
+    - The new tests pin the switches they assume, so a flipped switch never fails them (15/15 under every flip).
+- **Proof (Sitting 1, free, scratch harness outside the repo):**
+  - Old tree = `git archive 2532952 lib api`. All 14 saved packages × 6 scenarios = 84 runs.
+  - **Switch off:** the output file is byte-identical to `compare-9F6dA-fresh-old-vs-2532952-output.txt` (65 identical, the same 19 known "candidate pool vs audit" differences).
+  - **Switch on with no CNBC source:** byte-identical too.
+  - **Switch off with a CNBC stand-in connected** (`compare-9F6dB.js`, `CNBC_STANDIN=1`): byte-identical, and the stand-in was never called.
+  - **Switch on with the stand-in:** every PRE (36), POST (6) and REGULAR/Trading (12) line is identical to the reference, and the stand-in was never called in those states. All 30 CLOSED/WEEKEND runs differ, as expected; Sitting 2 examines them.
+  - Outputs: `compare-9F6dB-off-output.txt`, `compare-9F6dB-on-nosource-output.txt`, `compare-9F6dB-off-withsource-output.txt`, `compare-9F6dB-on-withsource-output.txt`.
+  - Script: `switch-suites-9F.6dB.sh`.
+- **Sitting 2 (18 Oct 2026, free, scratch harness outside the repo — repository, branch and HEAD confirmed `mb-proxy` / `step-9f6d-cnbc-connect` / `2532952` before starting):**
+  1. **Full suite, switch variants, syntax, diff check:** at defaults 1,542 tests, 1,541 pass, 0 fail, 1 to-do (the known Yahoo header gap); the same with `cnbcSharedReaderCompletedEnabled`, CNBC finder, and CNBC page reader each forced off. Syntax check 63/63 files, 0 failures. `git diff --check` clean.
+  2. **Switch-off byte-identical:** confirmed from Sitting 1's fresh outputs (generated after this sitting's source tree, so still current): `compare-9F6dB-off-output.txt` and `compare-9F6dB-on-nosource-output.txt` both equal `compare-9F6dA-fresh-old-vs-2532952-output.txt` (65 identical, the same 19 known "candidate pool vs audit" false failures). No re-run needed; the source files have not changed since Sitting 1 produced them.
+  3. **Independent reference + generated cases:** wrote a reference model from the claims above (not from the orchestration code) covering the slot-sum formula, the paid-fallback trigger, the gap line and classifier-failure retention, driven through the real `createUsAnalysisPackageOrchestrationService` with made-up Yahoo/CNBC/paid-search stand-ins (reduced from the full network-layer simulation — fixed text sizes, so the 150 KB budget path is covered separately by the existing `writerTextBudgetDrop`/`overBudget` unit tests, not by this sweep). 2,000 generated cases varying switch on/off, CNBC source present/absent, candidate count 0–6, usable-page count, list outcome (OK / ALL_LISTS_FAILED / FAILED), paid-search result count 0–5, classifier OK/FAIL, and before/after the close: **0 mismatches** (the first run caught a bug in the reference itself — switch-off/no-source was wrongly modelled as 0 CNBC articles, when it is actually the old, uncapped paid-search count — fixed before the counted run).
+  4. **Planted mistakes (7 of 8 caught; 1 not reproducible as a single-line fault):**
+     - (2) Yahoo always given 10 regardless of CNBC's admits — **caught** (cnbc 3, yahoo 10 instead of 7).
+     - (3) fallback fires with a list that loaded OK — **caught** (paid called once instead of 0).
+     - (4) fallback never fires when every list fails — **caught** (paid called 0 instead of 1).
+     - (5) CNBC dropped on classifier failure — **caught** (cnbc 0 instead of 3).
+     - (6) gap line suppressed when CNBC is 0 — **caught** (gap line absent).
+     - (7) CNBC read in an active state (PRE) — **caught** (`findCandidates` called once instead of 0).
+     - (8) CNBC references placed after Yahoo's — **caught** (CNBC refs 10–12, Yahoo refs 3–9).
+     - (1) "Yahoo displaces CNBC in the budget" — not reproducible with a single realistic line change: CNBC's admitted articles are never members of the pool `applyWriterTextBudgetToNewsItems` drops from (only `acquiredYahooNewsItems` is passed in; CNBC's bytes only adjust `neverDropBytes`, the reserved headroom). Removing `neverDropBytes` therefore cannot put a CNBC article at risk — there is no code path left where Yahoo's drop logic can reach a CNBC item. Treated as a structural pass (stronger than a flag), not a gap in testing; recorded here rather than forced into a misleading pass/fail.
+  5. **Six-state free replay with the switch on, CNBC stand-in connected (Sitting 1 outputs, confirmed fresh):** `compare-9F6dB-on-withsource-output.txt` — PRE (36 runs), POST (6) and REGULAR/Trading (12) are byte-identical to the reference and the stand-in is never called in those states; CLOSED (6) and WEEKEND (24) differ as intended (CNBC articles admitted, Yahoo's cap reduced accordingly, no paid-search call recorded). No HOLIDAY package and no older-style Trading package exist in the saved set; HOLIDAY is covered only by the repo's own tests (as Sitting 1 noted).
+  6. **Live-blog option, made-up lists:** covered by `tests/cnbc-completed-shared-reader.test.js` ("the live blog is skipped before download…"), part of the passing suite above — `excludeLiveBlog: true` skips the live blog before any download (`excludedFamilyCount`/`liveBlogSkippedCount` both increment, end to end the URL is never fetched); left out, `selectCnbcRssCandidates`/`isExcludedFamily` behave exactly as Build A (the live blog is included, not newly excluded).
+  7. **Zero paid calls:** confirmed by the same suite (`tests/cnbc-completed-shared-reader.test.js`, "every list failed…", "lists loaded but nothing qualified…") and by item 4's mistake checks above: with a counting stub, 0 paid calls whenever at least one list loaded (including 0 qualifying candidates), exactly 1 call when every list fails (`ALL_LISTS_FAILED` or `FAILED`), logged once as `{stage: 'cnbcPaidSearchFallback', reason}`.
+  8. **Repo hygiene:** `git status --short` shows only the 9 expected Build B files (8 modified + the new test file); nothing under `Replay Packages`; no real CNBC text was used anywhere in this sitting's scratch scripts (made-up headlines/text only, as in the existing tests).
+  - Scratch scripts (outside the repo), copied into `Replay Packages\harness`: `fuzz-9F6dB-sitting2.js` + `fuzz-9F6dB-sitting2-2000-output.txt` (item 3), `selftest-9F6dB-mistakes.js` (item 4).
+- **Sitting 2, continued (18 Oct 2026, same free scratch harness, same confirmed HEAD `2532952`; finishes the items left reduced-scope above):**
+  A. **Item 3 re-run with the missing variation covered** (`fuzz-9F6dB-itemA-extended.js`, 2,000 NEW generated cases) — now also varies `cnbcSlots` (0–6), `spareAdmits` (0–5), the CNBC reading budget (10–60 s, via a fake clock charged only during CNBC's own simulated downloads, 0–25 s per download), article text sizes 1–32 KB (near and over 16 KB) and the 150 KB budget across its full Admin range (32–200 KB), and 4 orchestration-visible list outcomes (OK-all-load, OK-but-0-qualifying, `ALL_LISTS_FAILED`, `FAILED`) — the real list-by-list (7-list) granularity lives inside `lib/sources/cnbc-rss.js`, below what the orchestration ever sees, and stays covered by the existing CNBC-RSS unit tests, not by this sweep. Checked against diagnostics (`sourceNewsReading`/`activeYahooAcquisition` `maxAdmittedArticles`, not the budget-reduced final count) plus two structural budget invariants. **1,994/2,000 cases matched; 6 mismatch instances, all one root cause, reproduced 81 times across the earlier default-range sweep and this one combined:** `cnbcSlots: 0` combined with the paid-search fallback (`ALL_LISTS_FAILED`/`FAILED`) finding results (`paidCount > 0`) — the fallback's own "no CNBC news" flag is decided from the unsliced paid-search result, then `cnbcConstructedEvidence.slice(0, cnbcLimits.maxAdmittedArticles)` empties it to 0 afterward without revisiting that flag, so the gap line is absent even though CNBC ends up contributing nothing. Real, reproducible, and distinct from the already-covered `paidCount === 0` case (which does set the gap line correctly). Not fixed here (proof only); flagged for Kevin's decision before promotion. The 150 KB budget invariant ("CNBC never dropped while Yahoo remains") held in all 2,000 cases; a second invariant ("`overBudget` matches 'still over after every Yahoo drop'") flagged 28 cases that, on inspection, trace to this sweep's own simplified byte accounting (it does not model a byte cap/truncation evidently applied somewhere in the real `evidence-items`/budget-fit path for large summaries) rather than a confirmed product defect — recorded as indeterminate, not a finding, for lack of time to pin down the exact bound.
+  B. **Item 4's skipped mistake 1, replaced with two real faults of the same kind, both planted and shown caught** (separate scratch mutant copies, verified with the extended item-A harness above):
+     - **CNBC's admitted articles left out of the never-drop weight and merged into the same droppable pool as Yahoo's** (so the 150 KB rule can drop them): planted in `lib/us-analysis-package-orchestration.js` (the `neverDropBytes`/`applyWriterTextBudgetToNewsItems` block) — **caught**: 125/400 generated cases show CNBC articles dropped to 0 where the reference expects them kept.
+     - **Yahoo's cap computed without CNBC's admitted count** (Yahoo always given its base 7–10 instead of 7–10 minus CNBC's unused slots): planted at the `yahooNewsLimits = cnbcSharedReaderOn ? … : …` line — **caught**: 65/200 generated cases show Yahoo's cap reverting to the no-CNBC default regardless of what CNBC admitted.
+     - Total planted mistakes across both Sitting 2 proofs: the original 8 (7 caught, 1 structurally not reproducible) plus these 2 (both caught) = 10 real faults tried, 9 caught, 1 structurally impossible to plant as a single line.
+  C. **Items 6 and 7, direct runs** (`direct-9F6dB-itemC.js`, made-up lists/pages, no citations):
+     - Live blog: `excludeLiveBlog: true` on a made-up list containing the live blog plus one other story → kept 1 candidate (the other story), `excludedFamilyCount: 1`, `liveBlogSkippedCount: 1`; left out → both candidates kept, no `liveBlogSkippedCount` key (matches Build A exactly). End to end through the real `createCnbcRssSource`, the live blog URL is never fetched at all.
+     - Zero paid calls, with a counting stub: 1 list `OK` with 0 candidates → paid calls = 0; 1 list `OK` with 1 candidate but 0 admitted (every page read fails) → paid calls = 0; all lists `ALL_LISTS_FAILED` → paid calls = 1, with `{stage:'cnbcPaidSearchFallback', reason:'ALL_LISTS_FAILED'}` logged once; all lists `FAILED` (list reader threw) → paid calls = 1, with `reason:'FAILED'` logged once.
+  D. **No lib file has changed since Sitting 1's replay outputs were made:** confirmed by file time (lib files last modified 18 Oct 21:07–21:11; the four `compare-9F6dB-*` outputs reused for item 2 were all made later, 21:29–21:40) — reusing them for item 2 was valid, no re-run needed.
+  - Scratch scripts added (outside the repo), copied into `Replay Packages\harness`: `fuzz-9F6dB-itemA-extended.js` + its 2,000-case output, `direct-9F6dB-itemC.js`.
+  - Item A's finding (cnbcSlots=0 + paid fallback finding results → missing gap line): fixed in the Build B FIX below.
+- **Sitting 2, Build B FIX (18 Oct 2026, free, HEAD confirmed `mb-proxy` / `step-9f6d-cnbc-connect` / `2532952`):**
+  - **Fix (item A's finding):** in `lib/us-analysis-package-orchestration.js`, switch-on paid-fallback branch only, the "no CNBC news" flag is now decided after the cut to `cnbcSlots`: no CNBC article kept sets the gap line and logs `cnbcNewsResearchIntegration` `NOT_FOUND` with `method: 'PAID_SEARCH_FALLBACK'` (the same line the fallback already logs when it finds nothing). The lists path already gave the gap line at `cnbcSlots` 0. Switch-off path and Yahoo untouched. 3 new tests in `tests/cnbc-completed-shared-reader.test.js` (`cnbcSlots` 0 + fallback with results; `cnbcSlots` 0 + working lists; `cnbcSlots` 3 unchanged); no existing test edited.
+  - **Yahoo cap at `cnbcSlots` 0 is 7, not 10.** Build A's slot rule passes on only CNBC's *unused* slots, and with 0 CNBC slots there are none, so Yahoo keeps its own 7 (the same as with the switch off). The tests assert 7. "Total 10" holds at the default `cnbcSlots` 3. Changing this would change Yahoo's behaviour and `lib/article-selection.js`, so it was left for Kevin.
+  - **The 28 "indeterminate" budget cases are settled: all 28 are (a) a harness counting difference, 0 are (b) real defects.** Re-run with the same seed and the real accounting (`settle28-9F6dB-fix.js`). The 150 KB rule counts the UTF-8 bytes of each kept item's summary, and a lists article's summary is its first `articleKb` (16 KB) of text. The old sweep counted the full 17/24/32 KB (5/7/16 cases). Bytes from the stated rules equal the package's own summary bytes in all 2,000 cases, and with the real counts `overBudget` is right in 2,000/2,000.
+  - **Independent reference re-run** (`fuzz-9F6dB-fix-reference.js`, written from the claims, new seed): 2,000 cases across CLOSED 639 / WEEKEND 691 / HOLIDAY 670 (each confirmed as the completed path with that market state), `cnbcSlots` 0–6, `spareAdmits` 0–5, CNBC and Yahoo text 1–32 KB, budget 32–200 KB, 4 list states, classifier ok/failed. **0 mismatches.** This sweep also checks the gap line, the Yahoo cap, the Yahoo count kept after the budget, `overBudget`, the drop line and the dropped count. Planted check: with the fix taken out (scratch copy), 15/400 cases fail, all on the gap line.
+  - **Replay re-done** (old tree = `git archive 2532952 lib api`, 84 runs each). Switch off, and switch on with no CNBC source: both outputs are byte-identical to `compare-9F6dA-fresh-old-vs-2532952-output.txt` (65 identical, the 19 known "candidate pool vs audit" false failures). Switch off with the stand-in: same as Build B's output, and the stand-in was never called. Switch on with the stand-in: all 54 PRE/POST/Trading lines are identical to the 2532952 reference, the stand-in was never called in those states, and the output equals Build B's. HOLIDAY and an older-style Trading package are still MISSING from the saved set. Outputs: `compare-9F6dB-fix-*-output.txt`.
+  - **Checks:** full suite at defaults 1,544 pass / 0 fail / 1 to-do; with `CNBC_SHARED_READER_COMPLETED_ENABLED=off` 1,544 / 0 / 1; syntax 63/63; `git diff --check` clean.
+  - **Still not promotable:** Kevin's call on the Yahoo-cap-at-`cnbcSlots`-0 point above, and one live Weekend or Closed Preview run, are outstanding.
+- **Known limits:**
+  - CNBC list items have no age label (no recency points);
+  - the reader's per-article classifier check and the later CNBC fit loop measure slightly differently, so in an edge case Yahoo can be one slot short (never over);
+  - the same story under a CNBC and a Yahoo address is not caught (Step 9F.4a).
+- **Must not change:**
+  - CNBC's quota is never pushed out by Yahoo;
+  - the paid search never runs while any list loaded;
+  - switch off = `2532952`;
+  - active states never read CNBC;
+  - Yahoo's log stage names, timing names and field order;
+  - the protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f` stand.
+- **Supersedes:**
+  - The Step 9F.2e.5 note that CNBC "brings no articles" (in completed states with the switch on, CNBC's actual admitted count now decides Yahoo's spare slots).
+  - The Step 8U.10 behaviour that drops general CNBC news on a total classifier failure (switch on only; switch off keeps it).
+  - The Step 9F.6b/9F.6c/Build A notes that nothing calls the CNBC finder, page reader or limits row.

@@ -353,3 +353,20 @@ test('Step 9F.6d Build A settings registry: CNBC reading budget, attempt cap, ad
   assert.equal(settingValue('cnbcReadingBudgetSeconds', {env: {CNBC_READING_BUDGET_SECONDS: '999'}}), 60);
   assert.equal(settingValue('cnbcReadingBudgetSeconds', {env: {}}), 20);
 });
+
+// Step 9F.6d Build B: the one new number, the switch that connects CNBC in
+// completed states. Admin, on by default, wired.
+test('Step 9F.6d Build B settings registry: cnbcSharedReaderCompletedEnabled', () => {
+  const entry = SETTINGS_REGISTRY.cnbcSharedReaderCompletedEnabled;
+  assert.deepEqual([entry.default, entry.admin, entry.envVar, entry.wired, entry.boolean],
+    [true, 'Admin', 'CNBC_SHARED_READER_COMPLETED_ENABLED', true, true]);
+  assert.equal(settingValue('cnbcSharedReaderCompletedEnabled', {env: {}}), true);
+  for (const value of ['false', '0', 'off', 'OFF']) {
+    assert.equal(settingValue('cnbcSharedReaderCompletedEnabled',
+      {env: {CNBC_SHARED_READER_COMPLETED_ENABLED: value}}), false, value);
+  }
+  for (const value of ['', 'maybe']) {
+    assert.equal(settingValue('cnbcSharedReaderCompletedEnabled',
+      {env: {CNBC_SHARED_READER_COMPLETED_ENABLED: value}}), true, value);
+  }
+});
