@@ -1719,3 +1719,108 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Could not share:** nothing per state. Rule (ii) is Section 7 only by design.
 - **Must not change:** CNBC acquisition code; `lib/reading-window.js`, `timed`/`monotonicNow`/`sleep`; every `?rev=` token; Neon; the frozen 8-section structure; Section 7 never filled with unsupported content; the date check never fails a whole report and never blanks a section that still has a valid sentence; protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f`.
 - **Extends:** Step 8L (the labelling retry may now name the broken rule and may run up to `classifierRetryCount` times; guidance off with count 1 restores 8L exactly) and Step 9L (a section the date check empties is a section-retry candidate).
+
+## Step 9F.6b — CNBC finds candidates through free RSS lists (finder only, not connected) (repo: mb-proxy)
+
+- **Date:** 2026-10-18 · **Branch:** step-9f6b-cnbc-rss (from `9c5fddd`) · **Status:** IMPLEMENTED, tests passing; not yet committed. Vercel Preview probe runs still to be recorded below.
+- **Why:** CNBC candidates are found today by a paid AI search: about 6 US cents a run, and both searches failed with "too many uses" on the 17 Oct Weekend run. Two more reasons: one finding method for every source (Kevin, 10 Oct 2026), and no rate-limit failures. The saving only arrives at Step 9F.6f. This step adds the finder only.
+- **History check (18 Oct 2026, free requests):**
+  - The old RSS finder (`ac664d2`, patched in `7fd754c`, removed in `859ab65` on 13 Sep 2026) read only the Market Insider list. On 18 Oct, 29 of that list's 30 items were "biggest movers" pages.
+  - Its address-only movers filter misses CNBC's other movers addresses (`stocks-moving-premarket-…`, `midday-stock-movers-…`).
+  - The time-format problem was on the article page, not the list: pages write `+0000` without the colon, and `7fd754c` fixed that in the CNBC page reader. List items always carry seconds; only the list's own header time leaves them out.
+  - Each item's list time is the page's last-updated time, not its first-published time. Every page checked matched its `dateModified`.
+- **Kevin's decisions (18 Oct 2026):**
+  1. **Lists:** read 7 lists: Top News 100003114, Economy 20910258, Finance 10000664, Investing 15839069, Earnings 15839135, Tech 19854910, Business 10001147. Market Insider 20409666 is not used (about 90% movers pages), and no optional lists are added.
+  2. **Excluded address families:** `/select/`, `/video/` and video items (`cnbcvideo`), `/investingclub/`, `/pro/`, `/make-it/`.
+  3. **List time (option B):** the list time is the **list updated time**. It is used only as a hint: candidates are ordered newest list time first, and an item whose list time is before the reading window start is dropped before any download. A page's publish time is never later than its last update, so nothing inside the window is lost. **The list time never admits anything.** Admission stays entirely on each page's own publish time, decided by the shared reader (Step 9F.6d).
+  4. **Probe:** a read-only test address `GET ?cnbcRssProbe=1` behind a diagnostic-only switch `cnbcRssProbeEnabled`, default off. It **always answers "not found" in Production** (`VERCEL_ENV=production`). That is a Fixed rule in code, not a setting.
+  5. **Neutral log stage names** move from 9F.6b to Step 9F.6d, when CNBC first runs through the shared reader (see Supersedes).
+- **Decision:**
+  1. **The finder (new `lib/sources/cnbc-rss.js`).** It has the same shape as `lib/sources/yahoo-news.js`: source id `us.cnbc` and `findCandidates({market, window, triggerAt}) -> {ok, candidates, discoveryStats}`. There is no `readPage` until 9F.6d.
+     - The 7 lists are fetched in parallel from `search.cnbc.com`, with the `MarketBrief/1.0 evidence-acquisition` agent.
+     - Each list is bounded (timeout, 512 KB) and fails soft on its own. A timeout, network error, HTTP error (403/429 included), oversize response or bad XML fails that list only. `ok` is true while at least one list was read.
+     - Items are parsed with `fast-xml-parser`, with entities and CDATA decoded. Only https cnbc.com links are kept, with query and fragment removed.
+     - Per item, in order: unusable (no address or headline), excluded family, movers, duplicate (by address or CNBC id, across lists), list time before the window start. Then newest list time first (items with no readable list time last, in list order), then the cap.
+     - Candidate (frozen): `{headline, url, publisher: 'CNBC', listedAt, listId, cnbcId, contentType}`. There is no age label and no edition.
+     - `discoveryStats` holds each list's outcome, HTTP status and item count, plus totals: unusable, excluded, movers (address only, title only, both), duplicates, unreadable list times, dropped before the window, sponsored, kept before the cap, and candidates.
+  2. **Biggest-movers rule: address OR title** (Fixed row `cnbcRssMoversPatterns`, case-insensitive).
+     - Address patterns: `stocks-making-the-biggest-moves-(midday|premarket|after-hours)-`, `stocks-moving-(premarket|midday|after-hours)`, `(premarket|midday|after-hours)-stock-movers`.
+     - Title patterns: starts with "Stocks making the biggest moves", or "Stocks moving (big) premarket/midday/after hours".
+     - For review only, a loose net ("movers/moves/moving" in the title or address) lists possible misses in the probe. It never drops anything.
+  3. **The probe (new `lib/cnbc-rss-probe.js`; one GET branch in `api/quote.js`, placed before the other routes and loaded only when hit; `Cache-Control: no-store`).**
+     - It reads only the fixed lists from the settings table and never an address taken from the request.
+     - Per list it reports: HTTP status, time taken, bytes, item count, newest and oldest list time, unreadable list times, movers by address only, title only and both, and up to 10 possible misses. It also reports the overall counts, the reading window and the kept candidates.
+     - With `&pages=N` (0–3, clamped; default 0) it downloads the first N kept candidates' pages one at a time. Limits come from the existing `cnbcPageTimeoutMs` 4000 and `cnbcMaxResponseBytes` 1280 KB reference values. For each page it reports the page's own publish and modified times next to the list updated time.
+     - No paid call and no Neon. An unexpected failure gives a 502, not a crash.
+  4. **Nothing calls the finder.** The orchestration, the shared reader, the CNBC acquisition code and the paid search are unchanged. Reports and cost are identical to `9c5fddd` with either switch in either position.
+- **Numbers added (`lib/settings-registry.js`):**
+  - `cnbcRssFinderEnabled`: on, Admin, env `CNBC_RSS_FINDER_ENABLED`. Off: the finder makes no request and returns `{ok: false, candidates: [], discoveryStats: {outcome: 'DISABLED', lists: []}}`. Nothing calls it yet, so off only changes what the probe shows.
+  - `cnbcRssTimeoutMs`: 4000, range 1000–10000, Admin, env `CNBC_RSS_TIMEOUT_MS`.
+  - `cnbcRssMaxCandidates`: 40, range 10–100, Admin, env `CNBC_RSS_MAX_CANDIDATES`.
+  - `cnbcRssProbeEnabled`: off, Admin, env `CNBC_RSS_PROBE_ENABLED` (diagnostic only).
+  - `cnbcRssProbePages`: 0, range 0–3, Fixed cap 3.
+  - Fixed: `cnbcRssLists` (the 7 ids), `cnbcRssMaxResponseKb` 512, `cnbcRssMoversPatterns`.
+  - No other number. The excluded address families are a fixed list in the finder, per decision 2.
+- **Tests:** full suite 1473/1473 (1442 before; 31 new). The suite passes at the defaults and with both switches flipped (finder off, probe on).
+  - `tests/cnbc-rss.test.js` (18):
+    - the 7 fixed lists and the agent
+    - both list time formats, offsets and bad times
+    - an unreadable list time is kept last and counted
+    - entities and CDATA
+    - bad XML, an oversize list (read and declared) and a timeout each fail one list only
+    - 403 and 429 on one list each while others work; every list failing
+    - duplicates across lists by address and by CNBC id
+    - the cap keeps the newest (10 and the default 40)
+    - the window pre-drop (the start itself kept; no window, no drop)
+    - the excluded families, videos and non-CNBC links
+    - movers fixtures from 18 Oct: the three time-of-day forms, the two variants the old rule missed, the `-on-more-.html` ending, a title-only and an address-only case
+    - the lookalike `…biggest-moves-weekly-roundup` passes, and real market articles pass
+    - the drop counts per rule
+    - switch off means zero fetch calls
+    - the source-text and loaded-module check: the new files load no Anthropic, Postgres or CNBC acquisition module.
+  - `tests/cnbc-rss-probe.test.js` (9):
+    - "not found" in Production even when switched on
+    - "not found" when switched off
+    - the per-list report, movers counts and possible misses
+    - the page option with own publish times, capped at 3
+    - the page-count clamp
+    - no address taken from the request
+    - finder off gives DISABLED with no fetch
+    - an unexpected failure gives a 502
+    - the `api/quote.js` branch: `no-store`, and 404 in Production and when off.
+  - `tests/settings-registry.test.js`: 4 automatic default/clamp/on-off checks for the new Admin rows. No existing test needed changes. No paid calls.
+- **Free comparison (scratch only, not committed):** `Replay Packages\harness\compare.js` against `9c5fddd`, exported read-only with `git archive`: 14 packages × 6 scenarios = 84 runs.
+  - `9c5fddd` against itself gives 65 identical and 19 different. The 19 are the harness's own run-to-run differences: every "real headlines" scenario, and all six POST 2026-09-29 runs.
+  - The working tree against `9c5fddd` gives the same 65/19 with the finder on and with it off. Both output files are byte-identical to the `9c5fddd`-against-itself output, so this step changes nothing the harness measures.
+  - Outputs: `compare-9F.6b-old-vs-old-output.txt`, `compare-9F.6b-on-output.txt`, `compare-9F.6b-off-output.txt`. The live probe script is `cnbc-rss-local-probe.js`.
+- **Local free run (this PC, 18 Oct 2026 Sunday ~07:00 UTC):**
+  - All 7 lists answered 200 in 0.4–1.2 s at about 20 KB and 30 items each: 210 items in total.
+  - 13 excluded, 9 movers (all in Finance, all caught by both rules), 25 duplicates and 115 before the window start. 48 were kept and capped to 40.
+  - One possible miss, a real article ("…slow moving crisis"), which the strict rule correctly keeps.
+  - The 3 pages downloaded showed their own publish times (`+0000` form) earlier than or equal to their list updated times.
+- **Vercel test (Preview) must record, per call:** the market state and time; per list the HTTP status, time taken and item count (any 403/429 means CNBC limits Vercel addresses); the movers counts and the possible misses reviewed; the candidate count; and for the page call each page's status and own publish time against the list time. Planned: one call before the US open, one while trading, one with `&pages=3`. Results: *(to be added)*.
+- **Known limits and risks:**
+  - These are unofficial CNBC lists with no service promise. They can change or disappear; per-list fail-soft and the outcome counts make that visible.
+  - CNBC's network provider filters some request agents: the `www.cnbc.com/id/…/rss.html` address refused curl's default agent from this PC. It may also treat Vercel/AWS addresses differently. Only the Preview probe can show this. CNBC article pages are already downloaded from Vercel in Production.
+  - The list time is a last-updated time. It is safe only because it never admits anything.
+  - Movers addresses drift. The title rule backs up the address rule, and the probe's possible-miss list shows drift.
+  - The probe sits on a public Preview address with open CORS. Mitigations: off by default, never in Production, fixed CNBC lists only, at most 3 page downloads, no Neon, no paid call.
+  - `api/quote.js` is a shared file (one small branch).
+  - Today's live blog appears in the lists; the shared reader's duplicate check handles it at 9F.6d.
+  - Investing Club and Pro are excluded because they are subscriber-only.
+- **Could not share in this step:**
+  - The bounded body reader: the Federal Reserve module's copy is not exported, and exporting it would mean editing that file. The finder has its own copy of the same pattern, which the probe reuses.
+  - The CNBC page reader hand-off (`readPage(url, {headline})` to the existing CNBC page reader, which expects a full candidate with a horizon) waits for 9F.6d.
+  - `tests/cnbc-news-research-runtime.test.js` forbids "RSS" in the old CNBC runtime. It is untouched here, and Step 9F.6c must supersede it.
+  - Neutral log stage names move to 9F.6d.
+- **Must not change:**
+  - The list time never admits anything.
+  - Market Insider is never read.
+  - The probe never reads an address from the request, never runs in Production, makes no paid call and touches no Neon.
+  - The finder stays unconnected until 9F.6c/9F.6d.
+  - CNBC acquisition code (`lib/cnbc-*.js`), `lib/reading-window.js`, `timed`/`monotonicNow`/`sleep`, `lib/source-reader.js`, `lib/source-audit.js`, every `?rev=` token and Neon are untouched.
+  - The protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f` stand.
+- **Supersedes:**
+  - **The CNBC sitemap plan (Step 21A, a Master-document rule):** CNBC candidates come from the RSS lists instead of CNBC's sitemaps.
+  - **The "no RSS fallback" rule (Steps 8D.7B and 8D.7G, Master-document rules):** RSS is now the planned way CNBC finds candidates, under the conditions released on 11 Oct 2026 (filter movers pages; use each page's own publish time; test from Vercel; a new file, with the existing CNBC acquisition code untouched in this step).
+  - **The Step 9F.6a.1–9F.6a.3 and 9F.6a.4–9F.6a.6 entries' clauses on log stage names:** "the Yahoo stage names until 9F.6b" and "neutral names come with CNBC in 9F.6b". They now read "until 9F.6d" and "in 9F.6d" (Kevin, 18 Oct 2026). The Yahoo stage names are unchanged in this step.

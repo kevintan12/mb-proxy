@@ -79,6 +79,15 @@ module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
+  // ── Step 9F.6b: read-only CNBC RSS probe (GET ?cnbcRssProbe=1). Never in
+  // Production; off unless CNBC_RSS_PROBE_ENABLED. Loaded only when hit. ──
+  if (req.method === 'GET' && req.query.cnbcRssProbe === '1') {
+    const {handleCnbcRssProbe} = require('../lib/cnbc-rss-probe');
+    const result = await handleCnbcRssProbe({query: {pages: req.query.pages}});
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(result.status).json(result.body);
+  }
+
   const { symbol, search, financials, finnhub } = req.query;
   const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
