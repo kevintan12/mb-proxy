@@ -20,9 +20,14 @@ const startingListTest = startingListTests(require('node:test'), [
 ]);
 // Step 9L: these assert one writer call or an exact event list on a reply that leaves a
 // retryable section empty on purpose, so they run with the section retry off.
-const test = sectionRetryOffTests(startingListTest, [
+const sectionRetryTest = sectionRetryOffTests(startingListTest, [
   "Step 9D.1: section rule table runs unchanged in PRE, REGULAR, POST, CLOSED, WEEKEND and HOLIDAY",
   "Step 9D.1: R18/R19/R20/R21 Section 3 rules behave the same across every state today"
+]);
+// Step 8W: this pins the writer request size, so it runs with dateAccuracyEnabled off (on adds
+// the publish and report-time labels and the one date instruction).
+const test = require('./fixtures/step-8w-switches').dateAccuracyOffTests(sectionRetryTest, [
+  "Step 9D.1: writer request size on the rich completed fixture is unchanged"
 ]);
 const assert = require('node:assert/strict');
 

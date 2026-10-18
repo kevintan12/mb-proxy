@@ -1,4 +1,8 @@
-const test = require('node:test');
+// Step 9F.4c: this pins the identical labelling retry, so it runs with
+// classifierRetryGuidanceEnabled off.
+const test = require('./fixtures/step-8w-switches').classifierGuidanceOffTests(require('node:test'), [
+  'Step 8L: classifier retries once silently after a contract failure and then succeeds'
+]);
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

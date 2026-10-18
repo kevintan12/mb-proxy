@@ -64,7 +64,7 @@ const MATRIX_LABELS = {
   },
   'section-rules-matrix-extra.test.js': {
     R1: [1], R2: [2], R3: [3], R8: [8], R11: [11], R12: [12], R17: [17],
-    R27: [27], R28: [28], R30: [30]
+    R27: [27], R28: [28], R30: [30], R31: [31]
   }
 };
 
@@ -154,10 +154,11 @@ test('Step 9D.5a: every label used in a matrix file is in the label table', () =
   assert.deepEqual(unmapped, []);
 });
 
-test('Step 9D.5a: the registry has one entry per inventory rule, 1 to 30', () => {
+// Step 8W: rule 31 (DATE_ACCURACY) added to the registry; was "1 to 30".
+test('Step 9D.5a: the registry has one entry per inventory rule, 1 to 31', () => {
   const rules = Object.values(SECTION_RULES);
   assert.deepEqual(rules.map(rule => rule.number).sort((a, b) => a - b),
-    Array.from({length: 30}, (_, index) => index + 1));
+    Array.from({length: 31}, (_, index) => index + 1));
   for (const rule of rules) {
     assert.equal(Object.isFrozen(rule), true, rule.id);
     assert.equal(SECTION_RULES[rule.id], rule, rule.id);

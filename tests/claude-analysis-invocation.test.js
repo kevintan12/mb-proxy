@@ -23,12 +23,18 @@ const startingListTest = startingListTests(require('node:test'), [
 ]);
 // Step 9L: these assert one writer call or an exact event list on a reply that leaves a
 // retryable section empty on purpose, so they run with the section retry off.
-const test = sectionRetryOffTests(startingListTest, [
+const sectionRetryTest = sectionRetryOffTests(startingListTest, [
   "PRE, REGULAR and POST can synthesize a grounded section when current news is unavailable",
   "Step 8U.2: in every state group each rule break empties one section, not the report",
   "Step 8U.5: in every state a made-up ref in Section 5 empties only Section 5",
   "Step 8U.6: in every state an all-ungrounded Section 6 is still emptied and a grounded one is unchanged",
   "Step 8U.8: in every state a section with only uncatalyzed causal text is emptied, except completed Section 1"
+]);
+// Step 8W: these pin the exact writer request (which publishedEt labels an article carries, and
+// the switch-off diff), so they run with dateAccuracyEnabled off.
+const test = require('./fixtures/step-8w-switches').dateAccuracyOffTests(sectionRetryTest, [
+  "Step 8P.2(b): PRE, REGULAR and POST name the right last close and mark each after-close article",
+  "Step 8P.2(b): switch off gives the previous writer request (on minus only the additions)"
 ]);
 const assert = require('node:assert/strict');
 const {emptySectionFour} = require('./fixtures/section-four-empty');

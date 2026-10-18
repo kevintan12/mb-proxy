@@ -6,9 +6,15 @@
 
 const {startingListTests} = require('./fixtures/section-four-switch');
 // Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
-const test = startingListTests(require('node:test'), [
+const startingListTest = startingListTests(require('node:test'), [
   "Step 21D.1: in every state a Section 4 with only unsupported reasons is emptied as before",
   "Step 21D.1: in every state a supported reason and the empty-list statement are unchanged"
+]);
+// Step 8W: these write "Thursday" where nothing cited supports that day, which the date check
+// (on) correctly removes; they pin the Section 4 cut alone, so they run with dateAccuracyEnabled off.
+const test = require('./fixtures/step-8w-switches').dateAccuracyOffTests(startingListTest, [
+  "Step 21D.1: in every state an unsupported reason is cut, a supported one kept, NORMAL on one call",
+  "Step 21D.1: in every state the switch off leaves Section 4 exactly as written"
 ]);
 const assert = require('node:assert/strict');
 

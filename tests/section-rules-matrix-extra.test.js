@@ -316,3 +316,27 @@ test('Step 9D.5a: R30 evidenceReferences follow first-use order, in every state'
     assert.equal(errors.includes('evidenceReferences must match first-use order'), true, marketState);
   }
 });
+
+test('Step 8W: R31 an explicit past date in Section 7 is trimmed, only that sentence, in every state', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of MARKET_STATE_CASES) {
+    const fixture = marketStateCase(marketState, generatedAt, overlayAsOf, currentPublishedAt);
+    const kept = 'Investors will watch the next data release.';
+    fixture.output.sections[6] = {...fixture.output.sections[4], name: fixture.output.sections[6].name,
+      content: `${kept} Traders also watched the Aug 3 jobs data.`};
+    const {result, diagnostics} = await require('./fixtures/step-8w-switches').withEnv(
+      'DATE_ACCURACY_ENABLED', 'on', () => invokeCounted(fixture.input, fixture.output));
+    assert.equal(result.type, 'SUCCESS', marketState);
+    assert.equal(result.output.sections[6].content, kept, marketState);
+    assert.deepEqual(sectionEvents(diagnostics, 6).filter(event => /DATE_ACCURACY/.test(event.violationCategory)), [{
+      stage: 'claudeAnalysisSectionNormalization', sectionIndex: 6,
+      violationCategory: 'DATE_ACCURACY_PAST_DATE',
+      suppliedReferenceCount: fixture.output.sections[4].evidenceRefs.length,
+      allowedReferenceCount: fixture.output.sections[4].evidenceRefs.length,
+      offendingReferenceCount: 0, removedSentenceCount: 1, action: 'TRIMMED'
+    }], marketState);
+    // Off: the sentence stays, as before.
+    const off = await require('./fixtures/step-8w-switches').withEnv('DATE_ACCURACY_ENABLED', 'off',
+      () => invokeCounted(fixture.input, fixture.output));
+    assert.equal(off.result.output.sections[6].content, `${kept} Traders also watched the Aug 3 jobs data.`, marketState);
+  }
+});
