@@ -10,12 +10,19 @@
 'use strict';
 
 const {startingListTests} = require('./fixtures/section-four-switch');
+const {sectionRetryOffTests} = require('./fixtures/writer-section-retry-switch');
 // Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
-const test = startingListTests(require('node:test'), [
+const startingListTest = startingListTests(require('node:test'), [
   "Step 9D.1: section rule table runs unchanged in PRE, REGULAR, POST, CLOSED, WEEKEND and HOLIDAY",
   "Step 9D.1: R16 causal-claim-without-catalyst applies the same way to Sections 1, 4, 6 and 7",
   "Step 9D.1: R22/R23 Section 4 rules behave the same across every state today",
   "Step 9D.1: writer request size on the rich completed fixture is unchanged"
+]);
+// Step 9L: these assert one writer call or an exact event list on a reply that leaves a
+// retryable section empty on purpose, so they run with the section retry off.
+const test = sectionRetryOffTests(startingListTest, [
+  "Step 9D.1: section rule table runs unchanged in PRE, REGULAR, POST, CLOSED, WEEKEND and HOLIDAY",
+  "Step 9D.1: R18/R19/R20/R21 Section 3 rules behave the same across every state today"
 ]);
 const assert = require('node:assert/strict');
 

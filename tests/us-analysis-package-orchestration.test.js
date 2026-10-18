@@ -1,7 +1,13 @@
 const {startingListTests} = require('./fixtures/section-four-switch');
+const {sectionRetryOffTests} = require('./fixtures/writer-section-retry-switch');
 // Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
-const test = startingListTests(require('node:test'), [
+const startingListTest = startingListTests(require('node:test'), [
   "Step 9F.2d.3 portfolio slots: a Watchlist company gets a slot in a My Stocks run, then the second pass"
+]);
+// Step 9L: these assert one writer call or an exact event list on a reply that leaves a
+// retryable section empty on purpose, so they run with the section retry off.
+const test = sectionRetryOffTests(startingListTest, [
+  "Step 8U.10: a failed classifier on CLOSED, WEEKEND and HOLIDAY returns a DEGRADED report, not a 502"
 ]);
 const assert = require('node:assert/strict');
 const {

@@ -13,12 +13,22 @@
 'use strict';
 
 const {startingListTests} = require('./fixtures/section-four-switch');
+const {sectionRetryOffTests} = require('./fixtures/writer-section-retry-switch');
 // Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
-const test = startingListTests(require('node:test'), [
+const startingListTest = startingListTests(require('node:test'), [
   "Step 9D.5b: every cleanup rule firing at once keeps today's event order, in every state",
   "Step 9D.5b: Section 2's rules 14 then 15 on the same section keep today's order, in every state",
   "Step 9D.5b: rule 12 empties Section 2 before the causal rules can act, on active days only",
   "Step 9D.5b: Section 3's rule 19 trim comes before rule 21's final-blank events, in every state",
+  "Step 9D.5b: last-resort events follow section order and keep the active-only detail"
+]);
+// Step 9L: these assert one writer call or an exact event list on a reply that leaves a
+// retryable section empty on purpose, so they run with the section retry off.
+const test = sectionRetryOffTests(startingListTest, [
+  "Step 9D.5b: every cleanup rule firing at once keeps today's event order, in every state",
+  "Step 9D.5b: rule 12 empties Section 2 before the causal rules can act, on active days only",
+  "Step 9D.5b: Section 3's rule 19 trim comes before rule 21's final-blank events, in every state",
+  "Step 9D.5b: Section 4 is emptied before Section 6, in every state",
   "Step 9D.5b: last-resort events follow section order and keep the active-only detail"
 ]);
 const assert = require('node:assert/strict');

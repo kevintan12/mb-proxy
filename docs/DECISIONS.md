@@ -1597,3 +1597,96 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - Syntax check 60 files (`api/*.js`, `lib/*.js`, `lib/sources/*.js`), no FAIL. `git diff --check` clean. No paid calls.
 - **Must not change:** CNBC acquisition code and its shared timing functions (untouched); `lib/reading-window.js`'s `timed`/`monotonicNow`/`sleep` (untouched; `fitArticlesToBudget`/`WRITER_ARTICLE_FLOOR_BYTES` unchanged); every `?rev=` token; Neon; `applyWriterBudget` itself (unchanged); the frozen 8-section structure; protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f`; one Anthropic request per structured generation (Step 8L unchanged -- the budget never adds a call); the Step 21D.1/21D.2 reason and both-lists rules.
 - **Supersedes:** Step 9F.2a's register row for `articleTextBudgetBytesPlanned` ("not wired"; now wired) and the `tests/article-selection.test.js`/`tests/settings-registry.test.js` assertions that pinned it unwired. The Step 9F.1f temporary trim's decision log entries stand unchanged for the switch-off path; this entry adds the switch and retires the trim only while the switch is on.
+
+## Step 9L — Writer retry for an empty section, a guided whole-report retry, one per-run writer call cap (repo: mb-proxy)
+
+- **Date:** 18 Oct 2026 · **Branch:** step-9f4c-retries (from `c3c7ee5`) · **Status:** IMPLEMENTED, tests passing; not yet committed. Build A of two (9F.4c and 8W are Build B). Two new switches, both Admin, default on: `writerSectionRetryEnabled` (env `WRITER_SECTION_RETRY_ENABLED`) and `writerRetryGuidanceEnabled` (env `WRITER_RETRY_GUIDANCE_ENABLED`). Both off: the c3c7ee5 writer call, byte for byte. The full proof against `c3c7ee5` is a separate step.
+- **Why:** Section 7 came back blank on the 17 Oct Trading run, and nothing retried a single section; 8R.B (the try-hard Section 3 sentence) was never built and was waiting for this step. The 15 Oct identifier-leak failure was not saved by the Step 8L retry. No log of it was kept, so the cause can't be proven. The likely reason: the retry repeats the identical request, so the writer can repeat the same mistake. The logs also never said which section and field held the leak.
+- **Decision (Kevin, 18 Oct 2026, Step 9L plan approved with decisions 1–6):**
+  1. **One writer call per retry round**, covering every still-empty section; never one call per section.
+  2. **One per-run cap of writer calls**, `writerCallsPerRunMax` (default 3, range 1–4, Admin). The first call, the Step 8L whole-report retry and every 9L round all count. If the whole-report retry has fired, 9L gets only what is left; at 1 there is no retry of any kind.
+  3. **The whole-report retry names the broken rule** (section and rule category only; no report prose, no article text) instead of repeating the identical request. Behind `writerRetryGuidanceEnabled`; off = the identical retry of Step 8L. With the switch on, a whole-report failure also logs `writerContractFailure` (attempt, and for each broken rule: section index and name, field — content, uncertainties, evidenceGaps, evidenceRefs, status, report or reply — and category). The `contractRetry` line gains `guided: true`.
+  4. **Section 7 is retried even when the writer left it empty on purpose**; the retry may still return it empty.
+  5. **Eligible sections, Fixed:** 1, 2, 3, 5, 6 and 7. Section 4 and Section 8 are never retried. A section the code blanks by design is never retried: rule 9 (no drivers → Section 2, no broad-market focus → Section 3; this also covers a failed labelling step, which leaves no roles), the fixed no-current-news report (the writer is not called), and any market whose section rules are off (SG, HK).
+  6. **A blank section beats a made-up one.** A round's result is accepted only when every section that already had text comes out byte-identical and at least one retried section now has text. Otherwise the previous report is kept. A failure, an upstream or network error, an unusable reply or a timeout in a round also keeps it.
+- **How a round works (`lib/writer-section-retry.js`, shared, no per-state copies):**
+  - It sends the same package and system text, plus one appended instruction. The instruction names each empty section and, as fixed plain text, why it is empty: the writer left it empty, or the rule category from that attempt's cleanup events. Where the last-resort step gives no category, the reason comes from the same leak, broken-prose and no-evidence detectors run on the raw section.
+  - Round 1: rewrite these sections under every rule; return any other slot empty; return a section empty if the evidence does not support it.
+  - Round 2 and later (stricter): the same, plus the refs that section may use (Section 2: material events and principal catalysts; Section 3: broad-market focus refs; others: refs the rules allow), at most `writerSectionRetryMaxSentences` sentences, and no cause unless a listed principal catalyst is cited. A retried section over the sentence limit is not used.
+  - Only the retried raw slots replace the empty ones in the previous raw reply. Every other slot, the status and the writer's evidence gaps stay as they were. The merged reply then runs through exactly the same cleanup and final check.
+  - The post-reply cleanup was moved unchanged out of `attemptClaudeAnalysis` into `processWriterTransport`, so the first reply, a guided retry and a merged round take the same path.
+- **Logging:** one `writerSectionRetry` line per round. It records the round, the sections (index, name and reason categories), the outcome (`ACCEPTED`, `REJECTED_NO_TEXT`, `REJECTED_CHANGED_SECTION`, `FAILED` with `failureType`, `SKIPPED_CALL_CAP` or `SKIPPED_TIME_LIMIT`), the filled sections, writer calls used, round time in ms and token usage. No prose and no article text. A round's own cleanup events are not forwarded; the round line is its record.
+- **Numbers (all in `lib/settings-registry.js`):**
+  - `writerSectionRetryEnabled`: on/off, default on, Admin.
+  - `writerSectionRetryCount`: default 2, range 0–3, Admin (0 = no rounds).
+  - `writerSectionRetryMaxElapsedMs`: default 150,000, range 60,000–200,000, Admin. No new round starts once this much time has passed since the writer stage began.
+  - `writerSectionRetryMaxSentences`: default 4, range 2–8, Admin (round 2 and later).
+  - `writerCallsPerRunMax`: default 3, range 1–4, Admin.
+  - `writerRetryGuidanceEnabled`: on/off, default on, Admin.
+  - Eligible sections: Fixed (`WRITER_SECTION_RETRY_SECTIONS` in `lib/section-rules.js`).
+  - The Step 8L 150 s guard on the whole-report retry is unchanged.
+- **Cost and time (estimate; no live run):**
+  - A round sends the whole package but writes little: about 4–5 US cents on Haiku 4.5 at today's request sizes. The real 15 Oct Pre-market writer call was about 4.4 cents (32,166 input, 2,318 output tokens).
+  - The worst case at the defaults is 3 writer calls per run: about 2 extra calls, roughly +8–11 cents. That stays near the US$0.20 ceiling.
+  - Each round adds roughly 15–25 s, and no round starts after 150 s.
+- **Implementation:**
+  - `lib/writer-section-retry.js` (new).
+  - `lib/claude-analysis-invocation.js` (`invokeClaudeAnalysis` wrapper, `processWriterTransport`, `systemSuffix`/`transformTransport` options on `attemptClaudeAnalysis`, an internal map from each successful result to its raw reply).
+  - `lib/contract-retry.js` (`allowRetry` and `guided` options; the second attempt receives the first failure; the classifier ignores it and still sends the identical request).
+  - `lib/section-rules.js` (`retryEligibleEmptySections`, `WRITER_SECTION_RETRY_SECTIONS`; rule 9's test lifted into `controlledUnavailable` with no behaviour change).
+  - `lib/settings-registry.js`.
+- **Evidence/tests:**
+  - Full suite 1424/1424 with the switches on (default), and 1424/1424 with `WRITER_SECTION_RETRY_ENABLED=off WRITER_RETRY_GUIDANCE_ENABLED=off`. That is 1402 before, 16 new tests in `tests/writer-section-retry.test.js` and 6 generated settings checks. Syntax check 61 files (`api/*.js`, `lib/*.js`, `lib/sources/*.js`; 60 + the new module), no FAIL. `git diff --check` clean. No paid calls; the writer is a stand-in.
+  - New tests, each run in PRE, REGULAR, POST, CLOSED, WEEKEND and HOLIDAY:
+    - an empty Section 7 is filled on round 1, every other section byte-identical, same package, instruction appended, log line checked, no prose in the log;
+    - each eligible section is retried;
+    - several empty sections share one call;
+    - Sections 4 and 8 are never offered;
+    - a no-focus Section 3 is never retried;
+    - a retry that stays empty keeps the original, and round 2 is stricter;
+    - round 2 drops a section over the sentence limit;
+    - an upstream error, a thrown fetch or an unusable reply keeps the original;
+    - a retried section that leaks stays blank;
+    - the acceptance check rejects any change to a surviving section;
+    - the call cap at 3, 2 and 1, including after the whole-report retry;
+    - the time limit;
+    - retry count 0 and the switch off;
+    - the guided whole-report retry and its log, plus the identical retry with the switch off;
+    - both switches off give the same requests and result;
+    - the failure-category mapping.
+  - **18 existing tests pinned to `writerSectionRetryEnabled` off** (`tests/fixtures/writer-section-retry-switch.js`; unchanged otherwise). Each asserts one writer call or an exact list of cleanup events on a reply that leaves a retryable section empty on purpose. None of them checked the identical retry.
+    - `tests/claude-analysis-invocation.test.js`:
+      - "PRE, REGULAR and POST can synthesize a grounded section when current news is unavailable"
+      - "Step 8U.2: in every state group each rule break empties one section, not the report"
+      - "Step 8U.5: in every state a made-up ref in Section 5 empties only Section 5"
+      - "Step 8U.6: in every state an all-ungrounded Section 6 is still emptied and a grounded one is unchanged"
+      - "Step 8U.8: in every state a section with only uncatalyzed causal text is emptied, except completed Section 1"
+    - `tests/us-analysis-package-orchestration.test.js`:
+      - "Step 8U.10: a failed classifier on CLOSED, WEEKEND and HOLIDAY returns a DEGRADED report, not a 502"
+    - `tests/section-rules-matrix.test.js`:
+      - "Step 9D.1: section rule table runs unchanged in PRE, REGULAR, POST, CLOSED, WEEKEND and HOLIDAY"
+      - "Step 9D.1: R18/R19/R20/R21 Section 3 rules behave the same across every state today"
+    - `tests/section-rules-matrix-extra.test.js`:
+      - "Step 9D.5a: R8/R27 content citing no evidence is emptied by the last-resort step, in every state"
+      - "Step 9D.5a: R11 Section 2 must cite a driver ref, in every state"
+      - "Step 9D.5a: R12 Section 2 needs a current-session driver on active days only"
+      - "Step 9D.5a: R17 Section 3 must cite a focus ref and name its subject, in every state"
+      - "Step 9D.5a: R28 the nothing-survived fallback, recorded in every state"
+    - `tests/section-rules-order.test.js`:
+      - "Step 9D.5b: every cleanup rule firing at once keeps today's event order, in every state"
+      - "Step 9D.5b: rule 12 empties Section 2 before the causal rules can act, on active days only"
+      - "Step 9D.5b: Section 3's rule 19 trim comes before rule 21's final-blank events, in every state"
+      - "Step 9D.5b: Section 4 is emptied before Section 6, in every state"
+      - "Step 9D.5b: last-resort events follow section order and keep the active-only detail"
+- **Known limits:**
+  - **A report can stay DEGRADED after a successful retry.** The writer's own evidence gaps are kept as they were, so a gap the writer wrote about a section that a round later filled stays in the report.
+  - **Further Readings, the evidence reference order and the status may change** when a filled section cites new articles. Only Sections 1–7 must stay byte-identical.
+  - **A round's cleanup events are not logged**, only its one round line.
+  - **Some reasons are generic.** When the last-resort step blanked a section for a reason the raw-section detectors don't cover (for example the word cap), the reason is `OTHER_CHECK`.
+  - **Round 2's reference list is an instruction only.** The existing checks still enforce Sections 2 and 3; the sentence limit is enforced in code.
+  - **A completed-day empty Section 1 still fails the whole report** and goes to the (now guided) whole-report retry, not to 9L.
+  - **A leak in the report-level evidence gaps list still fails the whole report.** It now gets a guided retry and is logged by field.
+  - **No real reply has been seen.** Live writer behaviour under the retry instructions needs a Preview run, and no raw reply from the 17 Oct Trading run was saved.
+- **Could not share:** nothing per state. Sections 4 and 8 are excluded by Kevin's rule, not by state.
+- **Must not change:** CNBC acquisition code; `lib/reading-window.js`, `timed`/`monotonicNow`/`sleep`; every `?rev=` token; Neon; the frozen 8-section structure; Section 7 never filled with unsupported content (a retry may return it empty); Section 4 never retried; every existing section rule and final check (a retried section passes the same checks); the classifier retry (still identical; 9F.4c is Build B); a failed or invalid regeneration preserves the previous valid report; protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f`.
+- **Supersedes:** Step 8R.B (the try-hard Section 3 sentence, never built), replaced by this section retry. It also supersedes part of Step 8L's must-not-change list, for the writer only: the whole-report retry may now name the broken rule instead of being byte-identical (switch `writerRetryGuidanceEnabled`; off restores 8L exactly). It extends the CLAUDE.md "one Anthropic request per structured generation" rule: with the switches on, a run may make up to `writerCallsPerRunMax` writer calls (default 3). Step 8L's retry-only-on-`CONTRACT_FAILURE`, skip-after-`max_tokens` and 150 s guard are unchanged.

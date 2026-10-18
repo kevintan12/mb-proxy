@@ -1,6 +1,7 @@
 const {startingListTests} = require('./fixtures/section-four-switch');
+const {sectionRetryOffTests} = require('./fixtures/writer-section-retry-switch');
 // Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
-const test = startingListTests(require('node:test'), [
+const startingListTest = startingListTests(require('node:test'), [
   "Step 8U.2: in every state group each rule break empties one section, not the report",
   "Step 8U.5: in every state a made-up ref in Section 5 empties only Section 5",
   "Step 8U.5: a made-up ref beside the empty-list Section 4 text keeps the exact text",
@@ -19,6 +20,15 @@ const test = startingListTests(require('node:test'), [
   "gives Section 3 non-causal broad-market session-association instructions",
   "builds one deterministic server-owned request with a projected package and no tools",
   "active optional section defects localize together without retaining unsupported prose"
+]);
+// Step 9L: these assert one writer call or an exact event list on a reply that leaves a
+// retryable section empty on purpose, so they run with the section retry off.
+const test = sectionRetryOffTests(startingListTest, [
+  "PRE, REGULAR and POST can synthesize a grounded section when current news is unavailable",
+  "Step 8U.2: in every state group each rule break empties one section, not the report",
+  "Step 8U.5: in every state a made-up ref in Section 5 empties only Section 5",
+  "Step 8U.6: in every state an all-ungrounded Section 6 is still emptied and a grounded one is unchanged",
+  "Step 8U.8: in every state a section with only uncatalyzed causal text is emptied, except completed Section 1"
 ]);
 const assert = require('node:assert/strict');
 const {emptySectionFour} = require('./fixtures/section-four-empty');

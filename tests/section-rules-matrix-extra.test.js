@@ -16,11 +16,21 @@
 'use strict';
 
 const {startingListTests} = require('./fixtures/section-four-switch');
+const {sectionRetryOffTests} = require('./fixtures/writer-section-retry-switch');
 // Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
-const test = startingListTests(require('node:test'), [
+const startingListTest = startingListTests(require('node:test'), [
   "Step 9D.5a: R3 a repeated evidence ref is removed silently, in every state",
   "Step 9D.5a: R12 Section 2 needs a current-session driver on active days only",
   "Step 9D.5a: R2 analyst-desk jargon is rewritten in plain English, in every state"
+]);
+// Step 9L: these assert one writer call or an exact event list on a reply that leaves a
+// retryable section empty on purpose, so they run with the section retry off.
+const test = sectionRetryOffTests(startingListTest, [
+  "Step 9D.5a: R8/R27 content citing no evidence is emptied by the last-resort step, in every state",
+  "Step 9D.5a: R11 Section 2 must cite a driver ref, in every state",
+  "Step 9D.5a: R12 Section 2 needs a current-session driver on active days only",
+  "Step 9D.5a: R17 Section 3 must cite a focus ref and name its subject, in every state",
+  "Step 9D.5a: R28 the nothing-survived fallback, recorded in every state"
 ]);
 const assert = require('node:assert/strict');
 
