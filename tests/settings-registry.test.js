@@ -370,3 +370,20 @@ test('Step 9F.6d Build B settings registry: cnbcSharedReaderCompletedEnabled', (
       {env: {CNBC_SHARED_READER_COMPLETED_ENABLED: value}}), true, value);
   }
 });
+
+// Step 9F.4d: the one new setting, the switch for keeping the other labels when only
+// after-close items were labelled a principal catalyst. Admin, on by default, wired.
+test('Step 9F.4d settings registry: classifierPartialKeepEnabled', () => {
+  const entry = SETTINGS_REGISTRY.classifierPartialKeepEnabled;
+  assert.deepEqual([entry.default, entry.admin, entry.envVar, entry.wired, entry.boolean],
+    [true, 'Admin', 'CLASSIFIER_PARTIAL_KEEP_ENABLED', true, true]);
+  assert.equal(settingValue('classifierPartialKeepEnabled', {env: {}}), true);
+  for (const value of ['false', '0', 'off', 'OFF']) {
+    assert.equal(settingValue('classifierPartialKeepEnabled',
+      {env: {CLASSIFIER_PARTIAL_KEEP_ENABLED: value}}), false, value);
+  }
+  for (const value of ['', 'maybe']) {
+    assert.equal(settingValue('classifierPartialKeepEnabled',
+      {env: {CLASSIFIER_PARTIAL_KEEP_ENABLED: value}}), true, value);
+  }
+});
