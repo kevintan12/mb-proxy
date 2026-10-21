@@ -343,3 +343,57 @@ test('Step 9F.4d: a mixed fault keeps the whole fallback with the switch on', as
   assert.equal(run.stages.includes('evidenceRoleClassificationPartialKeep'), false);
   assert.ok(run.stages.includes('evidenceRoleClassificationFallback'));
 });
+
+// ---------------------------------------------------------------------------
+// Retry count 0: the same WEEKEND package, but with no retry allowed at all.
+// The partial keep is computed from the single failed attempt, so it must not
+// depend on the guided retry ever happening.
+// ---------------------------------------------------------------------------
+async function assembleNoRetry(switchValue, options) {
+  const built = build(options);
+  const output = await withEnv({...PINNED, CLASSIFIER_RETRY_COUNT: '0', [SWITCH]: switchValue}, () => built.service.assemble({
+    benchmarkAnchors: [{market: 'US', symbol: '^RUT'}], selectedScope: 'US', initiatingList: 'myStocks',
+    userTimezone: 'Asia/Singapore', myStocks: [], watchlist: []
+  }));
+  const context = output.marketPackages[0].evidenceContext;
+  const refOf = title => context.evidence.find(entry => entry.item.title === title)?.reference;
+  return {...built, output, context, refOf, stages: built.diagnostics.map(value => value.stage)};
+}
+
+test('Step 9F.4d: retry count 0, switch on: one fetch, the partial keep still applies', async () => {
+  const run = await assembleNoRetry('on');
+  const [completed, unnamed, recap, note] = STORIES.map(([title]) => run.refOf(title));
+  assert.ok(completed && unnamed && recap && note);
+  assert.equal(validateClaudeAnalysisInput(run.output), true);
+  assert.equal(run.calls.fetch, 1, 'no retry at CLASSIFIER_RETRY_COUNT=0');
+  assert.equal(run.calls.repair, 0, 'no subject-repair call');
+  assert.deepEqual(run.context.principalCatalysts, [completed]);
+  assert.deepEqual(byNumber(run.context.materialEvents), byNumber([completed, unnamed, recap, note]));
+  assert.deepEqual(byNumber(run.context.broadMarketFocus.map(entry => entry.evidenceRef)),
+    byNumber([completed, recap, note]));
+  assert.equal(run.context.unresolvedGaps.some(gap => gap.includes(FAILED_GAP)), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(run.diagnostics.find(value =>
+    value.stage === 'evidenceRoleClassificationPartialKeep'))), {
+    stage: 'evidenceRoleClassificationPartialKeep',
+    outcome: 'DEMOTED_PRINCIPAL_CATALYST',
+    demotedReferences: byNumber([recap, note]),
+    demotedReferenceCount: 2,
+    keptReferenceCount: run.context.evidence.length - 2,
+    subjectRepairSkipped: true
+  });
+  assert.equal(run.stages.includes('evidenceRoleClassificationFallback'), false);
+  assert.equal(run.stages.includes('evidenceSubjectRepair'), false);
+});
+
+test('Step 9F.4d: retry count 0, switch off: whole fallback, identical to e4baea5', async () => {
+  const run = await assembleNoRetry('off');
+  assert.equal(run.calls.fetch, 1, 'no retry at CLASSIFIER_RETRY_COUNT=0');
+  assert.equal(run.calls.repair, 0);
+  assert.deepEqual(run.context.materialEvents, []);
+  assert.deepEqual(run.context.principalCatalysts, []);
+  assert.deepEqual(run.context.broadMarketFocus, []);
+  assert.equal(run.context.unresolvedGaps.filter(gap => gap.includes(FAILED_GAP)).length, 1);
+  assert.equal(run.stages.includes('evidenceRoleClassificationPartialKeep'), false);
+  assert.ok(run.diagnostics.some(value => value.stage === 'evidenceRoleClassificationFallback'
+    && value.outcome === 'CONSERVATIVE_UNCLASSIFIED'));
+});
