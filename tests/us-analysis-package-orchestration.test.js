@@ -6,7 +6,12 @@ const startingListTest = startingListTests(require('node:test'), [
 ]);
 // Step 9L: these assert one writer call or an exact event list on a reply that leaves a
 // retryable section empty on purpose, so they run with the section retry off.
-const test = sectionRetryOffTests(startingListTest, [
+const sectionRetryTest = sectionRetryOffTests(startingListTest, [
+  "Step 8U.10: a failed classifier on CLOSED, WEEKEND and HOLIDAY returns a DEGRADED report, not a 502"
+]);
+// Step 9V: this pins the 52552bc completed-day Section 1 text, so it runs with
+// completedSinceCloseEnabled off.
+const test = require('./fixtures/completed-since-close-switch').completedSinceCloseOffTests(sectionRetryTest, [
   "Step 8U.10: a failed classifier on CLOSED, WEEKEND and HOLIDAY returns a DEGRADED report, not a 502"
 ]);
 const assert = require('node:assert/strict');

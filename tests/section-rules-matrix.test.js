@@ -26,7 +26,13 @@ const sectionRetryTest = sectionRetryOffTests(startingListTest, [
 ]);
 // Step 8W: this pins the writer request size, so it runs with dateAccuracyEnabled off (on adds
 // the publish and report-time labels and the one date instruction).
-const test = require('./fixtures/step-8w-switches').dateAccuracyOffTests(sectionRetryTest, [
+const dateAccuracyTest = require('./fixtures/step-8w-switches').dateAccuracyOffTests(sectionRetryTest, [
+  "Step 9D.1: writer request size on the rich completed fixture is unchanged"
+]);
+// Step 9V: these pin the 52552bc completed-day Section 1 text or writer request size, so they
+// run with completedSinceCloseEnabled off.
+const test = require('./fixtures/completed-since-close-switch').completedSinceCloseOffTests(dateAccuracyTest, [
+  "Step 9D.1: R16 causal-claim-without-catalyst applies the same way to Sections 1, 4, 6 and 7",
   "Step 9D.1: writer request size on the rich completed fixture is unchanged"
 ]);
 const assert = require('node:assert/strict');

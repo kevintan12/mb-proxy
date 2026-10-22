@@ -1,6 +1,13 @@
 const {startingListTests} = require('./fixtures/section-four-switch');
 // Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
-const test = startingListTests(require('node:test'), [
+// Step 9V: these pin the 52552bc completed-day Section 1 text, so they run with
+// completedSinceCloseEnabled off.
+const sinceCloseOffTest = require('./fixtures/completed-since-close-switch').completedSinceCloseOffTests(
+  require('node:test'), [
+    "a repaired broad-market focus package preserves valid causal and initiating-list sections",
+    "does not launder unknown global references through section-local normalization"
+  ]);
+const test = startingListTests(sinceCloseOffTest, [
   "Step 9B: drops non-initiating Section 4 benchmark telemetry and keeps the section text",
   "preserves the deterministic empty initiating-list statement",
   "T4 completed CLOSED, WEEKEND and HOLIDAY sections survive style-only jargon unchanged",
