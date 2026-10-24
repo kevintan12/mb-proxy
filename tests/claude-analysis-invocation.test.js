@@ -49,8 +49,14 @@ const completedSinceCloseTest = require('./fixtures/completed-since-close-switch
   "Step 8P.2(b): completed-day requests are byte-identical with the switch on or off"
 ]);
 // Step 9Z: this pins the 43c8d3d Section 1 writer line, so it runs with shortExecutiveSummaryEnabled off.
-const test = require('./fixtures/short-summary-switch').shortSummaryOffTests(completedSinceCloseTest, [
+const shortSummaryTest = require('./fixtures/short-summary-switch').shortSummaryOffTests(completedSinceCloseTest, [
   "gives Sections 1-2 concise prioritization and supported causal instructions"
+]);
+// Step 9AA Build 1: these pin the 5409b44 Section 4 text or writer request size, so they run with
+// sectionFourTableEnabled off.
+const test = require('./fixtures/section-four-table-switch').sectionFourTableOffTests(shortSummaryTest, [
+  "reports deterministic sanitized request sizes and provider usage on success",
+  "T7 Section 4 uses the same style policy: style survives, malformed prose localizes"
 ]);
 const assert = require('node:assert/strict');
 const {emptySectionFour} = require('./fixtures/section-four-empty');

@@ -7,7 +7,12 @@ const sinceCloseOffTest = require('./fixtures/completed-since-close-switch').com
     "a repaired broad-market focus package preserves valid causal and initiating-list sections",
     "does not launder unknown global references through section-local normalization"
   ]);
-const test = startingListTests(sinceCloseOffTest, [
+// Step 9AA Build 1: these pin the 5409b44 Section 4 text, so they run with sectionFourTableEnabled off.
+const tableOffTest = require('./fixtures/section-four-table-switch').sectionFourTableOffTests(sinceCloseOffTest, [
+  "Production-shaped Section 3 overlap keeps fully-linked stock telemetry and preserves Section 4",
+  "Section 3 localizes uncited portfolio symbols and instrument names, but allows independently focused companies"
+]);
+const test = startingListTests(tableOffTest, [
   "Step 9B: drops non-initiating Section 4 benchmark telemetry and keeps the section text",
   "preserves the deterministic empty initiating-list statement",
   "T4 completed CLOSED, WEEKEND and HOLIDAY sections survive style-only jargon unchanged",

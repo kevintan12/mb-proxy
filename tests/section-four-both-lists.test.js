@@ -30,7 +30,20 @@ const {withSectionFourSwitch} = require('./fixtures/section-four-switch');
 
 // Each test sets the switch itself (on unless it says otherwise), so a whole-suite run with
 // SECTION_FOUR_BOTH_LISTS_ENABLED=off still checks the both-lists behaviour.
-const test = (name, fn) => nodeTest(name, () => withSectionFourSwitch('on', fn));
+const bothListsTest = (name, fn) => nodeTest(name, () => withSectionFourSwitch('on', fn));
+// Step 9AA Build 1: these pin the 5409b44 Section 4 text, writer lines or allowlist keys, so they
+// run with sectionFourTableEnabled off.
+const test = require('./fixtures/section-four-table-switch').sectionFourTableOffTests(bothListsTest, [
+  "Step 21D.2: the Section 4 stocks are My Stocks then the Watchlist in saved order, whichever list started",
+  "Step 21D.2: the writer is told to cover both lists, with no starting-list wording left",
+  "Step 21D.2: a My Stocks brief keeps a Watchlist stock and its refs in Section 4",
+  "Step 21D.2: the 21D.1 reason check runs across both lists",
+  "Step 21D.2: a stock with no article shows its move only and Section 4 is never blanked for it",
+  "Step 21D.2: with one list empty, Section 4 covers the other list in either brief",
+  "Step 21D.2: when nothing is left, Section 4 is emptied with the both-lists wording",
+  "Step 21D.2: a stock in neither list is still trimmed from Section 4",
+  "Step 21D.2: 16 stocks (8 + 8) are all covered, in order, with a small request size increase"
+]);
 
 const NAMES = {
   MSFT: 'Microsoft Corporation', NVDA: 'NVIDIA Corporation', UNH: 'UnitedHealth Group Incorporated',
