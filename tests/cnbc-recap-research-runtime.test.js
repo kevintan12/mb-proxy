@@ -1,4 +1,6 @@
-const test = require('node:test');
+const test = require('./fixtures/since-close-fixes-switch').sinceCloseFixesOffTests(require('node:test'), [
+  'missing deterministic CNBC page is optional and never invokes Claude fallback'
+]);
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

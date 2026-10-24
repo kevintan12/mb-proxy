@@ -2311,3 +2311,84 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - Scripts in `Replay Packages\harness`: `9W-A1-fallback.js`, `9W-A1-companies.js` (they need `old` = `70b8da6` next to them, as the `9W-proof-indep-*` scripts do).
 - **Missing evidence:** no HOLIDAY package; no older-style Trading package; no live Preview run; the effect of short names on a real full listing pool (not saved). Not done within the 60-minute limit: the ~1,000 generated cases against an independent reference and the 4 planted mistakes (each guard has a unit test instead).
 - **Must not change:** an empty spotlight is no spotlight (byte-identical to `70b8da6`); short names for the spotlight only; list companies matched only by the shared matcher; `headlineMatchesIdentity` unchanged; the lists are code constants, not Admin settings; everything in the Build A "Must not change" list.
+
+## Step 9Y - iPad paste import (repo: MarketBrief)
+
+- **Date:** 2026-10-24 · **Branch:** step-9y-ipad-paste-import (from `739bf00`) · **Status:** IMPLEMENTED, tests passing; not committed. Plan accepted by Kevin ("BUILD APPROVED - Step 9Y").
+- **Why:** on Kevin's iPad, tapping the Settings → Sync Settings import box in Chrome only shows a blinking cursor; no Paste menu appears, so a settings code copied on another device cannot be imported. Safari on the same iPad works. Nothing on the page blocks paste (no `user-select:none`, `-webkit-touch-callout:none` or touch `preventDefault` near the box). Likely cause (not confirmed, no iPad Chrome available here): the box was 12.8px (inline `font-size:0.8rem`), so iOS zooms on focus, and Chrome appears to swallow the edit menu during that zoom.
+- **Kevin's decisions, with reasons:**
+  1. Import box set to `font-size:1rem` (stops the iOS focus zoom), with `autocapitalize="off" autocorrect="off" spellcheck="false"`. A new "📋 Paste from Clipboard" button above "⬇ Import Settings Code" calls `pasteSettingsCode(pid)`: on success it trims the clipboard text into the box and shows "✓ Code pasted. Tap Import Settings Code."; on any failure (API missing, throws, rejected, denied, or empty clipboard) it shows "Couldn't read the clipboard. Tap and hold the box above, then choose Paste." Reason: the cause is a likely guess, so the fix must not depend on the Paste menu appearing.
+  2. The Paste button never imports. Import stays a separate tap; `importSettings()` is unchanged.
+  3. No switch: a page-only fix; rollback is a revert and a refresh.
+  4. No `?rev=` bump (standing rule: only at release step 12B). A device holding the cached `app.js?rev=active-quote-display` will show no Paste button and the old small box until its cache is cleared.
+  5. This entry has no D-number (Step Table names only).
+- **What changed (MarketBrief repo only):** `app.js` — import box markup and the new button in `renderSettingsPanelTo`; new `pasteSettingsCode` next to `importSettings`. New test file `tests/settings-paste.test.js` (5 tests, made-up codes only — the repo is PUBLIC). No existing test edited.
+- **Other paste/clipboard places checked, none need the fix:** export code box + Copy Code (read-only, writes the clipboard); Settings ticker search and Search tab box (typed, not pasted codes); PIN, Proxy URL and Investment amount fields (already 1rem). The import box is the only paste-and-read-clipboard place in the repo.
+- **Proof:** Node tests cannot run Chrome or Safari on iPad or the iOS clipboard; they prove only the success / rejected / missing / empty paths and the markup. Kevin's live iPad check (Chrome, Safari, Home Screen app, after clearing the cached file) is the real proof — not yet done.
+- **Options rejected, with reasons:** auto-import on paste (an accidental clipboard read could overwrite settings and the PIN hash); a contenteditable box (more iOS quirks, no gain); a global CSS font change for all inputs (outside scope, other fields are already 16px); a `?rev=` bump (rule above); editing `tests/settings-persistence.test.js` (would change existing lines; a new file avoids that).
+- **Must not change:** export format, import parsing, PIN hash handling, cross-list dedupe (Step 20B), reload timing, report/package logic, other tabs, any `?rev=` token or `marketbrief.html` value; the Paste button never imports.
+- **Tests (MarketBrief repo):** isolated per file — 179 pre-existing + 5 new = 184/184 pass. `node --check` 7/7 root `.js` files clean. `git diff --check` to be run by Kevin (no Git command run here).
+
+## Step 9V.3 - Since-the-close fixes (Build 1) (repo: mb-proxy)
+
+- **Date:** 2026-10-24 · **Branch:** step-9v3-since-close-fixes (from `f5aa78b`) · **Status:** IMPLEMENTED, tests and free proof passing; not committed. Live Closed or Weekend Preview run still to come.
+- **Why:** Kevin's live Closed run on Sat 24 Oct 2026 (generatedAt 02:12:12Z) had no since-the-close paragraph in Section 1. CNBC renamed its daily live blog from `.../stock-market-today-live-updates.html` to `.../stock-market-today-live-update.html`. A free read-only fetch on 24 Oct returned 404 for `/2026/10/22/...live-updates.html` and 200 for `/2026/10/22/...live-update.html`; the date rule (previous trading day) is unchanged. So the CNBC recap failed. The CNBC news-list skip also missed the new name, so the live blog's closing post ("Stocks close lower on Friday", 4:06 pm ET) came in as ordinary news published after the close. It became the only Section 1 since-close item, and the writer used it as a description of the close. The old name was hard-coded in 7 places. The 24 Oct 12:35 SGT Weekend package shows the same item on its list. The current recap reader parses the new page unchanged (checked offline on the saved page).
+- **Kevin's decisions (24 Oct 2026), with reasons:**
+  1. One own Admin switch `sinceCloseFixesEnabled` (env `SINCE_CLOSE_FIXES_ENABLED`), default on, next to `completedSinceCloseEnabled`, covering all four fixes including the CNBC address. Off = `f5aa78b` byte for byte in all six states. Fixes 3 to 5 also need `completedSinceCloseEnabled` on. No new numbers. Reason: off must be a true rollback.
+  2. CNBC address (Fix 1): both names are the live blog. The built recap address is fetched as before, under the old name. Only when the answer is 404, 410, 301, 302, 307 or 308 is the other name fetched once (same 4-second limit). Any other failure does not try it. Reason: the rename is the root cause, and old-first keeps every existing success path unchanged; one free 404 per run is accepted.
+  3. Exactly one existing test changes, by its header only (see Tests).
+  4. A further rename is never silent: `cnbcRecapAddress` NOT_RECOGNISED, and a count of unrecognised live-blog-looking addresses on the CNBC reader summary line.
+  5. Fix 3 (Section 1 paragraph) and Fix 5 (Section 3 time) are warnings only: a log line and a counter, no fallback sentence, no change to the report. When every item's home is Section 3, the one-line pointer passes. Reason: with Fix 1 the remaining items are mostly close wraps or opinion, and a fixed line would be accurate but misleading.
+  6. Fix 4: on Closed, Weekend and Holiday requests **with** since-close items, the older later-news line ("especially Section 7", "Do not include ... when they are immaterial") is limited to later items with no home section. Pre-market, Regular and After-Hours writer requests stay byte-identical.
+  - Out of scope: whether close wraps count as after-close news (Build 2); a stated cause must cite a news article (Build 3); the figure slips; any fallback sentence; any change to the rule that after-close news is never the cause of the completed session's move.
+- **What changed:**
+  1. `lib/settings-registry.js`: the switch row.
+  2. `lib/cnbc-live-blog-address.js` (new; not in the planned list, see below): the one live-blog address rule (`isCnbcLiveBlogPath`, `isUnrecognisedCnbcLiveBlogPath`, `otherCnbcLiveBlogUrl`, `sinceCloseFixesOn`). Switch on: either name; off: the old name only. Each site keeps its own trailing-slash and case rule.
+  3. `lib/cnbc-deterministic-recap-discovery.js`: re-exports the rule; new `isDeterministicCnbcRecapUrl` (the built address for that session date under either name with the switch on). `deterministicCnbcRecapCandidate` and the discovery service are unchanged.
+  4. `lib/cnbc-article-content-acquisition.js`: the recap path check uses the rule. A failed request keeps its HTTP status on the error (never logged from there). New `fetchRecapHtml` in `acquireRecapArticleContent` does the one other-name fetch for built addresses only. The result names the address that was read.
+  5. `lib/cnbc-recap-evidence-construction.js`, `lib/us-analysis-package-orchestration.js` (one identity check, old line 600), `lib/evidence-items.js`, `lib/sources/cnbc-rss.js`, `lib/claude-bounded-cnbc-market-news-discovery.js`: the other six sites use the rule. `cnbc-rss.js` also counts unrecognised live-blog-looking addresses (live-blog option and switch on).
+  6. `lib/claude-analysis-invocation.js`: `scopedSubsequentDevelopmentsPrompt` inserts one sentence into the later-news line ("Items marked sinceLastClose with a sinceCloseHomeSection follow the SINCE-THE-CLOSE PARAGRAPHS instruction, and their home section always comes first; the rest of this paragraph applies only to subsequentDevelopments with no sinceCloseHomeSection."). Every original phrase is kept, and a load-time check requires the line exactly once in both prompt variants. New `emitSinceCloseCoverageDiagnostic` runs once on the final result of `invokeClaudeAnalysis` (both return paths, after any section retry; retry rounds hide their own log lines).
+  7. `lib/section-rules.js`: `sinceCloseCoverage` and `isSinceClosePointerSentence` (beside `mentionsSinceTheClose`).
+  - **Two new files not in the approved list, stated before creating them:** `tests/fixtures/since-close-fixes-switch.js` (the 9V wrapper pattern needs its own fixture file) and `lib/cnbc-live-blog-address.js`. The existing test "Step 9F.6b CNBC RSS: the new files load no Anthropic, Postgres or CNBC acquisition module" forbids `lib/sources/cnbc-rss.js` from loading `cnbc-deterministic-*`, so the shared rule lives in a module that loads only the settings table. That test is unchanged and passes.
+- **The coverage check in plain words (Fixes 3 and 5):**
+  - If any item's home is Section 1, Section 1 passes only when a sentence carries the publish time of one of those Section 1 items.
+  - If every item's home is Section 3, Section 1 passes when a sentence carries any listed publish time, or is a pointer: "after / since / following the close" (also "the last close", "Friday's close"), or "Stocks & Sectors in Focus" / "Stocks and Sectors in Focus".
+  - An empty Section 1 counts as missing.
+  - Section 3: each Section 3-home item that Section 3 cites must have its publish time in some Section 3 sentence.
+- **New log lines:**
+  - `cnbcRecapAddress` `{provider: CNBC, outcome: OTHER_NAME_TAKEN | NOT_RECOGNISED, firstStatus, otherStatus?}`, only when the first name was not found or moved.
+  - `liveBlogUnrecognisedCount` and `liveBlogUnrecognisedPaths` (at most 3) on the existing CNBC reader summary line, only when above 0.
+  - `completedSinceCloseCoverage` `{marketState, itemCount, sectionOneItemCount, sectionThreeItemCount, sectionOne: TIMED_ITEM | POINTER | MISSING | SECTION_EMPTY, warnings: [SINCE_CLOSE_PARAGRAPH_MISSING, SINCE_CLOSE_TIME_MISSING], untimedSectionThreeRefs, warningCount}`, once per finished Closed/Weekend/Holiday report with items. `warningCount` is the counter.
+  - All go only to the server log. Nothing new reaches the package or the result the page receives. The coverage stage can never start a section retry or change report status. No existing stage name or field changed.
+- **Numbers:** none; one switch.
+- **Tests:**
+  - New `tests/since-close-fixes.test.js` (28 tests, made-up addresses, pages and replies only).
+  - With Kevin's approval (24 Oct), one existing test runs with the switch off through the 9V wrapper pattern (header lines only, no test body changed): "missing deterministic CNBC page is optional and never invokes Claude fallback" in `tests/cnbc-recap-research-runtime.test.js`. Its switch-on counterpart is a new test (requests `[old, new]`, no Claude call).
+  - No other existing test changed.
+- **Build checks (24 Oct 2026, free; scratch harness outside the repo; baseline = a copy of `lib`, `api`, `tests` taken before the first edit, equal to `f5aa78b`):**
+  1. **Full suite:** before, 1,625 tests, 1,624 pass, 0 fail, 1 todo. After, switch unset: 1,654 tests, 1,653 pass, 0 fail, 1 todo. With `SINCE_CLOSE_FIXES_ENABLED=false`, the same 1,654 / 1,653 / 0 / 1. The 29 new: 28 in the new file plus the generated on/off row for the new switch. Syntax: 65 of 65 files (`api`, `lib`, `lib/sources`; 64 before, plus the new module). `git diff --check`: to be run by Kevin.
+  2. **Switch off = `f5aa78b`:** all 28 saved package files (CLOSED, WEEKEND, PRE, REGULAR, POST, including today's 12:35 SGT Weekend package) give a byte-identical writer request and report and the same log stages.
+  3. **Switch on, active states:** all 17 PRE, REGULAR and POST files give a byte-identical writer request and report.
+  4. **Switch on, completed states:** the 9 files with since-close items get the scoped line and one coverage line (the stand-in reply has no since-close sentence, so it warns as it should); the 2 older Weekend files without items are unchanged.
+  5. **24 Oct replay:**
+     - Old name 404 and saved new-name page → recap SUCCESS on the new name ("Dow tumbles more than 600 points...", 20:06:49Z), logged OTHER_NAME_TAKEN. Switch off → one request, HTTP failure, as before.
+     - The CNBC list skips the e39 address with the switch on.
+     - Since-close list after the fix: e40, e41, e42, e49, all Section 3. The writer request carries the pointer instruction and the scoped line.
+     - Coverage on the delivered Section 1 and 3 text, before and after the fix: MISSING plus untimed e40 (Cramer, 9:37 pm ET) and e41 (5:39 pm ET).
+  6. **Generated cases:** 1,500 against an independent reference written from the decision text, 0 differences. 1,000 address checks (500 paths, switch on and off) through four real sites: the shared rule, the CNBC list skip, the evidence-item recap allowance and the paid-search rejection. 500 Section 1 / Section 3 coverage cases.
+  7. **Planted mistakes (4), all caught:**
+     - date check dropped: 422 differences, 1 unit test fails;
+     - unlisted time accepted: 208 differences, 2 tests fail;
+     - scoped line leaking into active requests: all 17 active files differ, 1 test fails;
+     - pointer not accepted: 28 differences, 2 tests fail.
+  - Scripts and outputs copied to `Replay Packages\harness` as `9V3-*` (no overwrites).
+- **Known limits (stated, not fixed here):**
+  - **The CNBC page is at 92% of the size limit** (1,209,751 of 1,310,720 bytes on 24 Oct), so a small growth makes the recap fail with CONTENT_TOO_LARGE (logged as an ordinary recap failure).
+  - One free 404 per completed run while CNBC uses the new name (old name tried first by decision).
+  - The Section 3 time check is per item, not per sentence (section-level references).
+  - The pointer is matched by wording only.
+  - Close wraps still count as after-close news (Build 2); e41 is one.
+  - The new-name date on a Monday session (previous Friday) and after a holiday is unverified.
+  - **Missing evidence:** no HOLIDAY package (fixtures only); no real package built after the fix; no live run.
+- **Must not change:** the protected checkpoints; after-close news is never the cause of the completed session's move; no fixed fallback sentence; the warnings never change the report, its status or any retry; PRE, REGULAR and POST writer requests byte-identical; switch off = `f5aa78b`; one writer call, no added paid call; the live blog stays the recap path's (Step 9F.6d Build B decision 8), now under either name.
+- **Supersedes / extends:** extends Step 9V (warning checks on its paragraphs; the old later-news line scoped on completed days with items) and Step 9F.6d Build B decision 8 (the live-blog skip, now under either name).
