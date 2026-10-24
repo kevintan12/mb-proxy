@@ -11,8 +11,13 @@ const sectionRetryTest = sectionRetryOffTests(startingListTest, [
 ]);
 // Step 9V: this pins the 52552bc completed-day Section 1 text, so it runs with
 // completedSinceCloseEnabled off.
-const test = require('./fixtures/completed-since-close-switch').completedSinceCloseOffTests(sectionRetryTest, [
+const sinceCloseTest = require('./fixtures/completed-since-close-switch').completedSinceCloseOffTests(sectionRetryTest, [
   "Step 8U.10: a failed classifier on CLOSED, WEEKEND and HOLIDAY returns a DEGRADED report, not a 502"
+]);
+// Step 9AA.2: this pins "a failed stock has no evidence ref" (3722898), so it runs with
+// sectionFourPriceRecordEnabled off; the records have their own tests.
+const test = require('./fixtures/section-four-price-record-switch').sectionFourPriceRecordOffTests(sinceCloseTest, [
+  'one failed symbol or evidence item leaves unrelated telemetry and references canonical'
 ]);
 const assert = require('node:assert/strict');
 const {
@@ -6789,3 +6794,118 @@ test('Step 9F.2e.6 + 9F.2g: dropping a stock\'s only article leaves no Section 4
   assert.equal(output.portfolioContext.watchlist[0].evidenceRefs.length, 1);
   assert.equal(JSON.stringify(output).includes(watched.headline), false);
 });
+
+// Step 9AA.2: every My Stocks / Watchlist stock with no Yahoo quote line gets a price record,
+// appended after every other item, in no role list and not in Further Readings. Each test sets
+// the switches itself.
+const {withEnv: withSwitch} = require('./fixtures/step-8w-switches');
+const {isSectionFourPriceRecord} = require('../lib/section-rules');
+const priceRecordsOn = fn => withSwitch('SECTION_FOUR_BOTH_LISTS_ENABLED', 'on', () =>
+  withSwitch('SECTION_FOUR_TABLE_ENABLED', 'on', () => withSwitch('SECTION_FOUR_PRICE_RECORD_ENABLED', 'on', fn)));
+
+function priceRecordHarness() {
+  return harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        if (symbol === 'AAPL') throw new Error('raw provider failure');
+        if (symbol === 'TSLA') return snapshotForLatestDate('TSLA', '2026-09-03');
+        return snapshot(symbol);
+      }
+    }),
+    snapshotPersistence: {
+      async persistSnapshot(value) {
+        if (value.symbol === 'AMD') {
+          throw Object.assign(new Error('conflict'), {code: 'SNAPSHOT_READ_MISMATCH',
+            diagnosticDetails: {mismatchReason: 'CANONICAL_SESSION_VALUES'}});
+        }
+        return value;
+      }
+    },
+    yahooEvidenceAcquisition: {
+      async acquireEvidence({symbol}) {
+        if (symbol === 'MSFT') throw new Error('raw evidence failure');
+        return yahooEvidence(symbol);
+      }
+    }
+  });
+}
+
+const priceRecordRequest = () => request('US', {
+  myStocks: [{market: 'US', symbol: 'MSFT'}, {market: 'US', symbol: 'AAPL'}, {market: 'US', symbol: 'NVDA'}],
+  watchlist: [{market: 'US', symbol: 'TSLA'}, {market: 'US', symbol: 'AMD'}, {market: 'US', symbol: 'NVDA'}]
+});
+
+test('Step 9AA.2: each way a quote line goes missing gives exactly one price record of the right kind', () =>
+  priceRecordsOn(async () => {
+    const output = await priceRecordHarness().service.assemble(priceRecordRequest());
+    assert.equal(validateClaudeAnalysisInput(output), true);
+    const marketPackage = output.marketPackages[0];
+    const evidence = marketPackage.evidenceContext.evidence;
+    const records = evidence.filter(entry => isSectionFourPriceRecord(entry.item));
+    // Blank telemetry (AAPL), stale-date drop (TSLA), persistence conflict (AMD), quote fetch
+    // failed with telemetry OK (MSFT); NVDA has its quote line and gets none. Portfolio order.
+    assert.deepEqual(records.map(entry => [entry.item.title, entry.item.summary]), [
+      ['MSFT instrument (MSFT) price', 'MSFT instrument (MSFT): $105.00, ↑ 5.00 (5.00%), at the close on Fri 4 Sep. '
+        + 'Price record made by MarketBrief for the Section 4 table.'],
+      ['AAPL price not available', 'No price available for AAPL in this report. '
+        + 'Price record made by MarketBrief for the Section 4 table.'],
+      ['TSLA price not available', 'No price available for TSLA in this report. '
+        + 'Price record made by MarketBrief for the Section 4 table.'],
+      ['AMD price not available', 'No price available for AMD in this report. '
+        + 'Price record made by MarketBrief for the Section 4 table.']
+    ]);
+    assert.equal(records[0].item.publishedAt, '2026-09-04T20:00:00.000Z');
+    assert.equal(records[1].item.publishedAt, GENERATED_AT);
+    assert.deepEqual(records.map(entry => entry.item.canonicalUrl), ['MSFT', 'AAPL', 'TSLA', 'AMD']
+      .map(symbol => `https://finance.yahoo.com/quote/${symbol}/`));
+    // Appended after every other item.
+    assert.deepEqual(records.map(entry => entry.reference), evidence.slice(-4).map(entry => entry.reference));
+    // In no role list and not in Further Readings.
+    const recordRefs = new Set(records.map(entry => entry.reference));
+    const context = marketPackage.evidenceContext;
+    for (const key of ['materialEvents', 'authoritativeFacts', 'principalCatalysts', 'supportingEvidence',
+      'conflictingEvidence', 'subsequentDevelopments']) {
+      assert.equal(context[key].some(reference => recordRefs.has(reference)), false, key);
+    }
+    assert.equal(context.furtherReadings.some(entry => recordRefs.has(entry.evidenceRef)), false);
+    assert.equal(context.broadMarketFocus.some(entry => recordRefs.has(entry.evidenceRef)), false);
+    // Each stock cites its quote line, or else its record; NVDA is in both lists, once each.
+    const refOf = symbol => output.portfolioContext.myStocks.concat(output.portfolioContext.watchlist)
+      .find(entry => entry.symbol === symbol).evidenceRefs;
+    for (const [index, symbol] of ['MSFT', 'AAPL', 'TSLA', 'AMD'].entries()) {
+      assert.deepEqual(refOf(symbol), [records[index].reference], symbol);
+    }
+    const nvda = evidence.find(entry => entry.item.title === 'NVDA market data');
+    assert.deepEqual(refOf('NVDA'), [nvda.reference]);
+  }));
+
+test('Step 9AA.2: records never move an existing reference, and the switch off adds none', () =>
+  priceRecordsOn(async () => {
+    const on = await priceRecordHarness().service.assemble(priceRecordRequest());
+    const off = await withSwitch('SECTION_FOUR_PRICE_RECORD_ENABLED', 'off', () =>
+      priceRecordHarness().service.assemble(priceRecordRequest()));
+    const onEvidence = on.marketPackages[0].evidenceContext.evidence;
+    const offEvidence = off.marketPackages[0].evidenceContext.evidence;
+    assert.equal(offEvidence.some(entry => isSectionFourPriceRecord(entry.item)), false);
+    assert.deepEqual(onEvidence.slice(0, offEvidence.length), offEvidence);
+    assert.equal(onEvidence.length, offEvidence.length + 4);
+    const {evidence: dropOn, ...contextOn} = on.marketPackages[0].evidenceContext;
+    const {evidence: dropOff, ...contextOff} = off.marketPackages[0].evidenceContext;
+    assert.deepEqual(contextOn, contextOff);
+    // Off: no stock without a quote line has any evidence ref (3722898).
+    assert.deepEqual(off.portfolioContext.myStocks.map(entry => entry.evidenceRefs.length), [0, 0, 1]);
+  }));
+
+test('Step 9AA.2: a package where every stock has its quote line is unchanged by the switch', () =>
+  priceRecordsOn(async () => {
+    const lists = request('US', {myStocks: [{market: 'US', symbol: 'MSFT'}], watchlist: [{market: 'US', symbol: 'NVDA'}]});
+    const on = await harness().service.assemble(lists);
+    const off = await withSwitch('SECTION_FOUR_PRICE_RECORD_ENABLED', 'off', () => harness().service.assemble(lists));
+    assert.equal(JSON.stringify(on), JSON.stringify(off));
+  }));
+
+test('Step 9AA.2: both lists empty gives no records', () =>
+  priceRecordsOn(async () => {
+    const output = await harness().service.assemble(request());
+    assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry => isSectionFourPriceRecord(entry.item)), false);
+  }));
