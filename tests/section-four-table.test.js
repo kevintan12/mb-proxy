@@ -427,6 +427,64 @@ test('Step 9AA: the same table code runs in all six market states', async () => 
   }
 });
 
+// Step 9AA Build 1 fix (independent proof): the three "no price data" shapes, through the real
+// pipeline. SOME and NONE missing already match Decisions 5 and 11. ALL missing (and no stock has
+// a surviving news citation either) still loses the table today: composeSectionFour's table has no
+// evidenceRef of its own to offer, and lib/claude-analysis-contract.js CONTENT_NEEDS_EVIDENCE (rule
+// 8) requires evidenceRefs.length > 0 for ANY non-null section content, with no carve-out for a
+// code-built table grounded in telemetryRefs instead. That file is out of scope for this step and
+// no reference may be invented, so this one case is left as today's fallback (Section 4 emptied,
+// the pre-9AA gap message) and reported to Kevin rather than silently patched around.
+test('Step 9AA Build 1 fix: some stocks missing a price keep their row as Not available; the table survives', async () => {
+  const input = tableInput({myStocks: ['NVDA', 'CPRI'], watchlist: [], missing: ['CPRI']});
+  const output = outputWithSectionFour(input, null, [], {evidenceRefs: [], telemetryRefs: []});
+  const {result, diagnostics} = await invokeCounted(input, output);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(tableLines(result.output.sections[3].content), [
+    'Stock | Price | Change', 'My Stocks', 'NVIDIA (NVDA) | $105.00 | ↑ 3.00 (2.94%)',
+    'CPRI | Not available | Not available', 'Prices at the close on Fri 4 Sep.']);
+  const line = diagnostics.find(value => value.stage === 'sectionFourTable');
+  assert.equal(line.notAvailableRows, 1);
+  assert.equal(line.rows, 2);
+});
+
+test('Step 9AA Build 1 fix: no stock missing a price keeps every row priced; the table survives', async () => {
+  const input = tableInput({myStocks: ['NVDA', 'CPRI'], watchlist: []});
+  const output = outputWithSectionFour(input, null, [], {evidenceRefs: [], telemetryRefs: []});
+  const {result, diagnostics} = await invokeCounted(input, output);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.deepEqual(tableLines(result.output.sections[3].content), [
+    'Stock | Price | Change', 'My Stocks', 'NVIDIA (NVDA) | $105.00 | ↑ 3.00 (2.94%)',
+    'Capri Holdings (CPRI) | $105.00 | ↑ 3.00 (2.94%)', 'Prices at the close on Fri 4 Sep.']);
+  assert.equal(diagnostics.find(value => value.stage === 'sectionFourTable').notAvailableRows, 0);
+});
+
+test('Step 9AA Build 1 fix: KNOWN GAP (reported to Kevin, not patched) - every stock missing a '
+  + 'price with no surviving citation still loses the table', async () => {
+  const input = tableInput({myStocks: ['NVDA', 'CPRI'], watchlist: [], missing: ['NVDA', 'CPRI']});
+  const output = outputWithSectionFour(input, null, [], {evidenceRefs: [], telemetryRefs: []});
+  const {result, diagnostics} = await invokeCounted(input, output);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  // Today's fallback: Section 4 stays empty and the report is DEGRADED by the gap message.
+  // Decision 5/11 are not met here; lib/claude-analysis-contract.js CONTENT_NEEDS_EVIDENCE blocks
+  // the only alternative (non-null content with zero evidenceRefs) and is out of scope to change.
+  assert.equal(result.output.sections[3].content, null);
+  assert.equal(diagnostics.some(value => value.stage === 'sectionFourTable'), false);
+  assert.ok(result.output.evidenceGaps.length > 0);
+});
+
+test('Step 9AA Build 1 fix: a report over the word cap from ONE long section still keeps the '
+  + 'table, and the table and note stay out of the word count', async () => {
+  const input = tableInput({myStocks: ['NVDA'], watchlist: []});
+  const output = outputWithSectionFour(input, null, [], {evidenceRefs: [], telemetryRefs: []});
+  output.sections[4] = {...output.sections[4],
+    content: `${output.sections[4].content} ${'word '.repeat(2600).trim()}`};
+  const {result} = await invokeCounted(input, output);
+  assert.equal(result.type, 'SUCCESS', result.message);
+  assert.match(result.output.sections[3].content, /^Stock \| Price \| Change\n/);
+  assert.equal(SECTION_RULES.REPORT_WORD_CAP.detect(result.output), false);
+});
+
 test('Step 9AA: switch off (or the both-lists switch off) leaves Section 4 as the writer and cleanup left it', async () => {
   for (const [envVar, run] of [['table', withSectionFourTableSwitch], ['both lists', withSectionFourSwitch]]) {
     await run('off', async () => {
