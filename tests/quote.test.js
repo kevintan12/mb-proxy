@@ -1,4 +1,9 @@
-const test = require('node:test');
+// Step 9Z: these pin the exact list of writer log lines, so they run with
+// shortExecutiveSummaryEnabled off (on adds the one sectionOneLength line).
+const test = require('./fixtures/short-summary-switch').shortSummaryOffTests(require('node:test'), [
+  "structured Claude route returns validated analysis with one server-owned request",
+  "structured Claude diagnostics omit absent or invalid generation IDs"
+]);
 const assert = require('node:assert/strict');
 const {emptySectionFour} = require('./fixtures/section-four-empty');
 

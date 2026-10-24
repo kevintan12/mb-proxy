@@ -38,7 +38,7 @@ const dateAccuracyTest = require('./fixtures/step-8w-switches').dateAccuracyOffT
 ]);
 // Step 9V: these pin the exact 52552bc completed-day Section 1 text or writer request, so they
 // run with completedSinceCloseEnabled off.
-const test = require('./fixtures/completed-since-close-switch').completedSinceCloseOffTests(dateAccuracyTest, [
+const completedSinceCloseTest = require('./fixtures/completed-since-close-switch').completedSinceCloseOffTests(dateAccuracyTest, [
   "CLOSED, WEEKEND and HOLIDAY retain completed sections and empty only an unsupported Section 3",
   "Step 8U.2: in every state group each rule break empties one section, not the report",
   "Step 8U.5: in every state a made-up ref in Section 5 empties only Section 5",
@@ -47,6 +47,10 @@ const test = require('./fixtures/completed-since-close-switch').completedSinceCl
   "Step 8U.8: in every state a causal sentence backed by the needed catalyst is unchanged",
   "Step 9B: in every state a Section 4 with only unrelated content is emptied with the Step 8J wording",
   "Step 8P.2(b): completed-day requests are byte-identical with the switch on or off"
+]);
+// Step 9Z: this pins the 43c8d3d Section 1 writer line, so it runs with shortExecutiveSummaryEnabled off.
+const test = require('./fixtures/short-summary-switch').shortSummaryOffTests(completedSinceCloseTest, [
+  "gives Sections 1-2 concise prioritization and supported causal instructions"
 ]);
 const assert = require('node:assert/strict');
 const {emptySectionFour} = require('./fixtures/section-four-empty');
