@@ -3,10 +3,24 @@ const analysisPackageRuntime = require('../lib/analysis-package-runtime');
 const {
   validateUsAnalysisOrchestrationRequest
 } = require('../lib/us-analysis-package-orchestration');
+const {
+  guardLegacyModel,
+  modelChoiceEnabled,
+  runWithModelChoiceContext
+} = require('../lib/model-choice');
+const {settingValue} = require('../lib/settings-registry');
 
 const QUOTE_CACHE_TTL_MS = 1500;
 const QUOTE_CACHE_MAX_ENTRIES = 100;
 const quoteCache = new Map();
+
+// Step 9AC: the page's optional model query value (an allowed short id) is read only
+// while userModelChoiceEnabled and modelChoiceEnabled are both on; otherwise the
+// route runs exactly as before.
+function withRequestModelChoice(req, callback) {
+  if (!modelChoiceEnabled(process.env) || settingValue('userModelChoiceEnabled') !== true) return callback();
+  return runWithModelChoiceContext({queryModel: req.query.model}, callback);
+}
 
 function pruneQuoteCache(now) {
   for (const [key, entry] of quoteCache) {
@@ -115,9 +129,9 @@ module.exports = async function handler(req, res) {
     }
     try {
       const service = analysisPackageRuntime.getAnalysisPackageRuntime();
-      const envelope = await analysisPackageRuntime.runWithGenerationId(
+      const envelope = await withRequestModelChoice(req, () => analysisPackageRuntime.runWithGenerationId(
         generationId, () => service.assemble(req.body)
-      );
+      ));
       return res.status(200).json(envelope);
     } catch (error) {
       return res.status(502).json({
@@ -132,7 +146,7 @@ module.exports = async function handler(req, res) {
   // ── Structured Claude analysis endpoint (POST ?claudeAnalysis=1) ─────────
   if (req.method === 'POST' && req.query.claudeAnalysis) {
     const generationId = analysisPackageRuntime.canonicalGenerationId(req.query.generationId);
-    const invocation = await invokeClaudeAnalysis({
+    const invocation = await withRequestModelChoice(req, () => invokeClaudeAnalysis({
       input: req.body,
       apiKey: process.env.ANTHROPIC_API_KEY,
       onDiagnostics(diagnostics) {
@@ -140,7 +154,7 @@ module.exports = async function handler(req, res) {
           analysisPackageRuntime.correlatedDiagnostics(diagnostics, generationId)
         ));
       }
-    });
+    }));
     if (invocation.ok) return res.status(200).json({result: invocation.output});
     const status = invocation.type === 'INPUT_FAILURE'
       ? 400
@@ -159,8 +173,14 @@ module.exports = async function handler(req, res) {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return res.status(403).json({ error: 'Claude API key not configured' });
     try {
-      // Vercel parses req.body automatically — use it directly
-      const body = req.body || {};
+      // Vercel parses req.body automatically — use it directly.
+      // Step 9AC: with legacyModelGuardEnabled on, only an allowed model name is
+      // forwarded; any other is replaced with the Haiku 4.5 name (reason logged only).
+      const guarded = guardLegacyModel(req.body || {});
+      if (guarded.replaced) {
+        console.info('[claude.legacy]', JSON.stringify({stage: 'legacyModelReplaced', reason: 'NOT_ALLOWED'}));
+      }
+      const body = guarded.body;
       const upstream = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {

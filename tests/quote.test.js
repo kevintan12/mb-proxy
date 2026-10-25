@@ -584,7 +584,9 @@ test('legacy Claude proxy still forwards the caller body and streams unchanged',
     await handler({method: 'POST', query: {claude: '1'}, body: callerBody}, res);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages');
-    assert.deepEqual(JSON.parse(calls[0].options.body), callerBody);
+    // Step 9AC: the model guard (legacyModelGuardEnabled, default on) replaces a model
+    // name that is not on the allowed list; the rest of the body is forwarded unchanged.
+    assert.deepEqual(JSON.parse(calls[0].options.body), {...callerBody, model: 'claude-haiku-4-5-20251001'});
     assert.equal(res.statusCode, 201);
     assert.equal(res.headers['Content-Type'], 'text/event-stream');
     assert.deepEqual(res.chunks, chunks);
