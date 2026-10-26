@@ -2564,3 +2564,22 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Fit with later steps:** the allowed list stays in code for good. The Admin default (`claudeModel`) moves to the Neon settings table in Step 9G, checked against the code list; the Admin page (Step 9H) shows a dropdown built from it; a person's own choice will live in the page and reach the server only as the `model` query value while `userModelChoiceEnabled` is on.
 - **Must not change:** switch off = `bd7ef08` byte for byte; the default stays `haiku-4.5` until Kevin approves Stage 3; the allowed list is code-only and exact-match; no request ever names a model off the list; Haiku 4.5 requests never carry `thinking` or `effort`; no automatic second call on another model; a refusal is never retried; the cost line is read-only and never alters a request, reply or report; one Anthropic request per structured generation (Step 8L retry rules otherwise unchanged); prompts, validators, section rules, size caps, acquisition and calendar untouched; protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f`.
 - **Supersedes / extends:** extends the Step 9F.2a settings registry (new `choiceSetting` type). No earlier entry is superseded.
+
+## Step 9AC - model choice (repo: mb-proxy)
+
+- **Date:** 26 Oct 2026. **Branch:** `step-9ac-model-choice` (Stage 1 at `08d6e2c`). **Status:** Stage 1 built; independent proof done; this entry records Kevin's Stage 1 decisions. It adds to, and supersedes nothing in, "Step 9AC Stage 1 - model choice, server" above.
+- **Kevin's Stage 1 decisions:**
+  1. **Fixed allowed list.** The models live in code (`lib/model-choice.js`): `haiku-4.5` and `haiku-5.5`, exact match only. No setting, request or table can name a model that is not on it.
+  2. **Default `haiku-4.5`.** The default does not move to Haiku 5.5 until Kevin approves it after a quality proof (Stage 3).
+  3. **Fallback with no raw value in logs.** An unknown, empty, different-case or retired value (from `CLAUDE_MODEL` or the query value) uses the default and logs one `[model-choice]` `modelChoiceFallback` line with reason and source only. The raw value is never written to any log line (the `[model-cost]` and `[claude.legacy]` lines included); `tests/model-choice-log-marker.test.js` pins this.
+  4. **What Haiku 5.5 changes.** Compared with Haiku 4.5 it differs only in the model name, the reply limits, and thinking switched off (`thinking: {type: "disabled"}`). It never carries an `effort` field.
+  5. **`[model-cost]` log line approved.** One read-only line per Anthropic call, with its own prefix, so every existing diagnostic line is unchanged.
+  6. **A refusal is never retried.** Approved. Both this and the `[model-cost]` line are controlled by `modelChoiceEnabled` (off = as `bd7ef08`).
+  7. **`?claude=1` guard is separate from the main switch.** `legacyModelGuardEnabled` (default on) works whether or not `modelChoiceEnabled` is on.
+  8. **Invalid query value falls back to the `CLAUDE_MODEL` setting** (not straight to the default), while `userModelChoiceEnabled` is on.
+  9. **Long price card applies to the whole prompt.** A Haiku 5.5 prompt above 100,000 tokens is billed on the long card for all of it. Kevin will check this against Anthropic's pricing page at Stage 2.
+  10. **Cache prices accepted in the cost line.** The cost line includes cache write and cache read prices although the app does not use prompt caching today.
+  11. **Tiny costs rounding to zero accepted.** A cost too small to show at the line's precision may print as 0.
+- **Settings:** `MODEL_CHOICE_ENABLED` recognises only true, 1, on, false, 0, off (spaces and case ignored); any other value leaves it ON. Full list in `Replay PackagesharnessSettings-Register-2026-10-26.md` (Group 16).
+- **Follow-up in this step:** one new test (`tests/model-choice-log-marker.test.js`) and the settings register copy. No code, existing test, `?rev=` token or Neon change.
+- **Must not change:** as the Stage 1 entry above. In addition: no raw model value in any log line; the allowed list stays in code; the default stays `haiku-4.5` until Kevin approves Stage 3.
