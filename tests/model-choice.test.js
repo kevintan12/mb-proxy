@@ -33,7 +33,7 @@ const handler = require('../api/quote');
 const HAIKU_45 = 'claude-haiku-4-5-20251001';
 const HAIKU_55 = 'claude-haiku-5-5';
 const MODEL_ENV_NAMES = ['MODEL_CHOICE_ENABLED', 'CLAUDE_MODEL', 'LEGACY_MODEL_GUARD_ENABLED',
-  'USER_MODEL_CHOICE_ENABLED'];
+  'USER_MODEL_CHOICE_ENABLED', 'HAIKU55_WRITER_DEPTH_ENABLED'];
 
 // Runs `callback` with the model settings in process.env set to `values` (others
 // removed), then restores them.
@@ -201,7 +201,7 @@ for (const [marketState, generatedAt, overlayAsOf, currentPublishedAt] of MARKET
     const off = await withEnv({MODEL_CHOICE_ENABLED: 'off'}, () => allRequests(input));
     const on = await withEnv({}, () => allRequests(input));
     const named = await withEnv({CLAUDE_MODEL: 'haiku-4.5'}, () => allRequests(input));
-    const newer = await withEnv({CLAUDE_MODEL: 'haiku-5.5'}, () => allRequests(input));
+    const newer = await withEnv({CLAUDE_MODEL: 'haiku-5.5', HAIKU55_WRITER_DEPTH_ENABLED: 'off'}, () => allRequests(input));
     for (const name of Object.keys(off)) {
       assert.equal(JSON.stringify(on[name]), JSON.stringify(off[name]), name);
       assert.equal(JSON.stringify(named[name]), JSON.stringify(off[name]), name);

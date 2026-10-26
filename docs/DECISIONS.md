@@ -2583,3 +2583,59 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Settings:** `MODEL_CHOICE_ENABLED` recognises only true, 1, on, false, 0, off (spaces and case ignored); any other value leaves it ON. Full list in `Replay PackagesharnessSettings-Register-2026-10-26.md` (Group 16).
 - **Follow-up in this step:** one new test (`tests/model-choice-log-marker.test.js`) and the settings register copy. No code, existing test, `?rev=` token or Neon change.
 - **Must not change:** as the Stage 1 entry above. In addition: no raw model value in any log line; the allowed list stays in code; the default stays `haiku-4.5` until Kevin approves Stage 3.
+
+## Step 9AE - Haiku 5.5 writing depth and plain English (repo: mb-proxy)
+
+- **Date:** 26 Oct 2026. **Branch:** `step-9ae-haiku55-depth` (from `step-9-integration` @ `d89a71d`). **Status:** built; builder's proof done; independent proof and the Haiku 5.5 re-test still to come.
+- **Why (Step 9AC Stage 2 blind read):** Kevin preferred Haiku 4.5 on Close, Pre, Regular and Post, and Haiku 5.5 on Weekend and Holiday stand-in (2 of 6). Haiku 5.5 is plainer but thinner. Over the six packages its Sections 2, 3, 5, 6 and 7 were 27%, 41%, 44%, 63% and 57% shorter. It cited as many sources but stated about half as many figures (Section 3: 33 against 67; Section 6: 4 against 20). Section 1, the only section with a word guide, was only 12% shorter. No check removed the missing depth: the writer wrote less. The writer instructions have strong "be brief" cues and weak "depth" cues, and Haiku 5.5 follows them literally. Haiku 4.5 reads richer partly because it ignores the style rules (82 of 357 sentences over 25 words, against 21 of 320). Section 4: the cause check removed no explanation in any of the 12 reports; both models sometimes leave it empty or write price-only sentences (see the Haiku 4.5 note below).
+- **Kevin's decisions:**
+  1. One model per report, no mixing. Haiku 4.5 stays the default and selectable. Live runs (Stage 2 Part 2) skipped.
+  2. A block of extra writer instructions is sent **only to Haiku 5.5**. It goes after the existing style lines and before the request-specific lines, on every Haiku 5.5 writer call (first call, the identical contract retry, the guided retry, section-retry rounds). Never on the classifier, subject repair, searches or materiality.
+  3. New setting `haiku55WriterDepthEnabled` (Admin, on/off, default on, env `HAIKU55_WRITER_DEPTH_ENABLED`). Off sends the `d89a71d` Haiku 5.5 request exactly.
+  4. Word guides are fixed in the text, not settings. Sections 2, 3, 5, 6 and 7 aim for about 200 words each: a soft guide, NOT a ceiling. A section may run longer when the content earns it; Kevin prefers rich content over cutting text to meet a word rule. Section 1 keeps the Step 9Z line (about 150 words) unchanged. The text under the Section 4 table stays short. The table and the since-the-close lines on Closed, Weekend and Holiday days are not counted. Enforced through the instructions only; no code cuts text.
+  5. **Haiku 4.5 is left completely alone**: its requests stay byte-identical to `d89a71d`, including the Section 4 contradiction and its wording. No later Haiku 4.5 plain-English step. Haiku 5.5 is the plain-English choice; Haiku 4.5 stays the more technical choice.
+  6. For Haiku 5.5 only, the Section 4 contradiction is resolved: reasons only, never prices or moves restated.
+  7. DEGRADED rules unchanged. The 2,500-word report rule unchanged.
+- **The block (Haiku 5.5 only; the Section 4 sentence is added only with the Section 4 table prompt):** "HAIKU 5.5 WRITING DEPTH (every section)." It says:
+  - Plain words never mean fewer facts; "never pad" means no filler, repeats or invented content, not short.
+  - For every cited article, give its concrete facts (company, figure, date), then one plain sentence on why it matters to an ordinary investor.
+  - Explain a finance term in everyday words the first time it appears. One idea per sentence.
+  - A missing principal catalyst or a listed evidence gap is not a reason to write less: describe the facts in full without claiming they caused the move.
+  - About 200 words per Section 2, 3, 5, 6 and 7 as a soft guide, not a limit, plus a short depth instruction for each of those sections.
+  - All other rules still apply (Section 7 null when nothing forward-looking; each Section 6 opportunity needs its own focus reference).
+  - Section 4: short; one or two plain sentences with the reason and source for each `newsStocks` stock whose own article gives one; never a price, change, percent or move; null when no article gives a reason; never an evidence gap for Section 4.
+  The exact text is `HAIKU_55_DEPTH_LINES` and `HAIKU_55_SECTION_FOUR_LINE` in `lib/claude-analysis-invocation.js`.
+- **Shared vs not shared:** shared, as in Step 9AC: the setting (`lib/settings-registry.js`) and the decision whether a request gets the block (`writerDepthGuideApplies` in `lib/model-choice.js`, which reads only the resolved model choice and the switch, and logs nothing). Writer-only: the block text and where it goes (`buildClaudeAnalysisRequest`). The writer now resolves the model once and passes that choice to `modelRequestFields`, so there is still exactly one resolve and at most one fallback log line per writer request, as before. Every writer round is built by `buildClaudeAnalysisRequest`, so retries carry the block with no extra code.
+- **Settings Register (Step 9AE block):**
+
+  | Name | Default | Safe values | Tag | Wired | Env var |
+  |---|---|---|---|---|---|
+  | haiku55WriterDepthEnabled | on | on/off | Admin | Yes | HAIKU55_WRITER_DEPTH_ENABLED |
+
+  Full list in `Replay Packages\harness\Settings-Register-2026-10-26-2.md` (Group 17). Registry: 128 entries.
+- **Changed existing test (Kevin's answer during planning, 26 Oct 2026):** `tests/model-choice.test.js`. `HAIKU55_WRITER_DEPTH_ENABLED` is added to the test's cleared-and-restored variables, and the Step 9AC "Haiku 5.5 differs only in model, max_tokens and thinking" case runs Haiku 5.5 with that switch off. No assertion was removed or loosened. New tests: `tests/haiku55-writer-depth.test.js` (12).
+- **The 2,500-word report rule (investigated, not changed):** `MAXIMUM_REPORT_WORDS = 2500` in `lib/claude-analysis-contract.js`, a fixed constant, the same for both models. It counts all section text, uncertainties and evidence gaps, minus the Section 4 table and its note. It is sent to the writer as `outputRequirements.maximumWords`. Over the cap, the report check flags it, and the cleanup **empties the longest whole section** of Sections 2-7 (never Section 1; Section 4 only as a last resort), repeating until the report is under the cap; the report becomes DEGRADED. The "no news since the close" line is skipped if it would push a report over. It never fails a whole report and never trims sentences. Stage 2 reports used 24-53% of the cap; the expected Haiku 5.5 size with the new guide is about 1,200-1,400 counted words. It could be made Haiku 5.5-only without changing Haiku 4.5. Kevin's decision: no change now. **If a re-test report goes over about 2,000 words, propose a Haiku 5.5-only warning instead of emptying a section.**
+- **Notes only (no change):**
+  - Haiku 4.5 Section 4 contradiction: the table line says "Do not restate the stock's price, change or percent; the table has them", while the SECTION 4 REASONS line says "Otherwise give only the move facts: direction, amount, percent, price". Haiku 4.5 sometimes writes price-only sentences, which the Section 4 cleanup then removes (Stage 2 POST and HOLIDAY stand-in). Left as is by decision.
+  - Stray index sentence: in Stage 2 PRE on Haiku 5.5, after the Section 4 cleanup removed the price-only sentences, "The S&P 500 gained 0.41% on the same day." was left behind in Section 4.
+  - Broken word swap: in Stage 2 CLOSED on Haiku 4.5, the automatic plain-English swap produced "investors' willingness to take risk contraction" (from "risk appetite contraction").
+- **Evidence (builder's proof, free, no network, no key):**
+  1. Full suite, switch on (default): 1,748 tests, 1,747 pass, 0 fail, 1 todo. With `HAIKU55_WRITER_DEPTH_ENABLED=off`: the same. Baseline `d89a71d`: 1,734 tests. Syntax check 67/67 (66 + the new test file); `git diff --check` clean.
+  2. Byte parity (`harness\9AEB-proof-parity.js`, output `9AEB-proof-parity-output.txt`, against a read-only `git archive d89a71d`), 6 fixture states and 23 distinct saved packages:
+     - Haiku 4.5 (model switch off, default, named) x new switch unset, on and off: 1,566 of 1,566 builder requests identical.
+     - Haiku 5.5 with the switch off: 174 of 174 identical.
+     - Haiku 5.5 with the switch on: 348 of 348 as expected (other calls identical; writer = `d89a71d` text with exactly the block inserted at the boundary, checked against the independent `harness\9AEB-reference.js`).
+     - All 23 packages through the real orchestration and the writer (saved raw reply and a made-up degraded reply; 5 writer calls each, retries included): package, writer requests, cleaned report, diagnostics and log lines byte-identical for every Haiku 4.5 combination and for Haiku 5.5 switch off. Haiku 5.5 switch on: every writer round = old + block; report and log lines identical; diagnostics differ only in `systemPromptBytes`, `completeRequestBodyBytes`, `requestBytes` and `percentOfLimit`. Page check 23 of 23.
+  3. Independent reference against the repo: 169 checks, 0 mismatches.
+  4. Planted mistakes (`harness\9AEB-plant.js`, `9AEB-plant-run.js`, output `9AEB-plant-output.txt`), each in its own scratch copy of the whole repo (tests directory copied, not linked; 85 of 85 test files in every copy): **8 of 8 caught**, each by BOTH the independent reference (every copy exits 1; 6 to 42 mismatches of 169 checks) and the copy's own suite (1,748 tests ran in each copy; 1 to 15 failures):
+     1. block sent to Haiku 4.5
+     2. block missing with the switch on
+     3. switch ignored
+     4. block after the request-specific lines
+     5. block duplicated
+     6. Section 4 sentence on the non-table prompt
+     7. a retry round loses the block
+     8. raw switch value written to a log line
+  - **Missing:** independent proof session; the Haiku 5.5 re-test (paid, Kevin runs it) with each section's length against its guide; the harness cost-estimate fix; no live run.
+- **Must not change:** Haiku 4.5 requests byte-identical to `d89a71d`; switch off = the `d89a71d` Haiku 5.5 request; the block only on Haiku 5.5 writer calls; the word guide stays a soft guide in the text, never enforced by code; no code cuts text; the 2,500-word rule, DEGRADED rules, validators and section rules unchanged; one model per report; protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f`.
+- **Supersedes / extends:** extends Step 9AC (model choice). No earlier entry is superseded.
