@@ -2737,3 +2737,16 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Accepted consequence 2 (Kevin, 31 Oct 2026):** when a section's only content was a "Yahoo!" sentence, the old code kept a broken fragment. The new code removes the whole sentence, the section is empty, and the existing empty-section retry runs. That is one extra paid writer call in that rare case.
 - **Must not change:** the Section 3 name check and grounding rules; the Haiku 5.5 block; Haiku 4.5 and switch-off writer requests (`d00c78e`); the Step 8U.3 rule that an unclear boundary keeps text together.
 - **Supersedes / extends:** extends Step 8U.3 (the splitter). Everything else stands.
+
+## Step 9AH - Haiku 5.5 wording for Sections 3 and 6 on thin days (repo: mb-proxy)
+
+- **Status:** wording only, Haiku 5.5 only, behind the existing `haiku55WriterDepthEnabled` switch. Base `3d02d56`.
+- **Why (9AG findings B and C):** on thin days the Haiku 5.5 writer put talk about the report itself into Section 3 (what a section uses or leaves out, a section named by number, the word "telemetry", a count such as "Three companies...") and padded Section 6 to the 200-word guide by restating an index fall as a risk, repeating one article fact and repeating the company-level point.
+- **What changed:** two lines added inside `HAIKU_55_DEPTH_LINES` (`lib/claude-analysis-invocation.js`), just before the block's final sentence, which stays last. (1) Section 3: never write about what a section uses or leaves out, never name a section by its number, never use the word "telemetry" in report text, never state a count of companies; if something is not known, leave it unsaid or say it in plain words. (2) Section 6 on a thin day: each risk must come from a risk the cited article itself states; an index fall alone is not a risk to restate; never write a risk or opportunity the news does not show; never use the same article fact twice; Section 6 does not need 200 words on a thin day; company-level risks and opportunities stay allowed, and the "single companies, not the whole market" point is said once. No existing wording was edited. The Haiku 5.5 writer request grows by 876 bytes in every market state.
+- **Settings:** none added or changed.
+- **No server cut:** no server code reads, trims or removes report text because of this. The wording lowers the chance of these sentences but does not guarantee it; a sentence that still appears is left as written.
+- **Haiku 4.5 and Haiku 5.5 with the switch off:** byte-identical to `3d02d56` in requests, reports, diagnostics and log lines (six market states, checked by fingerprint).
+- **Unchanged:** the Section 3 AMD / portfolio-name check (`UNFOCUSED_PORTFOLIO_MENTION`) and the Step 9AG splitter.
+- **Tests:** no existing test edited. New: `tests/haiku55-thin-day-wording.test.js` (12): new wording present only for Haiku 5.5 with the switch on, once, final sentence still last; Haiku 4.5 and switch-off requests equal the `3d02d56` fingerprints in all six states; the "telemetry" and "count" wording is absent from those requests.
+- **Must not change:** the Haiku 5.5-only scope; the switch; no new setting; no server-side cut of report text; the Section 3 name check.
+- **Supersedes / extends:** extends 9AE, 9AE.2 and 9AF. Everything else stands.
