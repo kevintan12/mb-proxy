@@ -2768,3 +2768,18 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Allowed difference for future proofs:** none. Haiku 4.5 and switch-off output are unaffected by this exception.
 - **Must not change:** Haiku 5.5-only scope behind the existing switch; delete, never rewrite; never leave a section with no sentence through a follow-on cut; Haiku 4.5 and switch-off requests and cleanup byte-identical to `3b3ece0`; the Section 3 name check and grounding rules; protected checkpoints `39da041`, `14534fc`, `c96a132`, `138af60`, `7cad52f`.
 - **Supersedes / extends:** extends Step 9D.3 (the shared trim ladder) and Steps 9AE-9AH (the Haiku 5.5 block). Everything else stands.
+
+## Step 9AJ - Haiku 5.5 default via Vercel (repo: mb-proxy)
+
+- **Date:** 1 Nov 2026. **Branch:** `step-9aj-default-haiku55` (from `0e732aa`). **Status:** decision recorded; no code change; Preview live runs still to come.
+- **Decision (Kevin, 1 Nov 2026):** Haiku 5.5 becomes the default model. It is set in Vercel with the existing Admin setting `CLAUDE_MODEL=haiku-5.5` (Preview first). The code default (`claudeModel`, `lib/settings-registry.js`) stays `haiku-4.5`, so every existing test is unchanged. Haiku 4.5 stays selectable (`CLAUDE_MODEL=haiku-4.5`) and untouched.
+  1. All six call kinds move together: writer, classifier, subject repair, recap search, CNBC search and materiality. One model per report, no mixing.
+  2. Unchanged: the `?claude=1` route and its guard (`legacyModelGuardEnabled`) and the switch-off model (`MODEL_CHOICE_ENABLED=off`) stay on Haiku 4.5; the allowed list, prices, reply limits and size caps are untouched.
+  3. Size caps count bytes (writer 500 KB, classifier 300 KB), so Haiku 5.5's about 2.5 bytes per token changes no limit. A writer request above about 250 KB (about 100,000 tokens) is priced on the Haiku 5.5 long card, still about half of Haiku 4.5.
+- **Settings:** none added or changed in code. Vercel only: `CLAUDE_MODEL=haiku-5.5`.
+- **Rollback (one step):** `CLAUDE_MODEL=haiku-4.5` (or delete it), then redeploy. Kill switch: `MODEL_CHOICE_ENABLED=off` restores the `bd7ef08` requests exactly.
+- **Missing proof:** only the writer has been run on Haiku 5.5 (Step 9AC Stage 2 blind read and the 9AE-9AI re-tests). The classifier, subject repair, recap search, CNBC search and materiality calls have never been run on Haiku 5.5, paid or live; their only evidence is the free request-shape tests and parity replays. The Preview live runs (CLOSED, PRE, REGULAR, POST) are their first real proof: every `[model-cost]` line names `claude-haiku-5-5`, `priceCard` standard, no `modelChoiceFallback`, no contract failure or `claudeRefusal`.
+- **Production:** nothing from Step 9 reaches Production before release 12B.
+- **Intended follow-up:** PROPOSED Step 9AK, model choice in the app's Settings dropdown (plan only first).
+- **Must not change:** as Step 9AC, except the default item below; the allowed list stays in code; Haiku 4.5 requests never carry `thinking` or `effort`; no automatic second call on another model.
+- **Supersedes / extends:** supersedes the Step 9AC item "the default stays `haiku-4.5` until Kevin approves Stage 3" (Stage 1 "Must not change" and Kevin's Stage 1 decision 2): the default is now set to Haiku 5.5 in Vercel. Everything else in Step 9AC stands.
