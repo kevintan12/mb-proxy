@@ -233,7 +233,7 @@ test('Step 9AA.2: the writer never sees a record (evidence list, security refs, 
 test('Step 9AA.2: one stock in My Stocks, empty Watchlist, no quote line: the table cites its record', async () => {
   const input = recordInput({myStocks: ['CPRI'], noQuote: ['CPRI']});
   const {section, parts, line} = await run(input);
-  assert.deepEqual(parts, ['Stock | Price | Change\nMy Stocks\nCapri Holdings (CPRI) | $105.00 | ↑ 3.00 (2.94%)\n'
+  assert.deepEqual(parts, ['Stock | Ticker | Last Price | Change\nMy Stocks\nCapri Holdings | CPRI | $105.00 | ↑ 3.00 (2.94%)\n'
     + 'Prices at the close on Fri 4 Sep.', 'No material news for this stock.']);
   assert.deepEqual(section.evidenceRefs, recordRefsOf(input));
   assert.equal(line.closingLine, 'THIS');
@@ -242,7 +242,7 @@ test('Step 9AA.2: one stock in My Stocks, empty Watchlist, no quote line: the ta
 test('Step 9AA.2: one stock only in the Watchlist with no price: the row reads Not available and the table survives', async () => {
   const input = recordInput({watchlist: ['CPRI'], blank: ['CPRI']});
   const {result, section, parts, line} = await run(input);
-  assert.deepEqual(parts, ['Stock | Price | Change\nWatchlist\nCPRI | Not available | Not available\n'
+  assert.deepEqual(parts, ['Stock | Ticker | Last Price | Change\nWatchlist\nNot available | CPRI | Not available | Not available\n'
     + 'Prices not available.', 'No material news for this stock.']);
   assert.deepEqual(section.evidenceRefs, recordRefsOf(input));
   assert.deepEqual(result.output.evidenceGaps, []);
@@ -252,7 +252,7 @@ test('Step 9AA.2: one stock only in the Watchlist with no price: the row reads N
 test('Step 9AA.2: one stock in My Stocks with no price (the old all-blank gap) keeps the table', async () => {
   const input = recordInput({myStocks: ['NVDA'], blank: ['NVDA']});
   const {parts} = await run(input);
-  assert.deepEqual(parts, ['Stock | Price | Change\nMy Stocks\nNVDA | Not available | Not available\n'
+  assert.deepEqual(parts, ['Stock | Ticker | Last Price | Change\nMy Stocks\nNot available | NVDA | Not available | Not available\n'
     + 'Prices not available.', 'No material news for this stock.']);
 });
 
@@ -285,8 +285,8 @@ test('Step 9AA.2: seventeen stocks with some blank keep every row; blanks read N
   const {section, parts, line} = await run(input);
   const rows = parts[0].split('\n').filter(text => text.includes(' | ') && !text.startsWith('Stock |'));
   assert.equal(rows.length, 17);
-  assert.deepEqual(rows.filter(text => text.endsWith('Not available | Not available')), ['CPRI | Not available | Not available',
-    'S04 | Not available | Not available', 'S09 | Not available | Not available']);
+  assert.deepEqual(rows.filter(text => text.endsWith('Not available | Not available')), ['Not available | CPRI | Not available | Not available',
+    'Not available | S04 | Not available | Not available', 'Not available | S09 | Not available | Not available']);
   assert.equal(parts[0].split('\n').at(-1), 'Prices at the close on Fri 4 Sep.');
   assert.equal(parts.at(-1), 'No material news for all stocks.');
   for (const reference of recordRefsOf(input)) assert.ok(section.evidenceRefs.includes(reference), reference);
@@ -339,7 +339,7 @@ test('Step 9AA.2: the same record and table code runs in all six market states',
     }
     const {result} = await invokeCounted(input, output);
     assert.equal(result.type, 'SUCCESS', `${marketState} ${result.message}`);
-    assert.equal(result.output.sections[3].content, 'Stock | Price | Change\nMy Stocks\nMSFT | Not available | Not available\n'
+    assert.equal(result.output.sections[3].content, 'Stock | Ticker | Last Price | Change\nMy Stocks\nNot available | MSFT | Not available | Not available\n'
       + 'Prices not available.\n\nNo material news for this stock.', marketState);
     assert.deepEqual(result.output.sections[3].evidenceRefs, recordRefsOf(input), marketState);
   }
@@ -349,7 +349,7 @@ test('Step 9AA.2: switch off gives the 3722898 lines (plural, the close note) on
   const input = recordInput({myStocks: ['CPRI'], blank: ['CPRI']});
   await withSectionFourPriceRecordSwitch('off', async () => {
     const {parts, line} = await run(input);
-    assert.deepEqual(parts, ['Stock | Price | Change\nMy Stocks\nCPRI | Not available | Not available\n'
+    assert.deepEqual(parts, ['Stock | Ticker | Last Price | Change\nMy Stocks\nNot available | CPRI | Not available | Not available\n'
       + 'Prices at the close on Fri 4 Sep.', 'No material news for all stocks.']);
     assert.equal(line.closingLine, 'ALL');
   });

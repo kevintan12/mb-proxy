@@ -220,8 +220,8 @@ test('Step 9AA: the stock name drops only the legal suffix; the ticker alone whe
   const input = inState(tableInput({myStocks: ['CPRI'], watchlist: ['AAPL']}), 'CLOSED');
   input.marketPackages[0].telemetry.stockSnapshots[1].snapshot.instrumentName = '';
   assert.deepEqual(tableLines(sectionFourTableText(input)), [
-    'Stock | Price | Change', 'My Stocks', 'Capri Holdings (CPRI) | $105.00 | ↑ 3.00 (2.94%)',
-    'Watchlist', 'AAPL | $105.00 | ↑ 3.00 (2.94%)', 'Prices at the close on Fri 4 Sep.']);
+    'Stock | Ticker | Last Price | Change', 'My Stocks', 'Capri Holdings | CPRI | $105.00 | ↑ 3.00 (2.94%)',
+    'Watchlist', 'Not available | AAPL | $105.00 | ↑ 3.00 (2.94%)', 'Prices at the close on Fri 4 Sep.']);
 });
 
 test('Step 9AA: in every completed and pre/after-hours state the table shows the latest completed close', () => {
@@ -229,8 +229,8 @@ test('Step 9AA: in every completed and pre/after-hours state the table shows the
     const input = inState(tableInput({myStocks: ['NVDA'], watchlist: ['AAPL'],
       prices: {AAPL: {close: 99.5, previousClose: 100}}}), marketState);
     assert.deepEqual(tableLines(sectionFourTableText(input)), [
-      'Stock | Price | Change', 'My Stocks', 'NVIDIA (NVDA) | $105.00 | ↑ 3.00 (2.94%)',
-      'Watchlist', 'Apple (AAPL) | $99.50 | ↓ 0.50 (0.50%)', 'Prices at the close on Fri 4 Sep.'], marketState);
+      'Stock | Ticker | Last Price | Change', 'My Stocks', 'NVIDIA | NVDA | $105.00 | ↑ 3.00 (2.94%)',
+      'Watchlist', 'Apple | AAPL | $99.50 | ↓ 0.50 (0.50%)', 'Prices at the close on Fri 4 Sep.'], marketState);
   }
 });
 
@@ -239,14 +239,14 @@ test('Step 9AA: Trading uses the live price, else the last close marked *, with 
     NVDA: {asOf: '2026-09-08T16:58:00.000Z', lastPrice: 107},
     AAPL: {asOf: '2026-09-08T16:57:00.000Z', lastPrice: 104.5}});
   assert.deepEqual(tableLines(sectionFourTableText(input)), [
-    'Stock | Price | Change', 'My Stocks', 'NVIDIA (NVDA) | $107.00 | ↑ 2.00 (1.90%)',
-    'Microsoft (MSFT) | $105.00* | ↑ 3.00 (2.94%)', 'Watchlist', 'Apple (AAPL) | $104.50 | ↓ 0.50 (0.48%)',
+    'Stock | Ticker | Last Price | Change', 'My Stocks', 'NVIDIA | NVDA | $107.00 | ↑ 2.00 (1.90%)',
+    'Microsoft | MSFT | $105.00* | ↑ 3.00 (2.94%)', 'Watchlist', 'Apple | AAPL | $104.50 | ↓ 0.50 (0.48%)',
     'Live prices at 12:58 pm ET; * last close.']);
   // With every stock live there is no marker and no "* last close".
   const allLive = inState(tableInput({myStocks: ['NVDA']}), 'REGULAR',
     {NVDA: {asOf: '2026-09-08T16:58:00.000Z', lastPrice: 105}});
   assert.deepEqual(tableLines(sectionFourTableText(allLive)).slice(-2),
-    ['NVIDIA (NVDA) | $105.00 | — 0.00 (0.00%)', 'Live prices at 12:58 pm ET.']);
+    ['NVIDIA | NVDA | $105.00 | — 0.00 (0.00%)', 'Live prices at 12:58 pm ET.']);
   // An overlay outside REGULAR is never used (that is Step 21F.2).
   assert.equal(sectionFourRowPrice(input.marketPackages[0].telemetry.stockSnapshots[0].snapshot, 'POST').basis, 'CLOSE');
 });
@@ -254,10 +254,10 @@ test('Step 9AA: Trading uses the live price, else the last close marked *, with 
 test('Step 9AA: a stock with no usable price keeps its row as Not available; an empty group is left out', () => {
   const input = tableInput({myStocks: ['NVDA', 'CPRI'], watchlist: [], missing: ['CPRI']});
   assert.deepEqual(tableLines(sectionFourTableText(input)), [
-    'Stock | Price | Change', 'My Stocks', 'NVIDIA (NVDA) | $105.00 | ↑ 3.00 (2.94%)',
-    'CPRI | Not available | Not available', 'Prices at the close on Fri 4 Sep.']);
+    'Stock | Ticker | Last Price | Change', 'My Stocks', 'NVIDIA | NVDA | $105.00 | ↑ 3.00 (2.94%)',
+    'Not available | CPRI | Not available | Not available', 'Prices at the close on Fri 4 Sep.']);
   const watchOnly = tableInput({myStocks: [], watchlist: ['AAPL']});
-  assert.deepEqual(tableLines(sectionFourTableText(watchOnly)).slice(0, 2), ['Stock | Price | Change', 'Watchlist']);
+  assert.deepEqual(tableLines(sectionFourTableText(watchOnly)).slice(0, 2), ['Stock | Ticker | Last Price | Change', 'Watchlist']);
 });
 
 test('Step 9AA: the writer is told the table exists and to explain only the stocks with articles', () => {
@@ -311,7 +311,7 @@ test('Step 9AA: some stocks with news keep their reason; an AI price sentence an
   assert.equal(parts[1], 'NVIDIA gained $3.00 (2.9%) to $105.00 after its chip deal with a cloud firm, Yahoo Finance reported.');
   assert.equal(parts[2], 'No material news for the other stocks.');
   // The table figures come from the data, not from the writer's $9.99 / $999.99.
-  assert.ok(tableLines(parts[0]).includes('Microsoft (MSFT) | $105.00 | ↑ 3.00 (2.94%)'));
+  assert.ok(tableLines(parts[0]).includes('Microsoft | MSFT | $105.00 | ↑ 3.00 (2.94%)'));
   assert.doesNotMatch(result.output.sections[3].content, /999/);
   // Refs: the writer's cited refs as cited (21D.1), then the rows' own refs.
   assert.deepEqual(result.output.sections[3].evidenceRefs.slice(0, output.sections[3].evidenceRefs.length),
@@ -352,7 +352,7 @@ test('Step 9AA: a Section 4 the cleanup empties keeps the table, and its gap is 
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.equal(result.output.status, 'NORMAL');
   assert.ok(!result.output.evidenceGaps.includes('Not enough data to comment on your stocks.'));
-  assert.match(result.output.sections[3].content, /^Stock \| Price \| Change\n/);
+  assert.match(result.output.sections[3].content, /^Stock \| Ticker \| Last Price \| Change\n/);
   assert.match(result.output.sections[3].content, /\n\nNo material news for all stocks\.$/);
 });
 
@@ -363,7 +363,7 @@ test('Step 9AA: a bad explanation loses the explanations, never the table', asyn
   const {result} = await invokeCounted(input, output);
   assert.equal(result.type, 'SUCCESS', result.message);
   const content = result.output.sections[3].content;
-  assert.match(content, /^Stock \| Price \| Change\n/);
+  assert.match(content, /^Stock \| Ticker \| Last Price \| Change\n/);
   assert.doesNotMatch(content, /evidenceContext/);
   assert.match(content, /\n\nNo material news for all stocks\.$/);
 });
@@ -419,8 +419,8 @@ test('Step 9AA: the same table code runs in all six market states', async () => 
     assert.equal(result.type, 'SUCCESS', `${marketState} ${result.message}`);
     const lines = tableLines(result.output.sections[3].content);
     const live = marketState === 'REGULAR';
-    assert.deepEqual(lines.slice(0, 3), ['Stock | Price | Change', 'My Stocks',
-      `Microsoft (MSFT) | $${live ? '106.00' : '105.00'} | ↑ ${live ? '1.00 (0.95%)' : '3.00 (2.94%)'}`], marketState);
+    assert.deepEqual(lines.slice(0, 3), ['Stock | Ticker | Last Price | Change', 'My Stocks',
+      `Microsoft | MSFT | $${live ? '106.00' : '105.00'} | ↑ ${live ? '1.00 (0.95%)' : '3.00 (2.94%)'}`], marketState);
     assert.equal(lines[3], live ? 'Live prices at 10:55 am ET.' : 'Prices at the close on Fri 4 Sep.', marketState);
     assert.equal(result.output.sections[3].content.split('\n\n').length, 2, marketState);
     assert.equal(diagnostics.filter(value => value.stage === 'sectionFourTable').length, 1, marketState);
@@ -441,8 +441,8 @@ test('Step 9AA Build 1 fix: some stocks missing a price keep their row as Not av
   const {result, diagnostics} = await invokeCounted(input, output);
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.deepEqual(tableLines(result.output.sections[3].content), [
-    'Stock | Price | Change', 'My Stocks', 'NVIDIA (NVDA) | $105.00 | ↑ 3.00 (2.94%)',
-    'CPRI | Not available | Not available', 'Prices at the close on Fri 4 Sep.']);
+    'Stock | Ticker | Last Price | Change', 'My Stocks', 'NVIDIA | NVDA | $105.00 | ↑ 3.00 (2.94%)',
+    'Not available | CPRI | Not available | Not available', 'Prices at the close on Fri 4 Sep.']);
   const line = diagnostics.find(value => value.stage === 'sectionFourTable');
   assert.equal(line.notAvailableRows, 1);
   assert.equal(line.rows, 2);
@@ -454,8 +454,8 @@ test('Step 9AA Build 1 fix: no stock missing a price keeps every row priced; the
   const {result, diagnostics} = await invokeCounted(input, output);
   assert.equal(result.type, 'SUCCESS', result.message);
   assert.deepEqual(tableLines(result.output.sections[3].content), [
-    'Stock | Price | Change', 'My Stocks', 'NVIDIA (NVDA) | $105.00 | ↑ 3.00 (2.94%)',
-    'Capri Holdings (CPRI) | $105.00 | ↑ 3.00 (2.94%)', 'Prices at the close on Fri 4 Sep.']);
+    'Stock | Ticker | Last Price | Change', 'My Stocks', 'NVIDIA | NVDA | $105.00 | ↑ 3.00 (2.94%)',
+    'Capri Holdings | CPRI | $105.00 | ↑ 3.00 (2.94%)', 'Prices at the close on Fri 4 Sep.']);
   assert.equal(diagnostics.find(value => value.stage === 'sectionFourTable').notAvailableRows, 0);
 });
 
@@ -481,7 +481,7 @@ test('Step 9AA Build 1 fix: a report over the word cap from ONE long section sti
     content: `${output.sections[4].content} ${'word '.repeat(2600).trim()}`};
   const {result} = await invokeCounted(input, output);
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.match(result.output.sections[3].content, /^Stock \| Price \| Change\n/);
+  assert.match(result.output.sections[3].content, /^Stock \| Ticker \| Last Price \| Change\n/);
   assert.equal(SECTION_RULES.REPORT_WORD_CAP.detect(result.output), false);
 });
 
@@ -493,7 +493,7 @@ test('Step 9AA: switch off (or the both-lists switch off) leaves Section 4 as th
       const output = outputWithSectionFour(input, content, ['NVDA', 'AAPL']);
       const {result, diagnostics} = await invokeCounted(input, output);
       assert.equal(result.type, 'SUCCESS', result.message);
-      assert.equal(result.output.sections[3].content.includes('Stock | Price | Change'), false, envVar);
+      assert.equal(result.output.sections[3].content.includes('Stock | Ticker | Last Price | Change'), false, envVar);
       assert.equal(diagnostics.some(value => value.stage === 'sectionFourTable'), false, envVar);
       assert.equal(buildClaudeAnalysisRequest(input).system.includes('MarketBrief adds the price table itself'), false);
     });
