@@ -2796,3 +2796,16 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Rollback:** set `USER_MODEL_CHOICE_ENABLED` off in Vercel Preview and redeploy (the page choice is then ignored); for the page, switch back to branch `step-8-runtime-cost`.
 - **Production:** nothing from Step 9 reaches Production before release 12B. The old Production server ignores `&model=`, so releasing the page first is safe.
 - **Follow-ups (PROPOSED, no number):** (a) regroup the page's Settings into General, My Stocks and Watchlist (page only; the Engine and Admin System Settings areas wait for 9G and 9H, which the baseline describes as one page with five areas: General, My Stocks, Watchlist, Engine, and a password-protected Admin System Settings area); (b) add the model choice to the Admin page defaults when 9G and 9H are built.
+
+## Step 9AL - Settings regrouped into General, My Stocks and Watchlist sections that remember their state (page: MarketBrief repo)
+
+- **Decision:** the page Settings are regrouped into three collapsible sections: General, My Stocks and Watchlist. The Disclaimer and Save are always shown below them.
+- **Default:** the first time, General is open and the two lists are closed.
+- **Memory:** each section remembers its last open or closed state per device, in a separate browser item called `mb_settings_open`. Format v1: `v1:general,myStocks` lists the open sections; `v1:` alone means all closed. Junk or a storage failure falls back to the default. It is NOT part of `mb5` and NOT in the export code.
+- **Page build (MarketBrief repo):** commit `d347c08` on branch `step-8-runtime-cost`. 206 page tests across 13 files, 12 of them new, and no existing test was edited. Kevin's manual checks on the preview page all passed.
+- **Backend:** no backend change, no Vercel change, no new backend setting.
+- **Order:** the AI Model stays in today's order inside General. General order: AI Model, Summary Style, Timezone, Sync, PIN, Proxy.
+- **Later plan:** the baseline's plan has FIVE areas: General, My Stocks, Watchlist, Engine, and a password-protected Admin System Settings. Engine and Admin wait for Steps 9G and 9H, with no placeholder now.
+- **Production:** nothing from Step 9 reaches Production before release 12B.
+- **Settings Register:** `mb_settings_open` - page user preference; default `v1:general`; allowed values are the v1 format above; not synced across devices.
+- **Follow-up (PROPOSED, no number):** move the AI Model default into the Admin page when 9G and 9H are built.
