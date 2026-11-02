@@ -169,7 +169,8 @@ test('Step 9F.6a.1 settings registry: Further Readings numbers registered, not w
   for (const [name, [value, min, max]] of Object.entries(expected)) {
     const entry = SETTINGS_REGISTRY[name];
     assert.equal(entry.admin, 'Admin', name);
-    assert.equal(entry.wired, false, name);
+    // Step 9AB Build 1 wires the ceiling and the minimum score; the extras budget waits for Build 2.
+    assert.equal(entry.wired, name !== 'furtherReadingExtrasBudgetSeconds', name);
     assert.deepEqual([entry.default, entry.min, entry.max], [value, min, max], name);
   }
 });

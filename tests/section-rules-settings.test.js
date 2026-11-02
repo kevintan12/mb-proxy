@@ -19,7 +19,7 @@ const ACTIVE_ROW = Object.freeze({
   catalystScope: 'SPLIT_CURRENT_COMPLETED',
   nothingSurvivedFallback: true,
   failedRescue: 'ANY_SECTION',
-  furtherReadingsSource: 'ACTIVE_CITED_YAHOO'
+  furtherReadingsSource: 'CITED_THEN_CURRENT_READ'
 });
 
 const COMPLETED_ROW = Object.freeze({
@@ -28,7 +28,7 @@ const COMPLETED_ROW = Object.freeze({
   catalystScope: 'ANY_PRINCIPAL',
   nothingSurvivedFallback: false,
   failedRescue: 'SECTION_ONE',
-  furtherReadingsSource: 'PACKAGE_LIST'
+  furtherReadingsSource: 'RECAPS_CITED_THEN_READ'
 });
 
 test('Step 9D.2: every US market state returns the expected settings row', () => {

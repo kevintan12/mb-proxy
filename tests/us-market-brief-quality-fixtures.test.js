@@ -933,7 +933,7 @@ test('Step 8U.3: completed CLOSED, WEEKEND and HOLIDAY Section 2 drops only the 
     for (const sectionIndex of [2, 5, 6]) {
       assert.deepEqual(result.output.sections[sectionIndex], output.sections[sectionIndex]);
     }
-    assert.deepEqual(result.output.furtherReadings, output.furtherReadings);
+    assert.deepEqual(result.output.furtherReadings, ['e2', 'e1', 'e4', 'e5']);
     assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true, marketState);
     assert.deepEqual(sectionNormalizationEvents(diagnostics), [{
       stage: 'claudeAnalysisSectionNormalization', sectionIndex: 1,

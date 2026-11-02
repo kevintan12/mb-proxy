@@ -62,11 +62,11 @@ test('Step 9D.6: the US market settings row reproduces today\'s values exactly',
 test('Step 9D.6: reportSettings\'s own shape and six-state behaviour are unchanged for US', () => {
   const ACTIVE_ROW = {
     sessionMode: 'ACTIVE', sectionOneRequired: false, catalystScope: 'SPLIT_CURRENT_COMPLETED',
-    nothingSurvivedFallback: true, failedRescue: 'ANY_SECTION', furtherReadingsSource: 'ACTIVE_CITED_YAHOO'
+    nothingSurvivedFallback: true, failedRescue: 'ANY_SECTION', furtherReadingsSource: 'CITED_THEN_CURRENT_READ'
   };
   const COMPLETED_ROW = {
     sessionMode: 'COMPLETED', sectionOneRequired: true, catalystScope: 'ANY_PRINCIPAL',
-    nothingSurvivedFallback: false, failedRescue: 'SECTION_ONE', furtherReadingsSource: 'PACKAGE_LIST'
+    nothingSurvivedFallback: false, failedRescue: 'SECTION_ONE', furtherReadingsSource: 'RECAPS_CITED_THEN_READ'
   };
   for (const state of ['PRE', 'REGULAR', 'POST']) {
     assert.deepEqual(reportSettings('US', state), {sectionRulesEnabled: true, ...ACTIVE_ROW, hasCurrentEvidence: false}, state);

@@ -180,7 +180,7 @@ function supportedOutput(input, {opportunity = true, plainEnglish = true} = {}) 
     reportContext: reportContext(input), sections,
     evidenceReferences: broadMarketAvailable
       ? ['e2', 'e3', 'e4', 'e5', 'e1'] : ['e2', 'e3', 'e1'],
-    furtherReadings: broadMarketAvailable ? ['e1', 'e2', 'e4', 'e5'] : ['e1', 'e2'],
+    furtherReadings: broadMarketAvailable ? ['e2', 'e4', 'e5', 'e1'] : ['e2', 'e1'],
     evidenceGaps
   };
 }

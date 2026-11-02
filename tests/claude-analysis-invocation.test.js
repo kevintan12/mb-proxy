@@ -76,7 +76,6 @@ const {
   createClaudeAnalysisInput,
   validateClaudeAnalysisInput,
   validateClaudeAnalysisOutput,
-  MAX_ACTIVE_FURTHER_READINGS,
   NO_CURRENT_SESSION_EVIDENCE_GAP,
   NO_CURRENT_SESSION_SUMMARY,
   noCurrentSessionEvidenceOutput,
@@ -1494,6 +1493,7 @@ function step8U8Case(marketState, ...times) {
     output.sections[3].evidenceRefs = ['e1'];
     output.sections[5].content = 'Policy uncertainty remains a material risk to the market outlook.';
     for (const index of [0, 4, 5, 6]) output.sections[index].evidenceRefs = ['e1'];
+    output.furtherReadings = ['e1', 'e2', 'e5', 'e4'];
   }
   assert.equal(validateClaudeAnalysisInput(input), true, marketState);
   return {
@@ -1911,7 +1911,7 @@ test('PRE, REGULAR and POST can synthesize a grounded section when current news 
     assert.equal(result.output.sections.length, 8);
     assert.equal(result.output.sections[4].content, output.sections[4].content);
     assert.deepEqual(result.output.sections[4].evidenceRefs, ['e1']);
-    assert.deepEqual(result.output.furtherReadings, []);
+    assert.deepEqual(result.output.furtherReadings, ['e1']);
     assert.equal(validateClaudeAnalysisOutput(result.output, input).valid, true);
     assert.equal(diagnostics.find(event => event.stage === 'activeSessionProjection')
       .projectedCurrentSessionRefCount, 0);
@@ -2025,19 +2025,20 @@ test('active Further Readings resolve only cited current Yahoo evidence in citat
     input, apiKey: 'test-key', fetchImpl: async () => anthropicResponse(raw)
   });
   assert.equal(result.type, 'SUCCESS', result.message);
-  assert.deepEqual(result.output.furtherReadings, ['e3', 'e1', 'e8', 'e9', 'e10']);
+  // Step 9AB Build 1: the fixed 5 is gone; the ceiling furtherReadingMaxLinks (15) keeps e11.
+  assert.deepEqual(result.output.furtherReadings, ['e3', 'e1', 'e8', 'e9', 'e10', 'e11']);
   assert.equal(result.output.furtherReadings.includes('e2'), false);
   assert.equal(result.output.furtherReadings.includes('e4'), false);
   assert.equal(result.output.furtherReadings.includes('e5'), false);
   assert.equal(result.output.furtherReadings.includes('e6'), false);
   assert.equal(result.output.furtherReadings.includes('e7'), false);
-  assert.equal(result.output.furtherReadings.includes('e11'), false);
-  for (const invalidReference of ['e2', 'e4', 'e5', 'e6', 'e7', 'e11']) {
+  assert.equal(result.output.furtherReadings.includes('e11'), true);
+  for (const invalidReference of ['e2', 'e4', 'e5', 'e6', 'e7']) {
     const invalid = structuredClone(result.output);
-    invalid.furtherReadings = ['e3', 'e1', 'e8', 'e9', 'e10', invalidReference];
+    invalid.furtherReadings = ['e3', 'e1', 'e8', 'e9', 'e10', 'e11', invalidReference];
     assert.equal(validateClaudeAnalysisOutput(invalid, input).valid, false, invalidReference);
   }
-  assert.equal(MAX_ACTIVE_FURTHER_READINGS, 5);
+  assert.equal(require('../lib/settings-registry').settingValue('furtherReadingMaxLinks'), 15);
 });
 
 test('active Further Readings resolve empty when no current Yahoo evidence is cited', async () => {

@@ -771,7 +771,9 @@ slotsOffTest('PRE, REGULAR and POST use bounded active Yahoo acquisition and ski
     assert.equal(currentEntries.length, ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
     assert.equal(currentEntries.every(entry => entry.horizon === 'CURRENT_SESSION'), true);
     assert.deepEqual(output.marketPackages[0].evidenceContext.subsequentDevelopments, []);
-    assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
+    assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, [
+      {evidenceRef: 'e4', sessionDate: marketState === 'POST' ? '2026-09-08' : '2026-09-04', kind: 'READ'}
+    ]);
     assert.ok(diagnostics.some(item => item.stage === 'analysisModeSelection'
       && item.analysisMode === 'ACTIVE_SESSION' && item.marketState === marketState));
     assert.ok(diagnostics.some(item => item.stage === 'activeYahooAcquisition'
@@ -1686,7 +1688,9 @@ test('active Yahoo news becomes CURRENT_SESSION evidence and can support current
     market: 'US', sessionDate: '2026-09-08', evidenceRefs: [current.reference]
   }]);
   assert.equal(providerInput.sectionFourReferenceAllowlist.evidenceRefs.includes(current.reference), true);
-  assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, [
+    {evidenceRef: 'e5', sessionDate: '2026-09-04', kind: 'READ'}
+  ]);
 });
 
 test('active package coverage diagnostic exposes bounded classifier roles and refs only', async () => {
@@ -2701,7 +2705,7 @@ cnbcFilterOffTest('integrates a validated Yahoo recap with package-owned orderin
   }]);
   assert.deepEqual(context.unresolvedGaps, [CNBC_RECAP_UNAVAILABLE_GAP]);
   assert.deepEqual(context.furtherReadings, [{
-    evidenceRef: 'e2', sessionDate: '2026-09-04'
+    evidenceRef: 'e2', sessionDate: '2026-09-04', kind: 'RECAP'
   }]);
   assert.equal(JSON.stringify(output).includes('c1'), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
@@ -3048,7 +3052,7 @@ cnbcFilterOffTest('real Yahoo validation, article acquisition and evidence const
   assert.equal(context.evidence[1].item.canonicalUrl, url);
   assert.equal(context.evidence[1].item.publishedAt, '2026-09-04T20:03:54.000Z');
   assert.equal(context.evidence[1].item.provenance.publisher, 'Yahoo Finance');
-  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04'}]);
+  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04', kind: 'RECAP'}]);
   assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), false);
   assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_UNAVAILABLE_GAP), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
@@ -3112,7 +3116,7 @@ cnbcFilterOffTest('later second-fetch Yahoo dateModified becomes authoritative t
   assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.yahoo-finance'
     && entry.item.evidenceCategory === 'news'), true);
   assert.deepEqual(context.sessionAssociations, [{evidenceRef: 'e2', sessionDate: '2026-09-04'}]);
-  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04'}]);
+  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04', kind: 'RECAP'}]);
   assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), false);
 });
 
@@ -3309,7 +3313,7 @@ cnbcFilterOffTest('Step 9F.1g: a recap at a new-style address is accepted by con
   assert.deepEqual(pageRequests, [url, url]);
   assert.equal(context.evidence[1].item.canonicalUrl, url);
   assert.equal(context.evidence[1].item.publishedAt, '2026-09-04T20:03:54.000Z');
-  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04'}]);
+  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04', kind: 'RECAP'}]);
   assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
@@ -3697,10 +3701,8 @@ test('integrates one CNBC recap before general CNBC with package-owned associati
     {evidenceRef: 'e5', sessionDate: '2026-09-04'}
   ]);
   assert.deepEqual(context.furtherReadings, [
-    {evidenceRef: 'e2', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e5', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e6', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e7', sessionDate: '2026-09-04'}
+    {evidenceRef: 'e2', sessionDate: '2026-09-04', kind: 'RECAP'},
+    {evidenceRef: 'e5', sessionDate: '2026-09-04', kind: 'RECAP'}
   ]);
   assert.equal(context.principalCatalysts.includes('e5'), false);
   assert.deepEqual(context.unresolvedGaps, []);
@@ -3760,7 +3762,7 @@ test('validated CNBC daily recap uses one package evidence ref for analysis and 
   assert.ok(context.subsequentDevelopments.includes(recapReference));
   assert.equal(context.principalCatalysts.includes(recapReference), false);
   assert.deepEqual(context.furtherReadings.filter(entry => entry.evidenceRef === recapReference), [
-    {evidenceRef: recapReference, sessionDate: '2026-09-04'}
+    {evidenceRef: recapReference, sessionDate: '2026-09-04', kind: 'RECAP'}
   ]);
   assert.deepEqual(fetched, [recapUrl]);
   assert.equal(validateClaudeAnalysisInput(output), true);
@@ -3825,7 +3827,7 @@ test('predicted CNBC recap remains analysis evidence and Further Reading with un
     assert.ok(context.subsequentDevelopments.includes(reference));
     assert.equal(context.principalCatalysts.includes(reference), false);
     assert.deepEqual(context.furtherReadings.filter(entry => entry.evidenceRef === reference), [
-      {evidenceRef: reference, sessionDate: '2026-09-04'}
+      {evidenceRef: reference, sessionDate: '2026-09-04', kind: 'RECAP'}
     ]);
     assert.deepEqual(fetched, [recapUrl]);
     assert.equal(validateClaudeAnalysisInput(output), true);
@@ -3919,10 +3921,7 @@ test('integrates completed and subsequent CNBC evidence after Yahoo and Fed with
   assert.deepEqual(context.supportingEvidence, ['e1', 'e2', 'e3', 'e4']);
   assert.deepEqual(context.subsequentDevelopments, ['e5']);
   assert.deepEqual(context.principalCatalysts, []);
-  assert.deepEqual(context.furtherReadings, [
-    {evidenceRef: 'e4', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e5', sessionDate: '2026-09-04'}
-  ]);
+  assert.deepEqual(context.furtherReadings, []);
   assert.equal(JSON.stringify(output).includes('c1'), false);
   assert.equal(JSON.stringify(output).includes('c2'), false);
 });
@@ -3981,10 +3980,7 @@ cnbcFilterOffTest('filters five provisional CNBC items and compacts every retain
     {evidenceRef: 'e4', subjects: [{kind: 'COMPANY', name: 'CNBC market news item 2'}]},
     {evidenceRef: 'e5', subjects: [{kind: 'SECTOR', name: 'CNBC market news item 4'}]}
   ]);
-  assert.deepEqual(context.furtherReadings, [
-    {evidenceRef: 'e4', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e5', sessionDate: '2026-09-04'}
-  ]);
+  assert.deepEqual(context.furtherReadings, []);
   assert.deepEqual(repairInput.evidence.map(entry => [entry.reference, entry.title]), [
     ['e4', 'CNBC market news item 2']
   ]);
@@ -4565,10 +4561,8 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
   ]);
   assert.deepEqual(context.evidenceContext.supportingEvidence.slice(-2), ['e8', 'e9']);
   assert.deepEqual(context.evidenceContext.furtherReadings, [
-    {evidenceRef: 'e4', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e7', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e8', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e9', sessionDate: '2026-09-04'}
+    {evidenceRef: 'e4', sessionDate: '2026-09-04', kind: 'RECAP'},
+    {evidenceRef: 'e7', sessionDate: '2026-09-04', kind: 'RECAP'}
   ]);
   assert.deepEqual(output.portfolioContext.myStocks.map(item => item.symbol), ['AAPL']);
   assert.deepEqual(output.portfolioContext.watchlist.map(item => item.symbol), ['NVDA']);
@@ -4699,16 +4693,16 @@ test('Further Readings deduplicates general CNBC evidence against mandatory reca
   });
   const context = (await service.assemble(request())).marketPackages[0].evidenceContext;
   assert.equal(context.evidence.filter(entry => entry.item.canonicalUrl === recapUrl).length, 2);
-  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e4', sessionDate: '2026-09-04'}]);
+  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e4', sessionDate: '2026-09-04', kind: 'RECAP'}]);
 });
 
 test('Further Readings preserves each available recap anchor before validated general CNBC evidence', async () => {
   for (const scenario of [
     {yahoo: true, cnbc: false, expected: [
-      'Stock market today: September 4 recap', 'CNBC market news item 1'
+      'Stock market today: September 4 recap'
     ]},
     {yahoo: false, cnbc: true, expected: [
-      'Stock market news for Sept. 4, 2026', 'CNBC market news item 1'
+      'Stock market news for Sept. 4, 2026'
     ]}
   ]) {
     const overrides = {
@@ -4812,7 +4806,7 @@ test('successful CNBC recap remains in the package when general bounded search f
   }]);
   assert.deepEqual(context.furtherReadings, [{
     evidenceRef: cnbcEvidence[0].reference,
-    sessionDate: '2026-09-04'
+    sessionDate: '2026-09-04', kind: 'RECAP'
   }]);
   assert.equal(context.unresolvedGaps.includes(CNBC_RECAP_UNAVAILABLE_GAP), false);
   assert.equal(context.unresolvedGaps.includes(CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP), true);

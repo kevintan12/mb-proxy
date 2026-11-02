@@ -919,7 +919,7 @@ test('accepts a fully grounded realistic US response using Yahoo, Federal Reserv
     },
     marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}
   });
-  const output = normalOutput(input);
+  const output = normalOutput(input, {furtherReadings: ['e3']});
   output.sections[1].evidenceRefs = ['e2'];
   output.sections[2].evidenceRefs = ['e3'];
   output.sections[4].evidenceRefs = ['e2'];

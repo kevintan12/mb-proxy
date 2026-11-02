@@ -670,8 +670,8 @@ test('Step 9D.1: R29 Further Readings source differs by state exactly as it does
   }
 
   // Completed: blank the two sections that cite the focus refs e4/e5, so
-  // nothing in the final report cites them any more; Further Readings
-  // still equals the package's own furtherReadings list unchanged.
+  // nothing in the final report cites them any more; Step 9AB: Further
+  // Readings lists the cited articles first, then the package's read ones.
   for (const [marketState, generatedAt] of [['CLOSED', '2026-09-04T22:00:00.000Z'],
     ['WEEKEND', '2026-09-06T10:00:00.000Z'], ['HOLIDAY', '2026-09-07T16:00:00.000Z']]) {
     const fixture = marketStateCase(marketState, generatedAt);
@@ -689,7 +689,7 @@ test('Step 9D.1: R29 Further Readings source differs by state exactly as it does
     fixture.output.status = 'DEGRADED';
     const {result} = await invokeCounted(fixture.input, fixture.output);
     assert.equal(result.type, 'SUCCESS', marketState);
-    assert.deepEqual(result.output.furtherReadings, packageFurtherReadings, marketState);
+    assert.deepEqual(result.output.furtherReadings, ['e2', 'e5', 'e1', 'e4'], marketState);
   }
 });
 
