@@ -388,3 +388,20 @@ test('Step 9F.4d settings registry: classifierPartialKeepEnabled', () => {
       {env: {CLASSIFIER_PARTIAL_KEEP_ENABLED: value}}), true, value);
   }
 });
+
+// Step 9F.4e: the one new setting, the switch for fixing a repeated, untrimmed or
+// sixth-and-later subject on one article instead of failing the labelling reply.
+test('Step 9F.4e settings registry: classifierSubjectSoftDropEnabled', () => {
+  const entry = SETTINGS_REGISTRY.classifierSubjectSoftDropEnabled;
+  assert.deepEqual([entry.default, entry.admin, entry.envVar, entry.wired, entry.boolean],
+    [true, 'Admin', 'CLASSIFIER_SUBJECT_SOFT_DROP_ENABLED', true, true]);
+  assert.equal(settingValue('classifierSubjectSoftDropEnabled', {env: {}}), true);
+  for (const value of ['false', '0', 'off', 'OFF']) {
+    assert.equal(settingValue('classifierSubjectSoftDropEnabled',
+      {env: {CLASSIFIER_SUBJECT_SOFT_DROP_ENABLED: value}}), false, value);
+  }
+  for (const value of ['', 'maybe']) {
+    assert.equal(settingValue('classifierSubjectSoftDropEnabled',
+      {env: {CLASSIFIER_SUBJECT_SOFT_DROP_ENABLED: value}}), true, value);
+  }
+});
