@@ -7,7 +7,12 @@
 // "wet AMD" name check is unchanged.
 'use strict';
 
-const test = require('node:test');
+// Step 9Z.1: these hash the whole b7a5bb1 live writer request, so they run with liveThemedSummaryEnabled off.
+const test = require('./fixtures/live-themed-summary-switch').liveThemedSummaryOffTests(require('node:test'), [
+  "Step 9AI: PRE -- the name-the-subject line is on Haiku 5.5 (switch on) once, before the final sentence; never on Haiku 4.5 or switch off",
+  "Step 9AI: REGULAR -- the name-the-subject line is on Haiku 5.5 (switch on) once, before the final sentence; never on Haiku 4.5 or switch off",
+  "Step 9AI: POST -- the name-the-subject line is on Haiku 5.5 (switch on) once, before the final sentence; never on Haiku 4.5 or switch off"
+]);
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const {buildClaudeAnalysisRequest, invokeClaudeAnalysis} = require('../lib/claude-analysis-invocation');

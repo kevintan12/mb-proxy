@@ -7,7 +7,12 @@
 // call are unchanged (the d00c78e requests and retry text exactly).
 'use strict';
 
-const test = require('node:test');
+// Step 9Z.1: these hash the whole b7a5bb1 live writer request, so they run with liveThemedSummaryEnabled off.
+const test = require('./fixtures/live-themed-summary-switch').liveThemedSummaryOffTests(require('node:test'), [
+  "Step 9AF: PRE -- Haiku 5.5 carries the new wording once, inside the block; Haiku 4.5 and switch off are the d00c78e requests",
+  "Step 9AF: REGULAR -- Haiku 5.5 carries the new wording once, inside the block; Haiku 4.5 and switch off are the d00c78e requests",
+  "Step 9AF: POST -- Haiku 5.5 carries the new wording once, inside the block; Haiku 4.5 and switch off are the d00c78e requests"
+]);
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const {buildClaudeAnalysisRequest, invokeClaudeAnalysis} = require('../lib/claude-analysis-invocation');

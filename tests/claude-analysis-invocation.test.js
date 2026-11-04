@@ -54,7 +54,14 @@ const shortSummaryTest = require('./fixtures/short-summary-switch').shortSummary
 ]);
 // Step 9AA Build 1: these pin the 5409b44 Section 4 text or writer request size, so they run with
 // sectionFourTableEnabled off.
-const test = require('./fixtures/section-four-table-switch').sectionFourTableOffTests(shortSummaryTest, [
+// Step 9Z.1: these pin the b7a5bb1 live since-close lead (Section 1 clauses and format example), so
+// they run with liveThemedSummaryEnabled off.
+const liveThemedSummaryTest = require('./fixtures/live-themed-summary-switch').liveThemedSummaryOffTests(shortSummaryTest, [
+  "Step 8P.2(b): the instruction covers lead order, publish times, no invention, attribution and Section 3",
+  "Step 8P.2(b).2 rule 1: Section 1 opens with a timed since-close item and ends with one close sentence",
+  "Step 8P.2(b).2 rule 6: one worked example, marked format only, last, with no real numbers"
+]);
+const test = require('./fixtures/section-four-table-switch').sectionFourTableOffTests(liveThemedSummaryTest, [
   "reports deterministic sanitized request sizes and provider usage on success",
   "T7 Section 4 uses the same style policy: style survives, malformed prose localizes"
 ]);

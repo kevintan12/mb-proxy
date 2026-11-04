@@ -3,7 +3,12 @@
 // the switch off, send the exact d00c78e (= 3d02d56) requests. Nothing cuts report text.
 'use strict';
 
-const test = require('node:test');
+// Step 9Z.1: these hash the whole b7a5bb1 live writer request, so they run with liveThemedSummaryEnabled off.
+const test = require('./fixtures/live-themed-summary-switch').liveThemedSummaryOffTests(require('node:test'), [
+  "Step 9AH: PRE -- Haiku 4.5 and Haiku 5.5 switch off are the 3d02d56 requests, with none of the new wording",
+  "Step 9AH: REGULAR -- Haiku 4.5 and Haiku 5.5 switch off are the 3d02d56 requests, with none of the new wording",
+  "Step 9AH: POST -- Haiku 4.5 and Haiku 5.5 switch off are the 3d02d56 requests, with none of the new wording"
+]);
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const {buildClaudeAnalysisRequest} = require('../lib/claude-analysis-invocation');

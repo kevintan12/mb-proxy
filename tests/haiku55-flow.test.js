@@ -6,7 +6,12 @@
 // the switch-off Haiku 5.5 and Haiku 4.5 requests are the 5e83159 requests exactly.
 'use strict';
 
-const test = require('node:test');
+// Step 9Z.1: these hash the whole b7a5bb1 live writer request, so they run with liveThemedSummaryEnabled off.
+const test = require('./fixtures/live-themed-summary-switch').liveThemedSummaryOffTests(require('node:test'), [
+  "Step 9AE.2: PRE -- Haiku 5.5 carries the flow and Section 4 wording once; Haiku 4.5 and switch off are the 5e83159 requests",
+  "Step 9AE.2: REGULAR -- Haiku 5.5 carries the flow and Section 4 wording once; Haiku 4.5 and switch off are the 5e83159 requests",
+  "Step 9AE.2: POST -- Haiku 5.5 carries the flow and Section 4 wording once; Haiku 4.5 and switch off are the 5e83159 requests"
+]);
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const {buildClaudeAnalysisRequest, invokeClaudeAnalysis} = require('../lib/claude-analysis-invocation');
