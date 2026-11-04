@@ -2984,3 +2984,25 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Known limits:** the themed form depends on the writer following the new instruction; code only trims repeats. A reworded repeat with no shared time and no shared figure is not caught (the same limit as Step 9V). The index-sentence guard keeps any sentence naming all three indices, even one that also repeats an item's time.
 - **Must not change:** after-close news is never the cause of the completed session's move; the since-close cause rules; Section 2's timed lead; the Section 3 and 4 rules; the Step 9Z theme line and the completed-day since-close text; one writer call per generation (no added paid call); switch off = `b7a5bb1`; nothing from Step 9 reaches Production before release 12B.
 - **Supersedes / extends:** supersedes Step 8P.2(b).2 decision 2 **for Section 1 only** (switch on). Narrows Step 8P.2(b)'s "open Sections 1 and 2 with what has happened since the close … each with its publishedEt time" to Section 2 (switch on). Extends Step 9Z to govern live-day Section 1, and extends Step 9V's repeat cut with a live mode.
+
+## Step 9Z.1a - the live cleanup also trims an exact 24-hour publish time (repo: mb-proxy)
+
+- **Date:** 2026-11-04 · **Branch:** step-9z1-live-summary (on `c7b241d`) · **Status:** IMPLEMENTED, tests passing; not committed.
+- **Why:** the independent Step 9Z.1 Group B fuzzer (815 of 2,000 cases run) found 19 mismatches, all from one cause. On Pre-market, Trading and After-Hours days the live Section 1 repeat cut (Step 9Z.1) caught a since-close item's publish time only in 12-hour form ("4:30 pm", "4:30 p.m.", "4:30PM"). It never caught the same time in 24-hour form ("16:30 ET", "04:30 ET"). Such a sentence stayed in Section 1, and an all-repeat Section 1 was reported TRIMMED instead of KEPT_TO_AVOID_BLANK.
+- **Kevin's decision (4 Nov 2026):** trim an exact 24-hour match only.
+- **Rule:** for an item labelled `h:mm am|pm`, the 24-hour hour is (h mod 12), plus 12 for pm. A Section 1 sentence repeats the publish time when it gives that hour and minute with no am/pm after it, and no digit or colon on either side. One leading zero is optional below 10 ("04:30" or "4:30" for 4:30 am). 12 am is "00:mm" or "0:mm"; 12 pm is "12:mm". "4:30 ET" never matches a 4:30 pm item, and "16:30" never matches a 4:30 am item.
+- **What changed:**
+  1. `lib/section-rules.js`: new `sinceCloseTimePattern24`. In `sinceCloseRepeatCut` live mode only (`{live: true}`), a Section 1 sentence is also a repeat when it matches the item's 24-hour pattern.
+  2. New `tests/live-themed-summary-24h.test.js` (8 tests, made-up text, fake fetch, no paid call).
+- **Not changed:** `sinceCloseTimePattern` (12-hour) and every path that uses it: the completed-day cut (Step 9V), the coverage warning (Step 9V.3), `sectionOneLength` (Step 9Z), and the Section 2 figure collection in live mode. Also unchanged: the subject-plus-figure test, the index-sentence guard, the no-blank rule, Section 2, the log event and its categories, the writer request, and every setting. No new setting or number. Off (`liveThemedSummaryEnabled` off) is still `b7a5bb1` byte for byte. Completed days are identical on and off.
+- **Checks (4 Nov 2026, free):**
+  - Full suite: 1,894 tests, 1,893 pass, 0 fail, 1 to-do (the known Step 9F.6c Yahoo header gap), both with the switch unset (on) and with `LIVE_THEMED_SUMMARY_ENABLED=off`. That is 8 more than at `c7b241d`.
+  - Syntax 64/64; `git diff --check` clean.
+  - The 19 failing fuzzer cases now pass: seed 1 cases 9, 95, 103, 175, 271, 376, 380, 383, 412, 422; seed 2 cases 34, 118, 151, 164, 210, 242, 266, 312, 342. The fuzzer's reference was not changed.
+  - A fresh 216-case sample (seed 1 cases 450-557, seed 2 cases 400-507): 0 mismatches. Switch off against `b7a5bb1`, completed days and the writer request are all identical.
+- **Still open from the Group B run:**
+  - When b7a5bb1 rejects a stand-in Section 1 ("sections[0]: invalid content"), the live trim can remove the offending repeat first, and the report passes with the switch on. This was counted separately, not as a mismatch.
+  - The live figure test needs a figure Section 2 gives; the wording of Step 9Z.1 allows either reading.
+  - 1,185 Group B cases are not yet run. They need a fresh independent session.
+- **Must not change:** everything in Step 9Z.1's list. The 12-hour pattern and the completed-day paths do not take the 24-hour form without a new decision.
+- **Supersedes / extends:** extends Step 9Z.1 decision 2 (the live repeat cut) to the exact 24-hour form. Step 9Z.1 is otherwise unchanged.
