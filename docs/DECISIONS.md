@@ -3006,3 +3006,13 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
   - 1,185 Group B cases are not yet run. They need a fresh independent session.
 - **Must not change:** everything in Step 9Z.1's list. The 12-hour pattern and the completed-day paths do not take the 24-hour form without a new decision.
 - **Supersedes / extends:** extends Step 9Z.1 decision 2 (the live repeat cut) to the exact 24-hour form. Step 9Z.1 is otherwise unchanged.
+
+## Step 9Z.1b - test gap closed (completed days with after-close news, switch on equals switch off) (repo: mb-proxy)
+
+- **Date:** 2026-11-04 · **Branch:** step-9z1-live-summary (on `ed6081a`) · **Status:** IMPLEMENTED, tests passing; not committed.
+- **Gap:** the independent Step 9Z.1 Group C planted-mistake check, mistake 2 (the live Section 1 lead change also applied on Closed, Weekend and Holiday days), passed all 1,894 repository tests. The independent checks caught it.
+- **Why the existing test missed it:** "Step 9Z.1: CLOSED, WEEKEND and HOLIDAY requests are byte-identical on and off, under every model setting" (`tests/live-themed-summary.test.js`, line 203) uses completed-day fixtures with no news after the close. Their writer requests never carry the "SINCE-THE-CLOSE PARAGRAPHS (CLOSED, WEEKEND and HOLIDAY)" instruction, so a change there was never compared.
+- **New test:** "Step 9Z.1b: CLOSED, WEEKEND and HOLIDAY requests with after-close news are byte-identical with liveThemedSummaryEnabled on or off", in `tests/completed-since-close.test.js`. For each completed state and five model settings it checks that the paragraphs instruction is present, that the request is the same with the switch on and off, and that none of the four live Section 1 parts appears.
+- **Product behaviour:** unchanged. Test code and this entry only.
+- **Checks (4 Nov 2026, free):** full suite 1,895 tests, 1,894 pass, 0 fail, 1 to-do (the known Step 9F.6c Yahoo header gap); syntax 66/66 (api, lib, lib/sources); `git diff --check` clean. Planted mistake 2 rerun in a scratch copy with the new test: 1 fail, the new Step 9Z.1b test, so the repository tests now catch it.
+- **Supersedes / extends:** none. Step 9Z.1 and Step 9Z.1a are unchanged.

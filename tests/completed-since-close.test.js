@@ -267,6 +267,50 @@ function withEnvSync(value, fn) {
   }
 }
 
+// Step 9Z.1b: the Step 9Z.1 completed-day on/off test uses fixtures with no after-close news, so its
+// requests never carry the paragraphs instruction. These inputs do, so a live-summary change that
+// leaks into Closed, Weekend or Holiday requests is caught.
+const LIVE_ENV_NAMES = ['LIVE_THEMED_SUMMARY_ENABLED', ENV, 'SINCE_CLOSE_LEAD_ENABLED', 'SHORT_EXECUTIVE_SUMMARY_ENABLED',
+  'MODEL_CHOICE_ENABLED', 'CLAUDE_MODEL', 'USER_MODEL_CHOICE_ENABLED', 'HAIKU55_WRITER_DEPTH_ENABLED'];
+const LIVE_MODEL_SETUPS = [
+  ['default model', {}],
+  ['Haiku 4.5', {CLAUDE_MODEL: 'haiku-4.5'}],
+  ['Haiku 5.5', {CLAUDE_MODEL: 'haiku-5.5'}],
+  ['Haiku 5.5 depth off', {CLAUDE_MODEL: 'haiku-5.5', HAIKU55_WRITER_DEPTH_ENABLED: 'off'}],
+  ['9Z off', {SHORT_EXECUTIVE_SUMMARY_ENABLED: 'off'}]
+];
+// Distinctive words from each of the four new live Section 1 parts (Step 9Z.1).
+const LIVE_SECTION_ONE_PARTS = ['Open Section 2 with what has happened since the last close',
+  'about how Section 2 begins', 'Section 1 follows the Section 1 summary instruction', '[First since-close theme'];
+
+function withEnvsSync(values, fn) {
+  const saved = Object.fromEntries(LIVE_ENV_NAMES.map(name => [name, process.env[name]]));
+  for (const name of LIVE_ENV_NAMES) delete process.env[name];
+  Object.assign(process.env, values);
+  try { return fn(); } finally {
+    for (const name of LIVE_ENV_NAMES) {
+      if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name];
+    }
+  }
+}
+
+test('Step 9Z.1b: CLOSED, WEEKEND and HOLIDAY requests with after-close news are byte-identical with liveThemedSummaryEnabled on or off', () => {
+  for (const marketState of ['CLOSED', 'WEEKEND', 'HOLIDAY']) {
+    const input = completedInput({marketState});
+    for (const [label, env] of LIVE_MODEL_SETUPS) {
+      const build = live => withEnvsSync({...env, [ENV]: 'on', LIVE_THEMED_SUMMARY_ENABLED: live},
+        () => JSON.stringify(buildClaudeAnalysisRequest(input)));
+      const withOn = build('on');
+      const withOff = build('off');
+      assert.equal(withOn.includes('SINCE-THE-CLOSE PARAGRAPHS (CLOSED, WEEKEND and HOLIDAY)'), true,
+        `${marketState} ${label}: the paragraphs instruction must be in the request`);
+      assert.equal(withOn, withOff, `${marketState} ${label}`);
+      for (const part of LIVE_SECTION_ONE_PARTS)
+        assert.equal(withOn.includes(JSON.stringify(part).slice(1, -1)), false, `${marketState} ${label}: ${part}`);
+    }
+  }
+});
+
 test('Step 9V: the switch-on request adds a few KB at most and no article text', () => {
   const input = completedInput();
   const bytesOn = withEnvSync('on', () => Buffer.byteLength(JSON.stringify(buildClaudeAnalysisRequest(input))));
