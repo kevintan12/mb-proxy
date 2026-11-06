@@ -3035,3 +3035,17 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Known limits:** (1) "ahead of" is broad: "stocks closed higher on Tuesday ahead of the Fed decision" on a Wednesday report is removed in Sections 1 to 6 (the sentence names the completed-session day and uses upcoming wording). (2) Section 7 removes a recent-past weekday even when a cited article states that day. (3) A past event with no weekday and no date is still not caught (Step 8W's known limit).
 - **Must not change:** Step 8W part (ii); completed-day states (Closed, Weekend, Holiday) never run the new pass; a section is never blanked by it.
 - **Supersedes / extends:** narrows Step 8W's allowance of price-record session days on live days, and adds the recent-past rule. Step 8W is otherwise unchanged.
+
+## Step 9AO - loose-word uncited Further Readings links (repo: mb-proxy)
+
+- **Date:** 2026-11-06 · **Branch:** step-9ao-loose-words (from `67a8237`) · **Status:** IMPLEMENTED, tests passing; not committed. Step name "9AO" is proposed.
+- **Why:** the 6 Nov 21:31 Pre-market package listed "TSX futures edged lower amid fallout from AI-driven stock rout" as a Further Reading. Its only market signal is the loose word "futures" (the AI words do not count), so it is off-topic for a broad-market reader. Earlier rebuilt cases showed the same pattern (a Polymarket "futures broker" story, a rupee "dollar" story).
+- **Kevin's decision (6 Nov 2026):** fixed in code, no new setting.
+- **Rule (group (c) only, uncited links):** an uncited link is not listed when its only market signal is a loose word (futures, dollar, bonds) and it has no second signal. A second signal is any other US macro term except the AI-theme words, a generic market word from the tier 3a list, or an Asia/Europe word from the tier 4b list. The real lists in `lib/headline-lists.js` are used; no new word list was made.
+- **What changed:** (1) `lib/headline-matching.js`: one small pure helper `hasOnlyLooseMarketSignal(headline)` (exported). (2) `lib/claude-analysis-contract.js` `resolvedFurtherReadingReferences`: the read list (group c) skips an uncited article the helper flags. The writer request, package builder, scoring and reading are untouched, so no request-hash test is affected.
+- **Not touched:** cited links (group b), completed-day recaps (group a), article scoring, the reading step, the writer request and every Section 1 to 7 text.
+- **Scope limit:** this covers loose-word cases only. Company-name points (for example a Tesla or a Bezos story) are NOT fixed here and are left for a later step.
+- **Follow-up (Kevin, 6 Nov 2026):** "stock" or "stocks" directly beside "futures" ("stock futures", "stocks futures") counts as a second signal, so core headlines such as "Stock futures open a monster week…" are kept. It applies to "futures" only (not dollar or bonds), only when the two words are adjacent, and uses no new list and no setting. "stock" elsewhere in the headline does not count, so "TSX futures edged lower amid fallout from AI-driven stock rout" is still removed when uncited. (A first version counted "stock" anywhere; it kept the TSX link and was replaced the same day.)
+- **Setting:** none.
+- **Tests:** new `tests/further-readings-9ao.test.js` (made-up items, no network, no paid call). No existing test was edited.
+- **Must not change:** cited links and recaps are never removed by this rule; the AI-theme words never count as a second signal.
