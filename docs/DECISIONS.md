@@ -3049,3 +3049,16 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Setting:** none.
 - **Tests:** new `tests/further-readings-9ao.test.js` (made-up items, no network, no paid call). No existing test was edited.
 - **Must not change:** cited links and recaps are never removed by this rule; the AI-theme words never count as a second signal.
+
+## Step 9AB.1 - cited articles are never dropped by the topic rule (repo: mb-proxy)
+
+- **Date:** 2026-11-07 · **Branch:** step-9ab1-cited-never-dropped (from `aa4b28c`) · **Status:** IMPLEMENTED, tests passing; not committed. Step name "9AB.1" is proposed.
+- **Why:** the Sat 7 Nov 00:18 SGT Trading report cited "Micron, AMD and Nvidia Lead AI Stocks Rebound After Historic Selloff" and "Nvidia, AMD, and Micron stocks lead chip sector higher following worst sell-off since 2020" in Section 3, but Further Readings did not list them. The Step 9AB topic rule (two links are one topic when they share two or more companies) folded a cited article into an earlier link. An earlier report lost a cited Dan Niles article the same way.
+- **Supersedes only the cited part of Step 9AB decision 4.** Decision 4 is otherwise unchanged. Near-duplicate cited links may now appear (two cited stories on the same companies are both listed).
+- **Rule:** the topic rule applies ONLY to links read but not cited (uncited). A cited article is always listed, in section order (1, 2, 3, 5, 6, 7, then 4), subject to the existing total ceiling `furtherReadingMaxLinks` (default 15) and the no-duplicate-link check. A cited article's companies still count as a seen topic, so a later uncited look-alike is folded as before.
+- **What changed:** `lib/claude-analysis-contract.js`, `resolvedFurtherReadingReferences`: the inner `offer` takes an `isCited` flag; the cited group passes it and skips the topic check. Code-only, after the writer: the writer request, package builder, scoring and reading are untouched, so no request-hash test is affected.
+- **Not touched:** recaps (still exempt), the order, `furtherReadingExtrasMinScore` for uncited links, the Step 9AO loose-word rule, Sections 1 to 7.
+- **Not fixed here:** the uncited "SPCX support and resistance levels to watch" link in the same report is a separate company-name cause.
+- **Setting:** none added or changed.
+- **Tests:** new `tests/further-readings-9ab1.test.js` (made-up items, no network, no paid call). One existing test edited with Kevin's approval (7 Nov 2026), expected value only: `tests/further-readings-9ab.test.js` L121 "one link per topic" now expects the cited e3 to be listed (`['e1', 'e2', 'e3', 'e4', 'e5', 'e6']`).
+- **Must not change:** a cited article is never removed by the topic rule; the ceiling still applies to cited links.

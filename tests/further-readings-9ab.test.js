@@ -128,9 +128,10 @@ test('Step 9AB: one link per topic (two or more shared company tags) and per lin
     {...yahoo('macro-one'), title: 'Same link again'}
   ], [['e1', 'RECAP'], ['e4', 'READ'], ['e5', 'READ'], ['e6', 'READ'], ['e7', 'READ']]);
   const resolved = resolvedFurtherReadingReferences(output({1: ['e2', 'e3']}), input);
-  // e1 (recap) never blocks e2; e3 shares two companies with e2; e4 shares only one, so it is
-  // kept; e7 repeats e5's link; untagged articles are kept.
-  assert.deepEqual(resolved, ['e1', 'e2', 'e4', 'e5', 'e6']);
+  // e1 (recap) never blocks e2; e3 shares two companies with e2 but is cited, so Step 9AB.1
+  // lists it too; e4 shares only one, so it is kept; e7 repeats e5's link; untagged articles
+  // are kept.
+  assert.deepEqual(resolved, ['e1', 'e2', 'e3', 'e4', 'e5', 'e6']);
 });
 
 test('Step 9AB: single-company stories are never merged; two shared companies merge, one does not', () => {
