@@ -3062,3 +3062,16 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Setting:** none added or changed.
 - **Tests:** new `tests/further-readings-9ab1.test.js` (made-up items, no network, no paid call). One existing test edited with Kevin's approval (7 Nov 2026), expected value only: `tests/further-readings-9ab.test.js` L121 "one link per topic" now expects the cited e3 to be listed (`['e1', 'e2', 'e3', 'e4', 'e5', 'e6']`).
 - **Must not change:** a cited article is never removed by the topic rule; the ceiling still applies to cited links.
+
+## Step 9AP - weekday must agree with its date (repo: mb-proxy)
+
+- **Date:** 2026-11-07 · **Branch:** step-9ap-weekday-date (from `6e64671`) · **Status:** IMPLEMENTED, tests passing; not committed. Step name "9AP" is proposed.
+- **Why:** the Sat 7 Nov 2026 10:35 SGT Closed report said, in Section 7, "Applied Materials and Cisco report on Thursday 13 November" and "The producer price index is due on Friday 14 November". 7 Nov 2026 is a Saturday, so Thursday is 12 Nov and Friday is 13 Nov. Step 8W checks weekdays and explicit dates only against the report day, and Step 9AN is live-days only, so nothing compared a weekday with its own stated date.
+- **Rule:** in Sections 1 to 7, in all six market states, when a sentence writes a weekday directly with an explicit date ("Thursday 13 November", "Thursday, 13 November", "Thursday, November 13", "Thu 13 Nov", "Thursday 13 November 2026", "13 November (Thursday)") and the date is not that weekday, the weekday is KEPT and the date is DROPPED ("report on Thursday"). A pair that agrees is never touched. Year: the year in the sentence; otherwise the report's ET year, moving to the adjacent year when the date would be more than 180 days from the report date (if neither year is within 180 days, or the date is not a real date, the text is left unchanged). A form not listed is left unchanged.
+- **Why the weekday is kept:** it most likely comes from the article, while the writer adds the date.
+- **Known limits:** if the date was right and the weekday wrong, the wrong weekday stays. A past event with no weekday and no date is still not caught.
+- **What changed:** `lib/section-rules.js` `weekdayDateAgreeCut` (text is only shortened inside a sentence, so no section can be blanked); `lib/claude-analysis-invocation.js` cleanup, as its own block straight after the Step 8W / 9AN date checks and before the Section 4 table is composed. Code-only, after the writer: no writer request change.
+- **Log:** one `WEEKDAY_DATE_MISMATCH` event per changed sentence, counts only (`removedSentenceCount: 0`, `shortenedSentenceCount: 1`, `droppedDateCount`), `action: 'TRIMMED'`, so it never degrades the report.
+- **Setting:** `weekdayDateAgreeEnabled` (Admin, on/off, default on, env `WEEKDAY_DATE_AGREE_ENABLED`). Off gives `6e64671` byte for byte in all six states.
+- **Tests:** new `tests/weekday-date-agree.test.js` (made-up text, no network, no paid call). No existing test edited.
+- **Must not change:** the weekday is kept and the date dropped, never the reverse; a pair that agrees is never touched; a section is never blanked; Step 8W and Step 9AN are unchanged.
