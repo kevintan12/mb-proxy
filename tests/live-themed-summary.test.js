@@ -100,11 +100,11 @@ const MODEL_SETUPS = [
 // wrapped Step 9AE.2/9AF/9AG/9AH/9AI tests keep pinning the old one with the switch off.
 const NEW_LIVE_REQUEST_9Z1 = Object.freeze({
   PRE: {default: 'cb7152d6210f8ae2d2564b8aef4bf345677e236897efc2af377b68529e654938',
-    haiku55: '1e6d8d780ca513f1b5d24c84f16292fd1daa4c83e40e9c4cc600d275b8488a95'},
+    haiku55: '9cba00e540207036df7a2ce4c1f9a82affb773d397c862d5e6c831e6d7570c2f'},
   REGULAR: {default: 'f32cbc8b5a5d2602a6c4b37235ea8425407b025c5a4bfd7dd6a1654d47f0e9c1',
-    haiku55: 'acdd9421fe9b84412c7f3fa61ffd7237065a04c004fd16f40923cc4e3cd1feed'},
+    haiku55: '02a2c01670102f9680e8ac6a0eb4faa96e576d1beacdced1aea21852320d37c2'},
   POST: {default: 'db94828b2d61ba1737376ac3ba99bbf9041bd5c9cb382cd6afe64264370b05b5',
-    haiku55: '9652f32157180b05aebd36dfb4350f3bc3b411e107b948bae5b25fe0647a533f'}
+    haiku55: '079894d8f6f4e2f446e90b5c5e9cc4c01ff740bb4a3f478d67b98e9fb1e81752'}
 });
 
 // --- setting ----------------------------------------------------------------
