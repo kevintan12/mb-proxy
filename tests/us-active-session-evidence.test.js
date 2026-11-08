@@ -249,10 +249,19 @@ test('an early-close day is skipped like a holiday, widening the window to the l
   // Thanksgiving 2026-11-26 (a full holiday). The walk-back skips both and the weekend,
   // landing on Wednesday 2026-11-25's ordinary close: 16:00 EST = 21:00 UTC (standard time,
   // since DST ended 2026-11-01).
-  const generatedAt = '2026-11-30T12:00:00.000Z';
-  const anchor = createUsActiveSessionAnchor({marketState: 'PRE', cutoffAt: generatedAt});
-  assert.equal(anchor.sessionDate, '2026-11-30');
-  assert.equal(anchor.startsAtInclusive, '2026-11-25T21:00:00.000Z');
+  // Step 9S.1: this holds only with earlyCloseDaysEnabled off (the old calendar); on, the window
+  // starts at the 27 Nov early close, 1:00 p.m. EST (tests/half-day-sessions-9s1.test.js).
+  const previousEarlyClose = process.env.EARLY_CLOSE_DAYS_ENABLED;
+  process.env.EARLY_CLOSE_DAYS_ENABLED = 'off';
+  try {
+    const generatedAt = '2026-11-30T12:00:00.000Z';
+    const anchor = createUsActiveSessionAnchor({marketState: 'PRE', cutoffAt: generatedAt});
+    assert.equal(anchor.sessionDate, '2026-11-30');
+    assert.equal(anchor.startsAtInclusive, '2026-11-25T21:00:00.000Z');
+  } finally {
+    if (previousEarlyClose === undefined) delete process.env.EARLY_CLOSE_DAYS_ENABLED;
+    else process.env.EARLY_CLOSE_DAYS_ENABLED = previousEarlyClose;
+  }
 });
 
 test('V2 is produced for every newly created anchor', () => {

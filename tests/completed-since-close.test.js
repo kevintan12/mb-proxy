@@ -145,7 +145,16 @@ test('Step 9V: the close is the calendar close of the completed session; holiday
   assert.equal(completedSessionCloseAt('2026-09-07'), null); // Labor Day
   assert.equal(completedSessionCloseAt('2026-09-05'), null); // Saturday
   // The calendar marks early-close days as unsupported, so no since-close part is built.
-  assert.equal(completedSessionCloseAt('2026-11-27'), null);
+  // Step 9S.1: only with earlyCloseDaysEnabled off; on, 27 Nov closes at 1:00 p.m. New York time
+  // (tests/half-day-sessions-9s1.test.js).
+  const previousEarlyClose = process.env.EARLY_CLOSE_DAYS_ENABLED;
+  process.env.EARLY_CLOSE_DAYS_ENABLED = 'off';
+  try {
+    assert.equal(completedSessionCloseAt('2026-11-27'), null);
+  } finally {
+    if (previousEarlyClose === undefined) delete process.env.EARLY_CLOSE_DAYS_ENABLED;
+    else process.env.EARLY_CLOSE_DAYS_ENABLED = previousEarlyClose;
+  }
   assert.equal(completedSessionCloseAt('not-a-date'), null);
 });
 
