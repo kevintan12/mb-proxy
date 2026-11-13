@@ -98,13 +98,16 @@ const MODEL_SETUPS = [
 // sha256 of JSON.stringify(writer request) with the switch on, recorded at the Step 9Z.1 build,
 // per live fixture state: the default model and Haiku 5.5. These pin the NEW live request; the
 // wrapped Step 9AE.2/9AF/9AG/9AH/9AI tests keep pinning the old one with the switch off.
+// The three haiku55 values were re-recorded at Step 9AR.2 (one added Section 4 sentence with
+// readerWordingEnabled on; the 9AQ test in tests/reader-wording-focus-pointer.test.js checks that
+// it is the only difference). The default values are unchanged.
 const NEW_LIVE_REQUEST_9Z1 = Object.freeze({
   PRE: {default: 'cb7152d6210f8ae2d2564b8aef4bf345677e236897efc2af377b68529e654938',
-    haiku55: '9cba00e540207036df7a2ce4c1f9a82affb773d397c862d5e6c831e6d7570c2f'},
+    haiku55: '6c392126dfd2db7ca82fc743eb81b3e280cfc0edfdc0b627dcac6c07eb96c987'},
   REGULAR: {default: 'f32cbc8b5a5d2602a6c4b37235ea8425407b025c5a4bfd7dd6a1654d47f0e9c1',
-    haiku55: '02a2c01670102f9680e8ac6a0eb4faa96e576d1beacdced1aea21852320d37c2'},
+    haiku55: 'ce189aceaf2696b7a2a34a828b38364c3ef56a1513a98e60ec24a7bc3dc41147'},
   POST: {default: 'db94828b2d61ba1737376ac3ba99bbf9041bd5c9cb382cd6afe64264370b05b5',
-    haiku55: '079894d8f6f4e2f446e90b5c5e9cc4c01ff740bb4a3f478d67b98e9fb1e81752'}
+    haiku55: 'b50ab5cf68ada285b986d6981f44c18a859c457031dfade6120973656270180e'}
 });
 
 // --- setting ----------------------------------------------------------------

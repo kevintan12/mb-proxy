@@ -108,7 +108,15 @@ const OLD_ONE = 'cite those index market-data references, and say plainly that t
 const NEW_ONE = 'cite those index references, and say plainly that no news article explains why';
 const OLD_TWO = 'write them for a reader who has never seen the package, for example';
 const NEW_TWO = 'write them for a reader who knows nothing about how the report was built, for example';
-const SHARED_REPEAT_LINE = 'do not repeat the same sentence or substantially identical explanation across Sections 1, 2, 5, 6, and 7.';
+// Step 9AR.2: an independent copy of the one Section 4 sentence the reader-wording switch adds,
+// just before the Section 4 line's not-null rule (Haiku 5.5 with the table only).
+const S4_READER_WORDS = 'Write Section 4 for a reader who cannot see the articles. Name the source in the '
+  + 'sentence itself (for example "Yahoo Finance reported that Nvidia signed a new chip supply deal"). '
+  + 'Where an article gives no reason for the move, write the company news itself and nothing about the '
+  + 'move. Never write "linked article", "linked articles", "the article linked to it" or "company news '
+  + 'that does not explain the move", and never say how the articles were chosen or matched to a stock.';
+const S4_ANCHOR = 'Section 4 must not be null when';
+const SHARED_REPEAT_LINE ='do not repeat the same sentence or substantially identical explanation across Sections 1, 2, 5, 6, and 7.';
 
 function count(text, part) {
   return text.split(part).length - 1;
@@ -177,15 +185,18 @@ for (const [marketState, ...rest] of MARKET_STATE_CASES) {
     assert.equal(count(on, 'Sections 1, 2, 5, 6, and 7'), 1);
   });
 
-  test(`Step 9AQ: ${marketState} -- the reader-wording switch rewords two lines and adds three before the block's last line, nothing else`, async () => {
+  test(`Step 9AQ: ${marketState} -- the reader-wording switch rewords two lines and adds three before the block's last line, and one Section 4 sentence (Step 9AR.2), nothing else`, async () => {
     const {input} = marketStateCase(marketState, ...rest);
     const off = (await requestFor(input, {...H55, ...ALL_OFF})).system;
     const on = (await requestFor(input, {...H55, ...ALL_OFF, READER_WORDING_ENABLED: 'on'})).system;
     assert.equal(count(off, OLD_ONE), 1);
     assert.equal(count(off, OLD_TWO), 1);
+    assert.equal(count(off, S4_READER_WORDS), 0);
+    assert.equal(count(off, S4_ANCHOR), 1);
     let expected = off.replace(OLD_ONE, () => NEW_ONE).replace(OLD_TWO, () => NEW_TWO);
     expected = expected.replace(FINAL_LINE_START,
       () => ` ${READER_WORDS_LINE} ${CAUSE_LINE} ${ENDINGS_LINE}${FINAL_LINE_START}`);
+    expected = expected.replace(S4_ANCHOR, () => `${S4_READER_WORDS} ${S4_ANCHOR}`);
     assert.equal(on, expected);
     // The reworded lines no longer teach the words the reader must never see.
     assert.equal(on.includes('market-data references'), false);
