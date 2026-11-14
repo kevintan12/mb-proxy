@@ -3270,3 +3270,15 @@ One entry per decision. Newest last. Never delete or rewrite an entry; supersede
 - **Tests (edited with Kevin's approval):** `tests/settings-registry.test.js` replaces the "at least 30 unwired" count with the exact list of the 17 settings that no code reads yet; `tests/article-score-ai-theme.test.js` pins `rankingPointsAiTheme` as wired.
 - **Effect:** none on any report. `.description` and `.wired` are never read at runtime, and `.admin` matters only together with an env var.
 - **Must not change:** defaults, ranges, env vars and switch values of every setting; `reference: true` on the 16 reference rows.
+
+## Step 9AD - every setting has a short plain-English description, checked by a test (repo: mb-proxy)
+
+- **Date:** 2026-11-14 · **Branch:** step-9ad-setting-descriptions (Builds 1 to 5 on `6708fc9`; Build 6 not committed) · **Status:** IMPLEMENTED. Plan approved by Kevin (eight answers, 14 Nov 2026).
+- **Why:** Kevin's standing rule (9 Nov 2026): the Admin page (9H) shows a short plain-English description for every setting, and a test checks none is missing. The register audit found 48 descriptions that broke the rule (the older register counted 36).
+- **What was done (text and labels only):**
+  1. Builds 1 to 4 rewrote 61 descriptions (16 + 16 + 16 + 13) in `lib/settings-registry.js`: no step number, no commit hash, at most two sentences, at most 450 characters, "When on"/"When off" for every switch, terms explained at first use. The step and hash detail moved to the register's Reason column.
+  2. Build 5 rewrote 8 headline-list descriptions and one more (`maxClassificationEvidenceItems`), tagged 8 settings Fixed (`maxClassificationEvidenceItems`, `spotlightAnchorSymbols` and the 6 CNBC reference values), and corrected 16 `wired` flags (13 ranking and recency settings, `maxClassificationEvidenceItems`, `cnbcPageTimeoutMs`, `cnbcMaxResponseBytes`). See the Step 9AD Build 5 entry.
+  3. Build 6 added `tests/setting-descriptions-9ad.test.js` (all 140 settings against the rule, the 8 locked settings, the three planned source switches, the 8 headline-list pointers) and a new register, `Settings-Register-2026-11-14.md`, with a Reason column.
+- **Tests edited with Kevin's approval (Build 5):** `tests/settings-registry.test.js` (the exact list of 17 settings no code reads yet replaces the "at least 30 unwired" count) and `tests/article-score-ai-theme.test.js` (`rankingPointsAiTheme` is wired).
+- **Effect:** none on any report. Every default, range, env var and switch value is unchanged (checked by a same-values script against the previous commit at every build). `.description` and `.wired` are never read at runtime.
+- **Must not change:** a description that breaks the rule fails `tests/setting-descriptions-9ad.test.js`; a new setting needs a description that passes it.
