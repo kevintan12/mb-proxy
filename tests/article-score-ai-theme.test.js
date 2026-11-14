@@ -34,10 +34,10 @@ test('Step 9F.2e.4b: AI_THEME_TERMS is exactly the six planned words, each a ver
 });
 
 // --- 2. The new setting: default, range, clamping, env var. ---
-test('Step 9F.2e.4b settings registry: rankingPointsAiTheme default, range, envVar, not wired', () => {
+test('Step 9F.2e.4b settings registry: rankingPointsAiTheme default, range, envVar, wired (Step 9AD)', () => {
   const entry = SETTINGS_REGISTRY.rankingPointsAiTheme;
   assert.deepEqual([entry.default, entry.min, entry.max, entry.admin, entry.envVar, entry.wired],
-    [8, 0, 20, 'Admin', 'RANKING_POINTS_AI_THEME', false]);
+    [8, 0, 20, 'Admin', 'RANKING_POINTS_AI_THEME', true]);
 });
 
 const CLAMP_ROWS = [

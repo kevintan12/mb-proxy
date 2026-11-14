@@ -129,15 +129,20 @@ for (const [name, expected] of Object.entries(WIRED_TODAY_VALUES)) {
   });
 }
 
-// Every new, planned setting is registered but explicitly not wired.
-test('Step 9F.2a settings registry: new settings are registered but not wired', () => {
+// Step 9AD (supersedes the Step 9F.2a "at least 30 unwired" count): exactly these settings are
+// marked not wired. The ranking points, recency settings, classifier item cap and the two CNBC
+// values the CNBC RSS probe reads are read live, so they are marked wired.
+test('Step 9AD settings registry: exactly the planned and reference-only settings are not wired', () => {
   const unwired = Object.keys(SETTINGS_REGISTRY).filter(name => SETTINGS_REGISTRY[name].wired === false);
-  // Slots/spillover/switches, planned budgets, ranking points, recency, headline
-  // list pointers and CNBC reference values -- at least this many categories.
-  assert.ok(unwired.length >= 30, `expected at least 30 unwired settings, found ${unwired.length}`);
-  for (const name of unwired) {
-    assert.equal(SETTINGS_REGISTRY[name].wired, false);
-  }
+  assert.deepEqual(unwired.sort(), [
+    'furtherReadingExtrasBudgetSeconds', 'nonArticleOverheadBytesPlanned',
+    'yahooSourceEnabled', 'cnbcSourceEnabled', 'portfolioSourceEnabled',
+    'headlineListUsMacroTerms', 'headlineListAiThemeTerms', 'headlineListDropTerms',
+    'headlineListHowToPatterns', 'headlineListLastRankedTerms', 'headlineListTier3aTerms',
+    'headlineListWirePartners', 'headlineListAmdExclusionPhrases',
+    'cnbcMaxCandidates', 'cnbcMaxArticleTextBytes', 'cnbcMaxEvidenceTextBytes',
+    'cnbcMaterialityRequestLimitBytes'
+  ].sort());
 });
 
 // Step 9F.6a.1: the audit text limits keep today's literal values, and the
