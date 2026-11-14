@@ -222,7 +222,7 @@ test('Step 9AR Build 6: the two settings are Admin, defaults on and 3, range 1 t
   assert.equal(settingValue('sectionFourBigMoverPercent', {env: {[PCT_ENV]: '0'}}), 1);
   assert.equal(settingValue('sectionFourBigMoverPercent', {env: {[PCT_ENV]: '25'}}), 10);
   const names = Object.keys(SETTINGS_REGISTRY);
-  assert.equal(names.length, 140);
+  assert.equal(names.length, 141);
   assert.equal(names.indexOf('sectionFourBigMoversEnabled'), names.indexOf('reportAccuracyRankingEnabled') + 1);
   assert.equal(names.indexOf('sectionFourBigMoverPercent'), names.indexOf('sectionFourBigMoversEnabled') + 1);
 });

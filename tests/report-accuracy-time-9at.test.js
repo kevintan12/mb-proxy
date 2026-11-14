@@ -170,6 +170,21 @@ test('9AT: two times in one sentence are two claims, each with its own source an
     'At 1:45 am ET on Friday, Reuters reported that shares fell, after Bloomberg reported that the board met.');
 });
 
+test('9AT: a right time with a source no cited article names is log only (the 24 Oct Financial Times case)', () => {
+  const sentence = 'At 6:10 am ET on Thursday, the Financial Times reported that futures slipped.';
+  const claim = only(sentence);
+  assert.equal(claim.source, 'Financial Times');
+  assert.deepEqual(checkTimeClaim(claim, ARTICLES), {verdict: 'logOnly', reason: 'sourceUnsupported', references: ['a5']});
+  // The same for an event time that appears in a cited article's text.
+  const event = only('The Financial Times said the price report was due at 8:30 am ET on Thursday.');
+  assert.equal(checkTimeClaim(event, ARTICLES).verdict, 'logOnly');
+  // A time that matches nothing still fails, whatever the source.
+  const nothing = only('At 7:15 am ET on Thursday, the Financial Times reported that futures slipped.');
+  assert.deepEqual(checkTimeClaim(nothing, ARTICLES), {verdict: 'fail', reason: 'timeMismatch'});
+  // The 17:08 case is still a fail: another cited article (a2) does name Bloomberg.
+  assert.equal(checkTimeClaim(only(WRONG), ARTICLES).verdict, 'fail');
+});
+
 test('9AT: WSJ / Wall Street Journal and AP / Associated Press are the same source', () => {
   const articles = [
     {reference: 'w1', publishedEt: 'Wed 11 Nov, 5:30 pm ET', publisher: 'Yahoo! Finance',
