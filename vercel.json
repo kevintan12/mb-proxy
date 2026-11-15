@@ -9,5 +9,11 @@
       "source": "/api/(.*)",
       "destination": "/api/$1"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/quote?calendarRefresh=1",
+      "schedule": "0 1 1-7 5,11 *"
+    }
   ]
 }

@@ -102,6 +102,16 @@ module.exports = async function handler(req, res) {
     return res.status(result.status).json(result.body);
   }
 
+  // ── 9AU Build 2C: scheduled holiday calendar refresh (GET ?calendarRefresh=1, called by
+  // the Vercel cron). "Not found" without the cron secret; off unless
+  // holidayCalendarRefreshEnabled. Loaded only when hit. ──
+  if (req.method === 'GET' && req.query.calendarRefresh === '1') {
+    const {handleCalendarRefresh} = require('../lib/market-calendar-refresh-job');
+    const result = await handleCalendarRefresh({headers: req.headers});
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(result.status).json(result.body);
+  }
+
   const { symbol, search, financials, finnhub } = req.query;
   const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
