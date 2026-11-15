@@ -129,12 +129,12 @@ test('accepts current and legacy Yahoo recap URL families and canonicalizes trac
   }
 });
 
-test('rejects non-Yahoo, non-HTTPS, malformed, and unrelated Yahoo results as normal not found', async () => {
+// Step 9F.1g: other finance.yahoo.com paths are candidates now; the page content decides.
+test('rejects non-Yahoo, non-HTTPS and malformed results as normal not found', async () => {
   const results = [
     searchResult('https://example.com/markets/live/stock-market-today-example.html'),
     searchResult('http://finance.yahoo.com/markets/live/stock-market-today-http.html'),
     searchResult('not a URL'),
-    searchResult('https://finance.yahoo.com/topic/stock-market-news/'),
     searchResult('https://news.yahoo.com/markets/live/stock-market-today-wrong-host.html'),
     searchResult('https://finance.yahoo.com:444/markets/live/stock-market-today-wrong-port.html')
   ];
@@ -163,7 +163,8 @@ test('bounds inspected search results deterministically', async () => {
     ...unrelated,
     searchResult('https://finance.yahoo.com/markets/live/stock-market-today-too-late.html')
   ])).discoverYahooCompletedSessionRecap(context);
-  assert.equal(result.type, 'NOT_FOUND');
+  assert.equal(result.candidates.length, CLAUDE_BOUNDED_NEWS_DISCOVERY_MAX_RESULTS_INSPECTED);
+  assert.equal(result.candidates.some(candidate => candidate.discovery.url.includes('too-late')), false);
 });
 
 test('treats an HTTP 200 search tool error as a distinct failure', async () => {
@@ -297,7 +298,12 @@ test('emits bounded sanitized Yahoo result selection diagnostics without changin
   assert.deepEqual(result, {
     ok: true,
     type: 'SUCCESS',
-    candidates: [{rank: 3, discovery: {
+    candidates: [{rank: 2, discovery: {
+      title: 'Other Yahoo page',
+      url: 'https://finance.yahoo.com/markets/stocks/articles/other.html',
+      discoveredVia: 'ANTHROPIC_WEB_SEARCH',
+      targetSessionDate: '2026-09-09'
+    }}, {rank: 3, discovery: {
       title: 'Accepted recap',
       url: accepted,
       discoveredVia: 'ANTHROPIC_WEB_SEARCH',
@@ -315,21 +321,25 @@ test('emits bounded sanitized Yahoo result selection diagnostics without changin
     inspectedResultCount: 6,
     results: [
       {rank: 1, title: 'External result', normalizedYahooUrl: null, path: null,
-        outcome: 'REJECTED', rejectionReason: 'HOST_MISMATCH'},
+        outcome: 'REJECTED', rejectionReason: 'HOST_MISMATCH', oldAddressStyle: null},
       {rank: 2, title: 'Other Yahoo page',
         normalizedYahooUrl: 'https://finance.yahoo.com/markets/stocks/articles/other.html',
-        path: '/markets/stocks/articles/other.html', outcome: 'REJECTED', rejectionReason: 'PATH_MISMATCH'},
+        path: '/markets/stocks/articles/other.html', outcome: 'ACCEPTED', rejectionReason: null,
+        oldAddressStyle: false},
       {rank: 3, title: 'Accepted recap', normalizedYahooUrl: accepted,
-        path: '/markets/live/stock-market-today-valid.html', outcome: 'ACCEPTED', rejectionReason: null},
+        path: '/markets/live/stock-market-today-valid.html', outcome: 'ACCEPTED', rejectionReason: null,
+        oldAddressStyle: true},
       {rank: 4, title: 'Duplicate recap', normalizedYahooUrl: accepted,
-        path: '/markets/live/stock-market-today-valid.html', outcome: 'REJECTED', rejectionReason: 'DUPLICATE'},
+        path: '/markets/live/stock-market-today-valid.html', outcome: 'REJECTED', rejectionReason: 'DUPLICATE',
+        oldAddressStyle: true},
       {rank: 5, title: 'Second valid recap',
         normalizedYahooUrl: 'https://finance.yahoo.com/news/live/stock-market-today-second.html',
-        path: '/news/live/stock-market-today-second.html', outcome: 'ACCEPTED', rejectionReason: null},
+        path: '/news/live/stock-market-today-second.html', outcome: 'ACCEPTED', rejectionReason: null,
+        oldAddressStyle: true},
       {rank: 6, title: null,
         normalizedYahooUrl: 'https://finance.yahoo.com/news/live/stock-market-today-invalid-title.html',
         path: '/news/live/stock-market-today-invalid-title.html',
-        outcome: 'REJECTED', rejectionReason: 'INVALID_TITLE'}
+        outcome: 'REJECTED', rejectionReason: 'INVALID_TITLE', oldAddressStyle: true}
     ]
   });
   assert.equal(Object.isFrozen(diagnostics[0]), true);
@@ -353,7 +363,8 @@ test('caps result diagnostics at ten in deterministic rank order while reporting
     onDiagnostics: value => diagnostics.push(value)
   }).discoverYahooCompletedSessionRecap(context);
 
-  assert.deepEqual(result, {ok: true, type: 'NOT_FOUND', candidates: []});
+  assert.equal(result.type, 'SUCCESS');
+  assert.equal(result.candidates.length, 10);
   assert.equal(diagnostics[0].resultCount, 12);
   assert.equal(diagnostics[0].inspectedResultCount, 10);
   assert.equal(diagnostics[0].results.length, 10);

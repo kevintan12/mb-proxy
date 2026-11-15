@@ -9,6 +9,7 @@ const {
 const currentUrl = 'https://finance.yahoo.com/markets/live/stock-market-today-example.html';
 const legacyUrl = 'https://finance.yahoo.com/news/live/stock-market-today-example.html';
 const bounds = Object.freeze({timeoutMs: 4000, maxResponseBytes: 1024 * 1024, maxHeadlineBytes: 512});
+const recapBody = "US stocks closed higher. The S&P 500 rose 0.4%, the Dow added 0.2% and the Nasdaq gained 0.6%.";
 
 function discovery(url = currentUrl, targetSessionDate = '2026-09-09') {
   return Object.freeze({
@@ -36,6 +37,7 @@ function articleHtml(overrides = {}) {
     datePublished: '2026-09-09T16:30:00-04:00',
     dateModified: '2026-09-09T17:00:00-04:00',
     url: currentUrl,
+    articleBody: recapBody,
     ...overrides
   };
   return `<!doctype html><html><head><link rel="canonical" href="${currentUrl}">`
@@ -115,7 +117,9 @@ test('rejects September 10 publication for a September 9 target', async () => {
     dateModified: '2026-09-10T13:00:00-04:00'
   });
   const result = await service(async () => response(html)).validateYahooRecapSession(input());
-  assert.deepEqual(result, {ok: true, type: 'NOT_VALIDATED', validation: null});
+  assert.deepEqual(result, {
+    ok: true, type: 'NOT_VALIDATED', validation: null, reason: 'WRONG_PUBLISH_DATE'
+  });
 });
 
 test('dateModified cannot override a mismatched datePublished', async () => {
@@ -156,7 +160,7 @@ test('prefers a later fully valid JSON-LD node over reversed-modification fallba
   const goodNode = {
     '@type': 'LiveBlogPosting', headline: 'Validated September 9 recap',
     datePublished: '2026-09-09T16:30:00-04:00',
-    dateModified: '2026-09-09T17:00:00-04:00', url: currentUrl
+    dateModified: '2026-09-09T17:00:00-04:00', url: currentUrl, articleBody: recapBody
   };
   const html = `${bad}<script type="application/ld+json">${JSON.stringify(goodNode)}</script>`;
   const result = await service(async () => response(html)).validateYahooRecapSession(input());
@@ -189,6 +193,7 @@ test('title and URL date text cannot substitute for provider datePublished', asy
   assert.equal(result.type, 'NOT_VALIDATED');
 });
 
+// Step 9F.1g: any finance.yahoo.com path is valid input; host and form still are not.
 test('rejects invalid discovery URLs and mutable discovery before fetch', async () => {
   let calls = 0;
   const invalidUrls = [
@@ -198,7 +203,6 @@ test('rejects invalid discovery URLs and mutable discovery before fetch', async 
     'https://news.finance.yahoo.com/markets/live/stock-market-today-x.html',
     'https://user:pass@finance.yahoo.com/markets/live/stock-market-today-x.html',
     'https://finance.yahoo.com:444/markets/live/stock-market-today-x.html',
-    'https://finance.yahoo.com/topic/stock-market-news',
     'not-a-url'
   ];
   for (const url of invalidUrls) {
@@ -281,9 +285,11 @@ test('malformed JSON-LD and invalid optional metadata remain NOT_VALIDATED', asy
     '<script type="application/ld+json">not-json</script>'
   )).validateYahooRecapSession(input());
   assert.equal(malformed.type, 'NOT_VALIDATED');
+  // Step 9F.1g: an unreadable update time no longer decides; it is recorded as null.
   const invalidModified = await service(async () => response(articleHtml({dateModified: 'not-a-time'})))
     .validateYahooRecapSession(input());
-  assert.equal(invalidModified.type, 'NOT_VALIDATED');
+  assert.equal(invalidModified.type, 'VALIDATED');
+  assert.equal(invalidModified.validation.dateModified, null);
 });
 
 test('input and diagnostics boundaries reject overrides and do not alter behavior', async () => {

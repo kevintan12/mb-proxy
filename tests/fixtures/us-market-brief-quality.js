@@ -151,9 +151,9 @@ function supportedOutput(input, {opportunity = true, plainEnglish = true} = {}) 
           : 'Policy uncertainty remains a material risk to the market outlook.',
         'The later Yahoo recap and policy calendar identify the next developments to monitor.'
       ]
-    : Array(7).fill('Equity positioning reflected rate-path expectations and reallocation momentum.');
+    : Array(7).fill('Rate-path expectations and reallocation momentum shaped the discussion.');
   if (!plainEnglish && broadMarketAvailable) {
-    ordinaryContent[2] = 'Broadcom equity positioning reflected reallocation momentum.';
+    ordinaryContent[2] = 'Broadcom shares reflected reallocation momentum.';
   }
   const evidenceRefs = [
     ['e2', 'e3'], ['e2', 'e3'], broadMarketAvailable ? ['e4', 'e5'] : ['e1', 'e2'],
@@ -169,18 +169,18 @@ function supportedOutput(input, {opportunity = true, plainEnglish = true} = {}) 
     telemetryRefs: index === 7 || (index === 2 && !broadMarketAvailable)
       ? [] : index === 3 ? ['t2'] : ['t1'],
     uncertainties: index === 2 && !broadMarketAvailable
-      ? ['Validated broad-market company or sector evidence was unavailable.'] : []
+      ? ['Not enough data to point out specific stocks or sectors.'] : []
   }));
   const evidenceGaps = [];
   if (!broadMarketAvailable) {
-    evidenceGaps.push('Validated broad-market company or sector evidence was unavailable.');
+    evidenceGaps.push('Not enough data to point out specific stocks or sectors.');
   }
   return {
     status: broadMarketAvailable ? 'NORMAL' : 'DEGRADED',
     reportContext: reportContext(input), sections,
     evidenceReferences: broadMarketAvailable
       ? ['e2', 'e3', 'e4', 'e5', 'e1'] : ['e2', 'e3', 'e1'],
-    furtherReadings: broadMarketAvailable ? ['e1', 'e2', 'e4', 'e5'] : ['e1', 'e2'],
+    furtherReadings: broadMarketAvailable ? ['e2', 'e4', 'e5', 'e1'] : ['e2', 'e1'],
     evidenceGaps
   };
 }

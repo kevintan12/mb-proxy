@@ -1,4 +1,8 @@
-const test = require('node:test');
+// Step 9F.4c: this pins the identical labelling retry, so it runs with
+// classifierRetryGuidanceEnabled off.
+const test = require('./fixtures/step-8w-switches').classifierGuidanceOffTests(require('node:test'), [
+  'Step 8L: classifier retries once silently after a contract failure and then succeeds'
+]);
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -18,6 +22,7 @@ const {
   buildClaudeEvidenceSubjectRepairRequest,
   canonicalClassificationInput,
   createClaudeEvidenceRoleClassificationOutput,
+  completeClaudeEvidenceRoleClassificationOutput,
   createClaudeEvidenceSubjectRepairOutput,
   validateClaudeEvidenceRoleClassificationOutput,
   invokeClaudeEvidenceRoleClassification,
@@ -283,6 +288,33 @@ test('rejects unknown, duplicate, missing, extra, and reordered references', () 
   const reordered = classifications(); [reordered.classifications[0], reordered.classifications[1]]
     = [reordered.classifications[1], reordered.classifications[0]]; cases.push(reordered);
   for (const raw of cases) assert.equal(validateClaudeEvidenceRoleClassificationOutput(raw, input()).valid, false);
+});
+
+test('conservatively completes only omitted CURRENT_SESSION classifications without relaxing reference integrity', () => {
+  const source = input(['COMPLETED_SESSION', 'CURRENT_SESSION', 'CURRENT_SESSION']);
+  const omitted = classifications();
+  omitted.classifications.splice(1, 1);
+  const completed = completeClaudeEvidenceRoleClassificationOutput(omitted, source, {
+    allowConservativeCompletion: true
+  });
+  assert.deepEqual(completed.output.classifications.map(entry => entry.reference), ['e1', 'e2', 'e3']);
+  assert.deepEqual(completed.output.classifications[1], {
+    reference: 'e2', materiality: 'LOW', roles: [], subjects: []
+  });
+  assert.deepEqual(completed.classificationCoverage, {
+    suppliedReferenceCount: 3,
+    returnedReferenceCount: 2,
+    missingReferenceCount: 1,
+    unknownOrExtraReferenceCount: 0,
+    deterministicCompletionApplied: true
+  });
+  assert.throws(() => completeClaudeEvidenceRoleClassificationOutput(omitted, source),
+    /cover every supplied reference/);
+  const unknown = classifications();
+  unknown.classifications[1].reference = 'e9';
+  assert.throws(() => completeClaudeEvidenceRoleClassificationOutput(unknown, source, {
+    allowConservativeCompletion: true
+  }), /references must match/);
 });
 
 test('classifier result shape excludes the removed reason field', () => {
@@ -551,6 +583,31 @@ test('makes exactly one Anthropic fetch with no retry and returns immutable outp
   assert.equal(source.evidence[0].item.title, 'Canonical evidence 1');
 });
 
+test('completes omitted active classifications with conservative non-causal defaults and diagnostics', async () => {
+  const source = input(['COMPLETED_SESSION', 'CURRENT_SESSION', 'CURRENT_SESSION']);
+  const omitted = classifications();
+  omitted.classifications.splice(1, 1);
+  const diagnostics = [];
+  const result = await invokeClaudeEvidenceRoleClassification({
+    input: source, apiKey: 'secret', fetchImpl: async () => response(omitted),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.output.classifications[1], {
+    reference: 'e2', materiality: 'LOW', roles: [], subjects: []
+  });
+  assert.deepEqual(result.classificationCoverage, {
+    suppliedReferenceCount: 3,
+    returnedReferenceCount: 2,
+    missingReferenceCount: 1,
+    unknownOrExtraReferenceCount: 0,
+    deterministicCompletionApplied: true
+  });
+  // Step 9F.2b: diagnostics[0] is the new requestSizeSummary event; the final
+  // per-call event (with classificationCoverage) is diagnostics[1].
+  assert.deepEqual(diagnostics[1].classificationCoverage, result.classificationCoverage);
+});
+
 test('diagnoses primary subject omission separately from subjects sanitized to empty', async () => {
   const source = input(
     ['COMPLETED_SESSION', 'COMPLETED_SESSION'],
@@ -580,15 +637,19 @@ test('diagnoses primary subject omission separately from subjects sanitized to e
     primaryOmittedSubjectCount: 1,
     primarySanitizedEmptySubjectCount: 1
   });
-  assert.deepEqual(diagnostics[0].subjectCoverage, result.subjectCoverage);
+  // Step 9F.2b: diagnostics[0] is the new requestSizeSummary event; the final
+  // per-call event (with subjectCoverage) is diagnostics[1].
+  assert.deepEqual(diagnostics[1].subjectCoverage, result.subjectCoverage);
 });
 
-test('never retries network, HTTP, malformed-envelope, or contract failures', async () => {
+test('never retries network, HTTP, unreadable-body, or truncated failures', async () => {
   const transports = [
     async () => { throw new Error('network secret'); },
+    async () => ({ok: false, status: 401, headers: {get: () => null}}),
+    async () => ({ok: false, status: 429, headers: {get: () => null}}),
     async () => ({ok: false, status: 503, headers: {get: () => null}}),
-    async () => ({ok: true, status: 200, headers: {get: () => null}, async json() { return {content: []}; }}),
-    async () => response(classifications({index: 2, value: {roles: ['PRINCIPAL_CATALYST']}}))
+    async () => ({ok: true, status: 200, headers: {get: () => null}, async json() { throw new Error('unreadable'); }}),
+    async () => response({classifications: []}, {stop_reason: 'max_tokens'})
   ];
   for (const transport of transports) {
     let calls = 0;
@@ -600,19 +661,103 @@ test('never retries network, HTTP, malformed-envelope, or contract failures', as
   }
 });
 
+test('Step 8L: classifier retries once silently after a contract failure and then succeeds', async () => {
+  // e3 is a SUBSEQUENT_DEVELOPMENT, so tagging it PRINCIPAL_CATALYST breaks the contract.
+  const bad = response(classifications({index: 2, value: {roles: ['PRINCIPAL_CATALYST']}}));
+  const good = response(classifications());
+  const responses = [bad, good];
+  let calls = 0;
+  const diagnostics = [];
+  const bodies = [];
+  const result = await invokeClaudeEvidenceRoleClassification({
+    input: input(), apiKey: 'secret', onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async (url, options) => { bodies.push(options.body); return responses[calls++]; }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 2);
+  assert.equal(bodies[0], bodies[1]);
+  const retries = diagnostics.filter(value => value.stage === 'contractRetry');
+  assert.equal(retries.length, 1);
+  assert.equal(retries[0].call, 'classifier');
+  assert.equal(retries[0].firstFailureMessage, 'subsequent development cannot be a principal catalyst');
+  assert.equal(retries[0].retryOutcome, 'SUCCESS');
+  assert.equal(JSON.stringify(diagnostics).includes('secret'), false);
+});
+
+test('Step 8L: classifier stops after one retry when the second answer also fails', async () => {
+  let calls = 0;
+  const result = await invokeClaudeEvidenceRoleClassification({
+    input: input(), apiKey: 'secret',
+    fetchImpl: async () => { calls++; return response(classifications({index: 2, value: {roles: ['PRINCIPAL_CATALYST']}})); }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.type, 'CONTRACT_FAILURE');
+  assert.equal(result.message, 'subsequent development cannot be a principal catalyst');
+  assert.equal(calls, 2);
+});
+
+test('Step 8L: classifier first-try success makes one call and logs no retry', async () => {
+  let calls = 0;
+  const diagnostics = [];
+  const result = await invokeClaudeEvidenceRoleClassification({
+    input: input(), apiKey: 'secret', onDiagnostics: value => diagnostics.push(value),
+    fetchImpl: async () => { calls++; return response(classifications()); }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 1);
+  assert.equal(diagnostics.some(value => value.stage === 'contractRetry'), false);
+});
+
 test('blocks oversized requests before fetch', async () => {
-  const largeItem = evidence(1, {summary: 'x'.repeat(CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES)});
+  // Step 9F.1f: the classifier reads only the first 8 KB of each article, so one
+  // huge article no longer overflows. Step 9F.2b raised the classifier limit to
+  // 300 KB, so it now takes 40 max-size (50-item cap) 8 KB articles to overflow.
+  const largeItems = Array.from({length: 40}, (_, index) =>
+    evidence(index + 1, {summary: 'x'.repeat(CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES)}));
   let fetchCount = 0;
   const diagnostics = [];
   const result = await invokeClaudeEvidenceRoleClassification({
-    input: input(['COMPLETED_SESSION'], [largeItem]), apiKey: 'secret',
+    input: input(largeItems.map(() => 'COMPLETED_SESSION'), largeItems), apiKey: 'secret',
     fetchImpl: async () => { fetchCount++; }, onDiagnostics: value => diagnostics.push(value)
   });
   assert.equal(result.type, 'REQUEST_TOO_LARGE');
   assert.equal(fetchCount, 0);
-  assert.equal(diagnostics[0].providerInvocationSkipped, true);
-  assert.equal(diagnostics[0].fetchCount, 0);
+  // diagnostics[0] is the new requestSizeSummary event (Step 9F.2b); diagnostics[1]
+  // is the existing providerInvocationSkipped event.
+  assert.equal(diagnostics[0].stage, 'requestSizeSummary');
+  assert.equal(diagnostics[0].call, 'classifier');
+  assert.ok(diagnostics[0].requestBytes > diagnostics[0].limitBytes);
+  assert.equal(diagnostics[1].providerInvocationSkipped, true);
+  assert.equal(diagnostics[1].fetchCount, 0);
 });
+
+// Step 9F.2b: table-driven -- a classifier request just under vs. just over
+// the live 300 KB limit (each article truncated to the fixed 8 KB classifier
+// cut, so 35 articles land under and 36 land over).
+for (const [label, itemCount, expectRequestTooLarge] of [
+  ['just under the limit (35 articles)', 35, false],
+  ['just over the limit (36 articles)', 36, true]
+]) {
+  test(`Step 9F.2b: classifier request ${label}`, async () => {
+    const items = Array.from({length: itemCount}, (_, index) =>
+      evidence(index + 1, {summary: 'x'.repeat(CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES)}));
+    let fetchCount = 0;
+    const result = await invokeClaudeEvidenceRoleClassification({
+      input: input(items.map(() => 'COMPLETED_SESSION'), items), apiKey: 'secret',
+      fetchImpl: async () => { fetchCount++; return response(classifications()); }
+    });
+    if (expectRequestTooLarge) {
+      assert.equal(result.type, 'REQUEST_TOO_LARGE');
+      assert.equal(fetchCount, 0);
+    } else {
+      // The fixed 3-reference stub response under-covers these larger inputs, so
+      // Step 8L's one silent contract retry fires; what matters here is that the
+      // size gate passed and at least one fetch happened (not REQUEST_TOO_LARGE).
+      assert.ok(fetchCount >= 1);
+      assert.notEqual(result.type, 'REQUEST_TOO_LARGE');
+    }
+  });
+}
 
 test('captures only sanitized size, counts, request-id, timing, usage, and fetch diagnostics', async () => {
   const diagnostics = [];
@@ -621,29 +766,92 @@ test('captures only sanitized size, counts, request-id, timing, usage, and fetch
     onDiagnostics: value => diagnostics.push(value), monotonicNow: (() => { let now = 0; return () => ++now; })()
   });
   assert.equal(result.ok, true);
-  assert.equal(diagnostics.length, 1);
-  assert.deepEqual(Object.keys(diagnostics[0]), [
+  // Step 9F.2b: diagnostics[0] is the new requestSizeSummary event; the
+  // existing per-call event (unchanged shape) moves to diagnostics[1].
+  assert.equal(diagnostics.length, 2);
+  assert.deepEqual(diagnostics[0], {
+    stage: 'requestSizeSummary', call: 'classifier',
+    requestBytes: diagnostics[1].requestSize.completeRequestBodyBytes,
+    limitBytes: CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES,
+    percentOfLimit: diagnostics[0].percentOfLimit
+  });
+  assert.deepEqual(Object.keys(diagnostics[1]), [
     'model', 'requestId', 'requestSize', 'counts', 'timing', 'usage', 'fetchCount',
-    'subjectCoverage'
+    'classificationCoverage', 'subjectCoverage'
   ]);
-  assert.deepEqual(diagnostics[0].counts, {evidenceCount: 3, benchmarkTelemetryCount: 1});
-  assert.deepEqual(diagnostics[0].usage, {input_tokens: 300, output_tokens: 80});
-  assert.equal(diagnostics[0].fetchCount, 1);
-  assert.deepEqual(diagnostics[0].subjectCoverage, {
+  assert.deepEqual(diagnostics[1].counts, {evidenceCount: 3, benchmarkTelemetryCount: 1});
+  assert.deepEqual(diagnostics[1].usage, {input_tokens: 300, output_tokens: 80});
+  assert.equal(diagnostics[1].fetchCount, 1);
+  assert.deepEqual(diagnostics[1].subjectCoverage, {
     eligibleReferenceCount: 0,
     primaryOmittedSubjectCount: 0,
     primarySanitizedEmptySubjectCount: 0
   });
-  assert.equal(diagnostics[0].requestSize.classificationInputBytes,
+  assert.equal(diagnostics[1].requestSize.classificationInputBytes,
     Buffer.byteLength(JSON.stringify(canonicalClassificationInput(input())), 'utf8'));
-  assert.equal(diagnostics[0].requestSize.projectedClassificationInputBytes,
+  assert.equal(diagnostics[1].requestSize.projectedClassificationInputBytes,
     Buffer.byteLength(buildClaudeEvidenceRoleClassificationRequest(input()).messages[0].content, 'utf8'));
-  assert.equal(diagnostics[0].requestSize.projectedClassificationInputBytes
-    < diagnostics[0].requestSize.classificationInputBytes, true);
-  const serialized = JSON.stringify(diagnostics[0]);
+  assert.equal(diagnostics[1].requestSize.projectedClassificationInputBytes
+    < diagnostics[1].requestSize.classificationInputBytes, true);
+  const serialized = JSON.stringify(diagnostics);
   for (const forbidden of ['Canonical evidence', 'Bounded evidence', 'cnbc.com', 'TOP_SECRET', 'Classify every']) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
+});
+
+test('Step 8K.2/9F.2b a worst-case widened-window package of six max-size admitted current-session articles stays under the classifier limit', () => {
+  const {
+    YAHOO_CURRENT_NEWS_MAX_ARTICLE_TEXT_BYTES,
+    YAHOO_CURRENT_NEWS_MAX_HEADLINE_BYTES
+  } = require('../lib/yahoo-current-news-article-content-acquisition');
+  const {ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES} = require('../lib/us-analysis-package-orchestration');
+
+  function padToBytes(seed, bytes) {
+    let text = seed;
+    while (Buffer.byteLength(text, 'utf8') < bytes) text += 'x';
+    return text;
+  }
+  const maxTitle = padToBytes('Current-session headline ', YAHOO_CURRENT_NEWS_MAX_HEADLINE_BYTES);
+  const maxSummary = padToBytes('Current-session article body. ', YAHOO_CURRENT_NEWS_MAX_ARTICLE_TEXT_BYTES);
+  assert.equal(Buffer.byteLength(maxTitle, 'utf8'), YAHOO_CURRENT_NEWS_MAX_HEADLINE_BYTES);
+  assert.equal(Buffer.byteLength(maxSummary, 'utf8'), YAHOO_CURRENT_NEWS_MAX_ARTICLE_TEXT_BYTES);
+
+  const currentSessionSnapshot = createFiveSessionSnapshot({
+    market: 'US', symbol: '^GSPC', instrumentName: 'S&P 500 benchmark', instrumentType: 'INDEX',
+    currency: 'USD', marketState: 'REGULAR',
+    completedSessions: [createCompletedRegularSession({
+      market: 'US', sessionDate: '2026-09-04', open: 100, high: 105, low: 98,
+      close: 104, previousClose: 100, volume: 1000000,
+      asOf: '2026-09-04T16:00:00-04:00', sourceId: 'us.yahoo-finance',
+      validationState: 'VALIDATED'
+    })],
+    currentOverlay: null
+  });
+  const admittedItems = Array.from({length: ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES}, (_, index) =>
+    createEvidenceItem({
+      sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+      title: maxTitle, summary: maxSummary,
+      canonicalUrl: `https://finance.yahoo.com/news/worst-case-current-story-${index + 1}.html`,
+      publishedAt: `2026-09-08T14:${String(10 + index).padStart(2, '0')}:00Z`,
+      symbols: ['MSFT'], publisher: 'Yahoo Finance'
+    }));
+  const worstCaseInput = {
+    marketContext: {
+      market: 'US', exchangeTimezone: 'America/New_York', marketState: 'REGULAR',
+      primaryCompletedSessionDate: '2026-09-04'
+    },
+    benchmarkTelemetry: [{reference: 't1', snapshot: currentSessionSnapshot}],
+    evidence: admittedItems.map((item, index) => ({
+      reference: `e${index + 1}`, horizon: 'CURRENT_SESSION',
+      requiresBroadMarketSubjects: true, item
+    }))
+  };
+  const request = buildClaudeEvidenceRoleClassificationRequest(worstCaseInput);
+  const requestBytes = Buffer.byteLength(request.messages[0].content, 'utf8');
+  assert.ok(
+    requestBytes < CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES,
+    `worst-case request is ${requestBytes} bytes`
+  );
 });
 
 test('does not integrate final package construction or provider acquisition', () => {

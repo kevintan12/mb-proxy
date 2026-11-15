@@ -1,5 +1,11 @@
-const test = require('node:test');
+// Step 9Z: these pin the exact list of writer log lines, so they run with
+// shortExecutiveSummaryEnabled off (on adds the one sectionOneLength line).
+const test = require('./fixtures/short-summary-switch').shortSummaryOffTests(require('node:test'), [
+  "structured Claude route returns validated analysis with one server-owned request",
+  "structured Claude diagnostics omit absent or invalid generation IDs"
+]);
 const assert = require('node:assert/strict');
+const {emptySectionFour} = require('./fixtures/section-four-empty');
 
 const handler = require('../api/quote');
 const analysisPackageRuntime = require('../lib/analysis-package-runtime');
@@ -120,7 +126,7 @@ function claudeAnalysisOutput(input) {
     sections: REPORT_SECTION_NAMES.map((name, index) => ({
       name,
       content: index === 7 ? null : index === 3
-        ? EMPTY_INITIATING_LIST_CONTENT.myStocks : index === 2
+        ? emptySectionFour() : index === 2
           ? 'Technology led the broad market.' : 'Supported analysis.',
       evidenceRefs: index === 7 || index === 3 ? [] : ['e1'],
       telemetryRefs: index === 7 || index === 3 ? [] : ['t1'],
@@ -129,6 +135,20 @@ function claudeAnalysisOutput(input) {
     evidenceReferences: ['e1'],
     furtherReadings: [],
     evidenceGaps: []
+  };
+}
+
+function claudeProviderTransport(output) {
+  const encode = values => values.join('|');
+  return {
+    status: output.status,
+    evidenceGaps: output.evidenceGaps,
+    ...Object.fromEntries(output.sections.map((section, index) => [`s${index + 1}`, index === 7 ? {} : {
+      content: section.content,
+      evidenceRefs: encode(section.evidenceRefs),
+      telemetryRefs: encode(section.telemetryRefs),
+      uncertainties: encode(section.uncertainties)
+    }]))
   };
 }
 
@@ -406,7 +426,7 @@ test('structured Claude route returns validated analysis with one server-owned r
       ok: true,
       status: 200,
       async json() {
-        return {content: [{type: 'text', text: JSON.stringify(output)}]};
+        return {content: [{type: 'text', text: JSON.stringify(claudeProviderTransport(output))}]};
       }
     };
   };
@@ -423,8 +443,12 @@ test('structured Claude route returns validated analysis with one server-owned r
     assert.deepEqual(res.body, {result: output});
     assert.equal(JSON.stringify(requestBody).includes('generationId'), false);
     assert.equal(JSON.stringify(res.body).includes('generationId'), false);
-    assert.equal(logs.length, 3);
+    // Step 9F.2b: one new 'requestSizeSummary' log line per writer call, logged
+    // before the request is sent -- so it is first, ahead of the post-response
+    // normalization stages.
+    assert.equal(logs.length, 5);
     assert.deepEqual(logs.map(([, value]) => JSON.parse(value).stage || 'invocation'), [
+      'requestSizeSummary', 'claudeAnalysisStructureNormalization',
       'claudeAnalysisPreNormalization', 'claudeAnalysisPreNormalization', 'invocation'
     ]);
     for (const [prefix, value] of logs) {
@@ -449,7 +473,7 @@ test('structured Claude diagnostics omit absent or invalid generation IDs', asyn
   global.fetch = async (url, options) => {
     assert.equal(JSON.parse(options.body).messages[0].content.includes('generationId'), false);
     return {ok: true, status: 200,
-      async json() { return {content: [{type: 'text', text: JSON.stringify(output)}]}; }};
+      async json() { return {content: [{type: 'text', text: JSON.stringify(claudeProviderTransport(output))}]}; }};
   };
   try {
     for (const generationId of [undefined, ['123e4567-e89b-42d3-a456-426614174000'],
@@ -459,7 +483,8 @@ test('structured Claude diagnostics omit absent or invalid generation IDs', asyn
       assert.equal(res.statusCode, 200);
       assert.equal(JSON.stringify(res.body).includes('generationId'), false);
     }
-    assert.equal(logs.length, 15);
+    // Step 9F.2b: one new 'requestSizeSummary' log line per writer call (5 logs x 5 calls).
+    assert.equal(logs.length, 25);
     for (const [prefix, value] of logs) {
       assert.equal(prefix, '[claude-analysis.invocation]');
       assert.equal(Object.hasOwn(JSON.parse(value), 'generationId'), false);
@@ -497,7 +522,7 @@ test('structured Claude route separates input, contract and upstream failures', 
         const input = claudeAnalysisInput();
         const output = claudeAnalysisOutput(input);
         output.sections[0].evidenceRefs = ['e2'];
-        return {content: [{type: 'text', text: JSON.stringify(output)}]};
+        return {content: [{type: 'text', text: JSON.stringify(claudeProviderTransport(output))}]};
       }
     });
     const contract = mockRes();
@@ -514,7 +539,9 @@ test('structured Claude route returns a distinct oversized-request failure', asy
   const previousKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = 'test-key';
   const input = JSON.parse(JSON.stringify(claudeAnalysisInput()));
-  input.marketPackages[0].evidenceContext.evidence[0].item.summary = 'x'.repeat(140000);
+  // Step 9F.2b: the writer limit is now 500 KB, so the oversized summary must
+  // clear that, not the old 128 KB limit.
+  input.marketPackages[0].evidenceContext.evidence[0].item.summary = 'x'.repeat(600000);
   let calls = 0;
   global.fetch = async () => { calls++; };
   try {
@@ -557,7 +584,9 @@ test('legacy Claude proxy still forwards the caller body and streams unchanged',
     await handler({method: 'POST', query: {claude: '1'}, body: callerBody}, res);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages');
-    assert.deepEqual(JSON.parse(calls[0].options.body), callerBody);
+    // Step 9AC: the model guard (legacyModelGuardEnabled, default on) replaces a model
+    // name that is not on the allowed list; the rest of the body is forwarded unchanged.
+    assert.deepEqual(JSON.parse(calls[0].options.body), {...callerBody, model: 'claude-haiku-4-5-20251001'});
     assert.equal(res.statusCode, 201);
     assert.equal(res.headers['Content-Type'], 'text/event-stream');
     assert.deepEqual(res.chunks, chunks);

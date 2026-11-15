@@ -78,17 +78,26 @@ test('unsupported calendar years fail closed and the helper never uses S.tz', ()
 });
 
 test('known early-close and half-day dates are explicitly unsupported, not assumed normal', () => {
-  for (const [market, exchangeDate] of [
-    ['US', '2026-11-27'],
-    ['SG', '2026-02-16'],
-    ['HK', '2026-12-24']
-  ]) {
-    const context = getSessionContext({market, exchangeDate});
-    assert.equal(context.dayType, 'UNSUPPORTED_SPECIAL_SESSION');
-    assert.equal(context.tradingDay, true);
-    assert.equal(context.calendarSupported, false);
-    assert.equal(context.regularCloseTime, null);
-    assert.equal(context.regularOpenTime, null);
+  // Step 9S.1: US 2026-11-27 is unsupported only with earlyCloseDaysEnabled off (the old calendar);
+  // with it on it is a supported early-close day (tests/half-day-sessions-9s1.test.js).
+  const previousEarlyClose = process.env.EARLY_CLOSE_DAYS_ENABLED;
+  process.env.EARLY_CLOSE_DAYS_ENABLED = 'off';
+  try {
+    for (const [market, exchangeDate] of [
+      ['US', '2026-11-27'],
+      ['SG', '2026-02-16'],
+      ['HK', '2026-12-24']
+    ]) {
+      const context = getSessionContext({market, exchangeDate});
+      assert.equal(context.dayType, 'UNSUPPORTED_SPECIAL_SESSION');
+      assert.equal(context.tradingDay, true);
+      assert.equal(context.calendarSupported, false);
+      assert.equal(context.regularCloseTime, null);
+      assert.equal(context.regularOpenTime, null);
+    }
+  } finally {
+    if (previousEarlyClose === undefined) delete process.env.EARLY_CLOSE_DAYS_ENABLED;
+    else process.env.EARLY_CLOSE_DAYS_ENABLED = previousEarlyClose;
   }
 });
 

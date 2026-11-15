@@ -170,6 +170,26 @@ test('persists primitive facts only and replaces a complete same-session row', a
   assert.equal(Object.prototype.hasOwnProperty.call(row, 'percent_change'), false);
 });
 
+test('snapshot upsert replaces stale same-date values without crossing symbol state', async () => {
+  const database = createMemoryPostgres();
+  const repository = createPostgresFiveSessionSnapshotRepository(database);
+  await repository.upsert({market: 'SG', symbol: '^STI', session: session('04')});
+  await repository.upsert({market: 'SG', symbol: 'D05.SI', session: session('04', {close: 5760})});
+
+  const acquired = session('04', {
+    open: 5710, high: 5900, low: 5700, close: 5800, previousClose: 5744,
+    volume: 999, validationState: 'REVALIDATED'
+  });
+  const result = await repository.upsertSnapshot({
+    market: 'SG', symbol: '^STI', sessions: [acquired]
+  });
+
+  assert.deepEqual(result, [acquired]);
+  const otherSymbol = await repository.listLatest({market: 'SG', symbol: 'D05.SI'});
+  assert.equal(otherSymbol.length, 1);
+  assert.equal(otherSymbol[0].close, 5760);
+});
+
 test('retains newest five independently and returns them oldest to newest', async () => {
   const database = createMemoryPostgres();
   const repository = createPostgresFiveSessionSnapshotRepository(database);

@@ -1,5 +1,12 @@
-const test = require('node:test');
+const {startingListTests} = require('./fixtures/section-four-switch');
+// Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
+const test = startingListTests(require('node:test'), [
+  "limits Section 4 references to the initiating list without changing portfolio membership",
+  "allows only initiating-list upcoming-event evidence in Section 4",
+  "requires the deterministic empty-list Section 4 statement without downgrade or substitution"
+]);
 const assert = require('node:assert/strict');
+const {emptySectionFour} = require('./fixtures/section-four-empty');
 
 const {createEvidenceItem} = require('../lib/evidence-items');
 const {createEvidenceCollection} = require('../lib/evidence-collections');
@@ -24,8 +31,29 @@ const {
   createClaudeAnalysisInput,
   validateClaudeAnalysisInput,
   validateClaudeAnalysisOutput,
-  createClaudeAnalysisOutput
+  createClaudeAnalysisOutput,
+  hasInternalIdentifierLeak,
+  splitReportSentences
 } = require('../lib/claude-analysis-contract');
+
+test('Step 8U.3: the trim sentence splitter keeps U.S., Inc., month abbreviations and decimals inside a sentence', () => {
+  assert.deepEqual(splitReportSentences(
+    'U.S. stocks rose 0.45% on Oct. 2. Apple Inc. gained 1.2%, J.P. Morgan said. '
+    + 'Did yields fall? Yes! The Nasdaq ended at 18,950.25'
+  ), [
+    'U.S. stocks rose 0.45% on Oct. 2.',
+    'Apple Inc. gained 1.2%, J.P. Morgan said.',
+    'Did yields fall?',
+    'Yes!',
+    'The Nasdaq ended at 18,950.25'
+  ]);
+  // An unclear boundary keeps the text together, so a trim can only remove more.
+  assert.deepEqual(splitReportSentences('Shares rose approx. five percent. Then they eased.'),
+    ['Shares rose approx. five percent.', 'Then they eased.']);
+  assert.deepEqual(splitReportSentences('One clause; another clause.'), ['One clause; another clause.']);
+  assert.deepEqual(splitReportSentences(''), []);
+  assert.deepEqual(splitReportSentences(null), []);
+});
 
 const MARKET_CONFIG = {
   US: {zone: 'America/New_York', source: 'us.yahoo-finance', news: 'us.reuters', symbol: '^GSPC'},
@@ -157,7 +185,7 @@ function sections({content = 'Supported analysis.', evidenceRefs = ['e1'], telem
   return REPORT_SECTION_NAMES.map((name, index) => ({
     name,
     content: index === REPORT_SECTION_NAMES.length - 1 ? null
-      : index === 3 ? EMPTY_INITIATING_LIST_CONTENT[initiatingList]
+      : index === 3 ? emptySectionFour(initiatingList)
         : content === null ? null : index === 2 ? 'Supported Technology analysis.' : content,
     evidenceRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 3 ? [] : evidenceRefs.slice(),
     telemetryRefs: index === REPORT_SECTION_NAMES.length - 1 || index === 3 ? [] : telemetryRefs.slice(),
@@ -607,6 +635,36 @@ test('rejects reordered sections, unknown references, model URLs and mismatched 
   assert.equal(validateClaudeAnalysisOutput(telemetryOnly, input).valid, false);
 });
 
+test('Step 8M: hasInternalIdentifierLeak flags leaked identifiers without flagging real dotted names', () => {
+  assert.equal(hasInternalIdentifierLeak('evidenceContext.broadMarketFocus'), true);
+  assert.equal(hasInternalIdentifierLeak(
+    'The report cited evidenceContext.broadMarketFocus directly.'), true);
+  assert.equal(hasInternalIdentifierLeak(
+    'MarketBrief reconstructs the final report from validated sections.'), true);
+  assert.equal(hasInternalIdentifierLeak(
+    'Per the section slot definition, content must be a string.'), true);
+  assert.equal(hasInternalIdentifierLeak('The JSON schema requires exact keys.'), true);
+  assert.equal(hasInternalIdentifierLeak('eBay.com reported strong holiday sales.'), false);
+  assert.equal(hasInternalIdentifierLeak('iShares.com lists the fund details.'), false);
+  assert.equal(hasInternalIdentifierLeak(
+    'iPhone.apple sales were strong this quarter.'), false);
+  assert.equal(hasInternalIdentifierLeak('BRK.B shares rose 1.2%.'), false);
+  assert.equal(hasInternalIdentifierLeak('The index fell 0.38% to 7,718.60.'), false);
+  assert.equal(hasInternalIdentifierLeak(
+    'The report has a broad market focus this week.'), false);
+});
+
+test('Step 8M: validateClaudeAnalysisOutput rejects a section containing the real leaked string', () => {
+  const input = canonicalInput();
+  const output = normalOutput(input);
+  output.sections[2].content =
+    `${output.sections[2].content} It cites evidenceContext.broadMarketFocus directly.`;
+  const result = validateClaudeAnalysisOutput(output, input);
+  assert.equal(result.valid, false);
+  assert.equal(result.errors.includes('sections[2]: internal identifier leak'), true);
+  assert.throws(() => createClaudeAnalysisOutput(output, input), /internal identifier leak/);
+});
+
 test('rejects populated Section 3 with telemetry but no supplied evidence reference', () => {
   const input = canonicalInput();
   const output = normalOutput(input);
@@ -861,7 +919,7 @@ test('accepts a fully grounded realistic US response using Yahoo, Federal Reserv
     },
     marketPackages: [packageInput], portfolioContext: {myStocks: [], watchlist: []}
   });
-  const output = normalOutput(input);
+  const output = normalOutput(input, {furtherReadings: ['e3']});
   output.sections[1].evidenceRefs = ['e2'];
   output.sections[2].evidenceRefs = ['e3'];
   output.sections[4].evidenceRefs = ['e2'];

@@ -1,4 +1,24 @@
-const test = require('node:test');
+const {startingListTests} = require('./fixtures/section-four-switch');
+const {sectionRetryOffTests} = require('./fixtures/writer-section-retry-switch');
+// Step 21D.2: these pin the starting-list-only Section 4 rule, so they run with the switch off.
+const startingListTest = startingListTests(require('node:test'), [
+  "Step 9F.2d.3 portfolio slots: a Watchlist company gets a slot in a My Stocks run, then the second pass"
+]);
+// Step 9L: these assert one writer call or an exact event list on a reply that leaves a
+// retryable section empty on purpose, so they run with the section retry off.
+const sectionRetryTest = sectionRetryOffTests(startingListTest, [
+  "Step 8U.10: a failed classifier on CLOSED, WEEKEND and HOLIDAY returns a DEGRADED report, not a 502"
+]);
+// Step 9V: this pins the 52552bc completed-day Section 1 text, so it runs with
+// completedSinceCloseEnabled off.
+const sinceCloseTest = require('./fixtures/completed-since-close-switch').completedSinceCloseOffTests(sectionRetryTest, [
+  "Step 8U.10: a failed classifier on CLOSED, WEEKEND and HOLIDAY returns a DEGRADED report, not a 502"
+]);
+// Step 9AA.2: this pins "a failed stock has no evidence ref" (3722898), so it runs with
+// sectionFourPriceRecordEnabled off; the records have their own tests.
+const test = require('./fixtures/section-four-price-record-switch').sectionFourPriceRecordOffTests(sinceCloseTest, [
+  'one failed symbol or evidence item leaves unrelated telemetry and references canonical'
+]);
 const assert = require('node:assert/strict');
 const {
   createCompletedRegularSession,
@@ -26,10 +46,12 @@ const {
 const {
   REPORT_HEADER,
   REPORT_SECTION_NAMES,
+  EMPTY_INITIATING_LIST_CONTENT,
   validateClaudeAnalysisInput,
   validateClaudeAnalysisOutput
 } = require('../lib/claude-analysis-contract');
-const {buildClaudeAnalysisRequest} = require('../lib/claude-analysis-invocation');
+const {buildClaudeAnalysisRequest, invokeClaudeAnalysis} = require('../lib/claude-analysis-invocation');
+const {parseUsActiveSessionAnchor} = require('../lib/us-active-session-evidence');
 const {
   buildClaudeEvidenceRoleClassificationRequest,
   CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES
@@ -37,6 +59,7 @@ const {
 const {
   BENCHMARK_ANCHOR_KEYS,
   BROAD_MARKET_EVIDENCE_UNAVAILABLE_GAP,
+  STALE_COMPLETED_SESSION_TELEMETRY_GAP,
   CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
   CNBC_RECAP_UNAVAILABLE_GAP,
   EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP,
@@ -46,12 +69,39 @@ const {
   YAHOO_RECAP_EVIDENCE_CONSTRUCTION_FAILURE_GAP,
   ORCHESTRATION_REQUEST_KEYS,
   ANALYSIS_MODES,
-  ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS,
+  ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS: LOADED_MAX_ARTICLE_ATTEMPTS,
+  ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES: LOADED_MAX_ADMITTED_ARTICLES,
   analysisModeForMarketState,
+  expectedLatestCompletedUsSessionDate,
   broadMarketNewsReferences,
   createUsAnalysisPackageOrchestrationService,
   validateUsAnalysisOrchestrationRequest
 } = require('../lib/us-analysis-package-orchestration');
+const {sourceLimits: readerSourceLimits} = require('../lib/source-reader');
+
+// Step 9F.2e.5: the article-slots switch (ARTICLE_SLOTS_ENABLED) is read from
+// process.env on every run. The tests that pin the previous caps (12 attempts,
+// 6 admitted) run with it off (unchanged behaviour); the slots-on caps are
+// tested in the Step 9F.2e.5 tests further down.
+const SLOTS_OFF_LIMITS = readerSourceLimits('us.yahoo-finance', {env: {ARTICLE_SLOTS_ENABLED: 'off'}});
+const ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS = SLOTS_OFF_LIMITS.maxArticleAttempts;
+const ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES = SLOTS_OFF_LIMITS.maxAdmittedArticles;
+
+async function withArticleSlots(value, operation) {
+  const saved = process.env.ARTICLE_SLOTS_ENABLED;
+  if (value === undefined) delete process.env.ARTICLE_SLOTS_ENABLED;
+  else process.env.ARTICLE_SLOTS_ENABLED = value;
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.ARTICLE_SLOTS_ENABLED;
+    else process.env.ARTICLE_SLOTS_ENABLED = saved;
+  }
+}
+
+function slotsOffTest(name, operation) {
+  test(name, () => withArticleSlots('off', operation));
+}
 
 const GENERATED_AT = '2026-09-06T10:00:00.000Z';
 const YAHOO_RECAP_ARTICLE_BOUNDS = Object.freeze({
@@ -96,6 +146,47 @@ function snapshot(symbol) {
   });
 }
 
+function snapshotForLatestDate(symbol, latestDate, marketState = 'CLOSED') {
+  const dates = [];
+  let candidate = latestDate;
+  while (dates.length < 5) {
+    const weekday = new Date(`${candidate}T00:00:00Z`).getUTCDay();
+    if (weekday !== 0 && weekday !== 6 && candidate !== '2026-09-07') dates.unshift(candidate);
+    const [year, month, day] = candidate.split('-').map(Number);
+    const previous = new Date(0);
+    previous.setUTCHours(0, 0, 0, 0);
+    previous.setUTCFullYear(year, month - 1, day - 1);
+    candidate = previous.toISOString().slice(0, 10);
+  }
+  const sessions = dates.map((sessionDate, index) => {
+    const close = 101 + index;
+    return createCompletedRegularSession({
+      market: 'US', sessionDate, open: close - 1, high: close + 5, low: close - 5,
+      close, previousClose: close - 1, volume: 1000 + index,
+      asOf: `${sessionDate}T16:00:00-04:00`, sourceId: 'us.yahoo-finance',
+      validationState: 'VALIDATED'
+    });
+  });
+  return createFiveSessionSnapshot({
+    market: 'US', symbol, instrumentName: `${symbol} instrument`,
+    instrumentType: symbol.startsWith('^') ? 'INDEX' : 'EQUITY', currency: 'USD',
+    marketState, completedSessions: sessions, currentOverlay: null
+  });
+}
+
+function previousFixtureTradingDate(sessionDate) {
+  let candidate = sessionDate;
+  while (true) {
+    const [year, month, day] = candidate.split('-').map(Number);
+    const previous = new Date(0);
+    previous.setUTCHours(0, 0, 0, 0);
+    previous.setUTCFullYear(year, month - 1, day - 1);
+    candidate = previous.toISOString().slice(0, 10);
+    const weekday = new Date(`${candidate}T00:00:00Z`).getUTCDay();
+    if (weekday !== 0 && weekday !== 6 && candidate !== '2026-09-07') return candidate;
+  }
+}
+
 function snapshotWithoutCompletedSessions(symbol) {
   return createFiveSessionSnapshot({
     market: 'US',
@@ -111,10 +202,14 @@ function snapshotWithoutCompletedSessions(symbol) {
 
 function snapshotWithState(symbol, marketState, {
   sessionDate = '2026-09-08',
-  overlayAsOf = '2026-09-08T11:30:00.000Z'
+  overlayAsOf = '2026-09-08T11:30:00.000Z',
+  hasOverlay = true
 } = {}) {
-  const base = snapshot(symbol);
-  const currentOverlay = ['PRE', 'REGULAR', 'POST'].includes(marketState)
+  const base = ['PRE', 'REGULAR', 'POST'].includes(marketState)
+    ? snapshotForLatestDate(symbol,
+      marketState === 'POST' ? sessionDate : previousFixtureTradingDate(sessionDate), marketState)
+    : snapshot(symbol);
+  const currentOverlay = hasOverlay && ['PRE', 'REGULAR', 'POST'].includes(marketState)
     ? createCurrentSessionOverlay({
         market: 'US', marketState, sessionDate,
         asOf: overlayAsOf, lastPrice: 106,
@@ -449,6 +544,121 @@ function harness(overrides = {}) {
   return {service: createUsAnalysisPackageOrchestrationService(dependencies), calls};
 }
 
+test('derives latest completed dates from the exchange calendar for every US session state', () => {
+  const cases = [
+    ['PRE', '2026-09-23T12:00:00.000Z', '2026-09-22'],
+    ['REGULAR', '2026-09-23T15:00:00.000Z', '2026-09-22'],
+    ['POST', '2026-09-23T21:00:00.000Z', '2026-09-23'],
+    ['CLOSED', '2026-09-24T01:09:00.000Z', '2026-09-23'],
+    ['WEEKEND', '2026-09-27T12:00:00.000Z', '2026-09-25'],
+    ['HOLIDAY', '2026-09-07T16:00:00.000Z', '2026-09-04']
+  ];
+  for (const [state, instant, expected] of cases) {
+    assert.equal(expectedLatestCompletedUsSessionDate(instant), expected, state);
+  }
+});
+
+test('omits a canonical stale CLOSED snapshot when Sep 23 is calendar-expected', async () => {
+  const stale = snapshotForLatestDate('^RUT', '2026-09-22');
+  const diagnostics = [];
+  const instance = harness({
+    now: () => new Date('2026-09-24T01:09:00.000Z'),
+    createTelemetryAcquisition: () => ({async acquireSnapshot() { return stale; }}),
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  await assert.rejects(instance.service.assemble(request()), /No validated US telemetry is available/);
+  assert.deepEqual(diagnostics.find(value => value.failureType === 'COMPLETED_SESSION_DATE_MISMATCH'), {
+    stage: 'analysisMaterialOmission', symbol: '^RUT', source: 'US_COMPLETED_SESSION_FRESHNESS',
+    failureType: 'COMPLETED_SESSION_DATE_MISMATCH', expectedSessionDate: '2026-09-23',
+    acquiredSessionDate: '2026-09-22', selectedSessionDate: '2026-09-22'
+  });
+  assert.deepEqual(instance.calls.yahoo, []);
+});
+
+test('accepts a Sep 23 CLOSED snapshot and PRE/REGULAR prior-session or POST same-day snapshots', async () => {
+  const cases = [
+    ['PRE', '2026-09-23T12:00:00.000Z', '2026-09-22'],
+    ['REGULAR', '2026-09-23T15:00:00.000Z', '2026-09-22'],
+    ['POST', '2026-09-23T21:00:00.000Z', '2026-09-23'],
+    ['CLOSED', '2026-09-24T01:09:00.000Z', '2026-09-23']
+  ];
+  for (const [state, instant, expected] of cases) {
+    const expectedSnapshot = snapshotForLatestDate('^RUT', expected, state);
+    const instance = harness({
+      now: () => new Date(instant),
+      createTelemetryAcquisition: () => ({async acquireSnapshot() { return expectedSnapshot; }})
+    });
+    const output = await instance.service.assemble(request());
+    assert.equal(output.marketPackages[0].marketContext.primaryCompletedSessionDate, expected, state);
+  }
+});
+
+test('rejects stale acquired and persisted snapshots but accepts fresh persisted authority', async () => {
+  const stale = snapshotForLatestDate('^RUT', '2026-09-22');
+  const diagnostics = [];
+  const staleBoth = harness({
+    now: () => new Date('2026-09-24T01:09:00.000Z'),
+    createTelemetryAcquisition: () => ({async acquireSnapshot() { return stale; }}),
+    snapshotPersistence: {async persistSnapshot() { return stale; }},
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  await assert.rejects(staleBoth.service.assemble(request()), /No validated US telemetry is available/);
+  assert.equal(diagnostics.some(value => value.failureType === 'COMPLETED_SESSION_DATE_MISMATCH'
+    && value.expectedSessionDate === '2026-09-23'
+    && value.acquiredSessionDate === '2026-09-22'
+    && value.selectedSessionDate === '2026-09-22'), true);
+
+  const fresh = snapshotForLatestDate('^RUT', '2026-09-23');
+  const mismatch = Object.assign(new Error('stale acquisition, fresh stored history'), {
+    code: 'SNAPSHOT_READ_MISMATCH',
+    diagnosticDetails: {
+      mismatchReason: 'NEWEST_SESSION_DATE',
+      acquiredNewestSessionDate: '2026-09-22',
+      persistedNewestSessionDate: '2026-09-23'
+    },
+    persistedSnapshot: fresh
+  });
+  const freshPersisted = harness({
+    now: () => new Date('2026-09-24T01:09:00.000Z'),
+    createTelemetryAcquisition: () => ({async acquireSnapshot() { return stale; }}),
+    snapshotPersistence: {async persistSnapshot() { throw mismatch; }}
+  });
+  const output = await freshPersisted.service.assemble(request());
+  assert.equal(output.marketPackages[0].marketContext.primaryCompletedSessionDate, '2026-09-23');
+  assert.equal(output.marketPackages[0].telemetry.benchmarkSnapshots[0].snapshot.primaryCompletedSessionDate,
+    '2026-09-23');
+});
+
+test('a stale portfolio symbol is omitted while fresh benchmarks define the completed date', async () => {
+  const snapshots = {
+    '^RUT': snapshotForLatestDate('^RUT', '2026-09-23'),
+    '^DJI': snapshotForLatestDate('^DJI', '2026-09-23'),
+    VEEV: snapshotForLatestDate('VEEV', '2026-09-21')
+  };
+  const diagnostics = [];
+  const instance = harness({
+    now: () => new Date('2026-09-24T01:09:00.000Z'),
+    createTelemetryAcquisition: () => ({async acquireSnapshot({symbol}) { return snapshots[symbol]; }}),
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  const output = await instance.service.assemble(request('US', {
+    benchmarkAnchors: [{market: 'US', symbol: '^RUT'}, {market: 'US', symbol: '^DJI'}],
+    myStocks: [{market: 'US', symbol: 'VEEV'}]
+  }));
+  const marketPackage = output.marketPackages[0];
+  assert.equal(marketPackage.marketContext.primaryCompletedSessionDate, '2026-09-23');
+  assert.deepEqual(marketPackage.telemetry.benchmarkSnapshots.map(entry =>
+    entry.snapshot.primaryCompletedSessionDate), ['2026-09-23', '2026-09-23']);
+  assert.deepEqual(marketPackage.telemetry.stockSnapshots, []);
+  assert.equal(marketPackage.evidenceContext.unresolvedGaps.includes(
+    STALE_COMPLETED_SESSION_TELEMETRY_GAP), true);
+  assert.equal(diagnostics.some(value => value.symbol === 'VEEV'
+    && value.failureType === 'COMPLETED_SESSION_DATE_MISMATCH'
+    && value.expectedSessionDate === '2026-09-23'
+    && value.selectedSessionDate === '2026-09-21'), true);
+  assert.equal(instance.calls.yahoo.includes('VEEV'), false);
+});
+
 function roleClassificationSuccess(
   input,
   rolesByReference = {},
@@ -493,11 +703,11 @@ test('maps supported US market states to explicit package-owned analysis modes',
   );
 });
 
-test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip completed-session research', async () => {
-  for (const [marketState, generatedAt, overlayAsOf] of [
-    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z'],
-    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z'],
-    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z']
+slotsOffTest('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip completed-session research', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, articlePublishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z', '2026-09-08T11:00:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T11:00:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
   ]) {
     const diagnostics = [];
     const candidates = Array.from({length: 8}, (_, index) => ({
@@ -533,7 +743,7 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
             ok: true, type: 'SUCCESS', articleContent: {
               sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
               headline: candidate.headline, publisher: 'Yahoo Finance',
-              publishedAt: '2026-09-08T11:00:00.000Z', updatedAt: null,
+              publishedAt: articlePublishedAt, updatedAt: null,
               articleText: `Bounded current article for ${candidate.headline}.`
             }
           };
@@ -551,26 +761,858 @@ test('PRE, REGULAR and POST use bounded active Yahoo acquisition and skip comple
       .snapshot.currentOverlay.marketState, marketState);
     assert.equal(calls.yahooMostActive, 1);
     assert.equal(calls.yahooLatestNews, 1);
-    assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
     assert.equal(calls.yahooCurrentNewsArticle[0].headline, 'NVDA leads active stocks');
     assert.equal(calls.yahooRecapResearch.length, 0);
     assert.equal(calls.cnbcRecapResearch.length, 0);
     assert.equal(calls.cnbc.length, 0);
     const currentEntries = calls.evidenceRoleClassification[0].evidence.filter(entry =>
       entry.item.evidenceCategory === 'news');
-    assert.equal(currentEntries.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    assert.equal(currentEntries.length, ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
     assert.equal(currentEntries.every(entry => entry.horizon === 'CURRENT_SESSION'), true);
     assert.deepEqual(output.marketPackages[0].evidenceContext.subsequentDevelopments, []);
-    assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
+    assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, [
+      {evidenceRef: 'e4', sessionDate: marketState === 'POST' ? '2026-09-08' : '2026-09-04', kind: 'READ'}
+    ]);
     assert.ok(diagnostics.some(item => item.stage === 'analysisModeSelection'
       && item.analysisMode === 'ACTIVE_SESSION' && item.marketState === marketState));
     assert.ok(diagnostics.some(item => item.stage === 'activeYahooAcquisition'
       && item.mostActiveCount === 1 && item.latestNewsCandidateCount === 8
-      && item.articleFetchAttemptCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS
-      && item.articleFetchSuccessCount === ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS));
+      && item.selectedCandidateCount === 8
+      && item.candidateConsideredCount === ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES
+      && item.articleFetchAttemptCount === ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES
+      && item.articleFetchSuccessCount === ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES
+      && item.articleFetchRequestFailureCount === 0
+      && item.articleExtractionFailureCount === 0
+      && item.articleMetadataFailureCount === 0
+      && item.articleIdentityHeadlineMismatchCount === 0
+      && item.articleBodyUnavailableCount === 0
+      && item.articleCanonicalRedirectMismatchCount === 0
+      && item.otherArticleExtractionRejectionCount === 0
+      && item.backfillUsed === true
+      && item.missingOrMalformedPublicationTimeCount === 0
+      && item.beforeSessionWindowCount === 0
+      && item.afterSessionWindowCount === 0
+      && item.acquiredCurrentSessionCount === ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES));
+    assert.ok(diagnostics.some(item => item.stage === 'activeYahooEvidenceHandoff'
+      && item.admittedCurrentSessionCount === ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES
+      && item.classifierAdmissionRejectedCount === 0));
     assert.ok(diagnostics.some(item => item.stage === 'completedSessionResearch'
       && item.outcome === 'SKIPPED_ACTIVE_SESSION'));
   }
+});
+
+slotsOffTest('active Yahoo retains a narrow first article and later broad-market articles for classification', async () => {
+  const candidates = [
+    'Local retailer updates one store',
+    'Chipmaker orders lift semiconductor shares',
+    'Banks gain as lending outlook improves',
+    'Fourth current-session story for classification',
+    'Fifth current-session story for classification',
+    'Sixth current-session story for classification',
+    'Seventh current article is beyond the six-article stop'
+  ].map((headline, index) => ({
+    headline,
+    url: `https://finance.yahoo.com/news/current-breadth-${index + 1}.html`,
+    uuid: null,
+    publisher: 'Yahoo Finance'
+  }));
+  const diagnostics = [];
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({async acquireSnapshot({symbol}) {
+      return snapshotWithState(symbol, 'REGULAR', {overlayAsOf: '2026-09-08T14:55:00.000Z'});
+    }}),
+    yahooLatestNewsDiscovery: {async discoverLatestNews() {
+      return {ok: true, type: 'SUCCESS', candidates};
+    }},
+    yahooCurrentNewsArticleContentAcquisition: {async acquireArticleContent(candidate) {
+      calls.yahooCurrentNewsArticle.push(candidate);
+      return {ok: true, type: 'SUCCESS', articleContent: {
+        sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+        headline: candidate.headline, publisher: 'Yahoo Finance',
+        publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+        articleText: `Validated current-session context for ${candidate.headline}.`
+      }};
+    }},
+    evidenceRoleClassification: {async classifyEvidenceRoles(input) {
+      calls.evidenceRoleClassification.push(input);
+      return {ok: true, type: 'SUCCESS', output: {classifications: input.evidence.map(entry => {
+        const chipmaker = entry.item.title === candidates[1].headline;
+        const banks = entry.item.title === candidates[2].headline;
+        return {
+          reference: entry.reference,
+          materiality: chipmaker || banks ? 'HIGH' : 'LOW',
+          roles: chipmaker || banks ? ['MATERIAL_EVENT'] : [],
+          subjects: chipmaker ? [{kind: 'COMPANY', name: 'Chipmaker'}]
+            : banks ? [{kind: 'SECTOR', name: 'Banks'}] : []
+        };
+      })}};
+    }, async repairEvidenceSubjects() { throw new Error('not expected'); }},
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const output = await service.assemble(request());
+  const classifiedCurrent = calls.evidenceRoleClassification[0].evidence.filter(entry =>
+    entry.horizon === 'CURRENT_SESSION');
+  assert.equal(ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES, 6);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(entry => entry.headline),
+    candidates.slice(0, 6).map(entry => entry.headline));
+  assert.deepEqual(classifiedCurrent.map(entry => entry.item.title),
+    candidates.slice(0, 6).map(entry => entry.headline));
+  const currentRefs = classifiedCurrent.map(entry => entry.reference);
+  const materialRefs = [currentRefs[1], currentRefs[2]];
+  assert.deepEqual(output.marketPackages[0].evidenceContext.materialEvents, materialRefs);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.broadMarketFocus.map(entry =>
+    entry.evidenceRef), materialRefs);
+  assert.deepEqual(JSON.parse(buildClaudeAnalysisRequest(output).messages[0].content)
+    .currentSessionContext[0].evidenceRefs, currentRefs);
+  assert.equal(output.marketPackages[0].evidenceContext.furtherReadings.length, 0);
+  assert.ok(diagnostics.some(entry => entry.stage === 'activeYahooEvidenceHandoff'
+    && entry.acquiredCurrentSessionCount === 6
+    && entry.admittedCurrentSessionCount === 6));
+});
+
+slotsOffTest('duplicate and rejected active Yahoo articles do not count toward the six-article stop', async () => {
+  const candidates = Array.from({length: 9}, (_, index) => ({
+    headline: `Current Yahoo article ${index + 1}`,
+    url: `https://finance.yahoo.com/news/current-bounded-${index + 1}.html`,
+    uuid: null, publisher: 'Yahoo Finance'
+  }));
+  const diagnostics = [];
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({async acquireSnapshot({symbol}) {
+      return snapshotWithState(symbol, 'REGULAR', {overlayAsOf: '2026-09-08T14:55:00.000Z'});
+    }}),
+    yahooLatestNewsDiscovery: {async discoverLatestNews() {
+      return {ok: true, type: 'SUCCESS', candidates};
+    }},
+    yahooCurrentNewsArticleContentAcquisition: {async acquireArticleContent(candidate) {
+      calls.yahooCurrentNewsArticle.push(candidate);
+      if (candidate.url === candidates[2].url) {
+        return {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
+      }
+      return {ok: true, type: 'SUCCESS', articleContent: {
+        sourceId: 'us.yahoo-finance',
+        canonicalUrl: candidate.url === candidates[1].url ? candidates[0].url : candidate.url,
+        headline: candidate.headline, publisher: 'Yahoo Finance',
+        publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+        articleText: 'Validated current-session Yahoo article.'
+      }};
+    }},
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const output = await service.assemble(request());
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(entry => entry.url),
+    candidates.slice(0, 8).map(entry => entry.url));
+  const acquisition = diagnostics.find(entry => entry.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.articleFetchAttemptCount, 8);
+  assert.equal(acquisition.duplicateEvidenceCount, 1);
+  assert.equal(acquisition.articleExtractionFailureCount, 1);
+  assert.equal(acquisition.acquiredCurrentSessionCount, 6);
+  assert.equal(calls.evidenceRoleClassification[0].evidence.filter(entry =>
+    entry.horizon === 'CURRENT_SESSION').length, 6);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.canonicalUrl === candidates[8].url), false);
+});
+
+test('one matching benchmark overlay admits current Yahoo evidence in PRE, REGULAR and POST', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, publishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z', '2026-09-08T11:45:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
+  ]) {
+    const diagnostics = [];
+    const candidates = ['one', 'two'].map(slug => ({
+      headline: `Current ${slug} story`,
+      url: `https://finance.yahoo.com/news/current-${slug}.html`,
+      uuid: null,
+      publisher: 'Yahoo Finance'
+    }));
+    const {service, calls} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, marketState, {
+            overlayAsOf,
+            hasOverlay: symbol === '^RUT'
+          });
+        }
+      }),
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) {
+          return {ok: true, type: 'SUCCESS', articleContent: {
+            sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+            headline: candidate.headline, publisher: 'Yahoo Finance',
+            publishedAt, updatedAt: null,
+            articleText: `Usable current-session content for ${candidate.headline}.`
+          }};
+        }
+      },
+      now: () => new Date(generatedAt),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const output = await service.assemble(request('US', {
+      benchmarkAnchors: [{market: 'US', symbol: '^RUT'}, {market: 'US', symbol: '^DJI'}]
+    }));
+    const current = calls.evidenceRoleClassification[0].evidence.filter(entry =>
+      entry.horizon === 'CURRENT_SESSION');
+    assert.equal(current.length, 2);
+    const providerInput = JSON.parse(buildClaudeAnalysisRequest(output).messages[0].content);
+    assert.equal(providerInput.currentSessionContext[0].evidenceRefs.length, 2);
+    const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+    assert.equal(acquisition.activeWindowUnavailableCount, 0);
+    assert.equal(acquisition.benchmarkOverlayInvalidCount, 0);
+    assert.equal(acquisition.acquiredCurrentSessionCount, 2);
+  }
+});
+
+test('PRE, REGULAR and POST admit one current article with zero benchmark overlays', async () => {
+  for (const [marketState, generatedAt, publishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:45:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:30:00.000Z']
+  ]) {
+    const {service, calls} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, marketState, {hasOverlay: false});
+        }
+      }),
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates: [{
+          headline: 'Current Yahoo market development',
+          url: 'https://finance.yahoo.com/news/current-yahoo-market-development.html',
+          uuid: null, publisher: 'Yahoo Finance'
+        }]}; }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) { return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance', publishedAt,
+          updatedAt: null, articleText: 'Usable current-session Yahoo evidence.'
+        }}; }
+      },
+      now: () => new Date(generatedAt)
+    });
+    const output = await service.assemble(request());
+    assert.equal(output.marketPackages[0].marketContext.includesCurrentOverlay, false);
+    assert.equal(calls.evidenceRoleClassification.length, 1);
+    assert.equal(calls.evidenceRoleClassification[0].evidence.some(entry =>
+      entry.horizon === 'CURRENT_SESSION'), true);
+  }
+});
+
+test('active package anchor survives PRE to REGULAR, REGULAR to POST, and POST to CLOSED transitions', async () => {
+  for (const [marketState, acquisitionStartedAt, finalGeneratedAt, publishedAt] of [
+    ['PRE', '2026-09-08T12:59:59.000Z', '2026-09-08T13:31:00.000Z', '2026-09-08T12:30:00.000Z'],
+    ['REGULAR', '2026-09-08T19:59:59.000Z', '2026-09-08T20:01:00.000Z', '2026-09-08T19:30:00.000Z'],
+    ['POST', '2026-09-08T23:59:59.000Z', '2026-09-09T00:01:00.000Z', '2026-09-08T23:30:00.000Z']
+  ]) {
+    const clock = [acquisitionStartedAt, finalGeneratedAt];
+    const {service} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, marketState, {hasOverlay: false});
+        }
+      }),
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates: [{
+          headline: 'Current Yahoo market development',
+          url: 'https://finance.yahoo.com/news/current-yahoo-market-development.html',
+          uuid: null, publisher: 'Yahoo Finance'
+        }]}; }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) { return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance', publishedAt,
+          updatedAt: null, articleText: 'Current evidence remains anchored to acquisition start.'
+        }}; }
+      },
+      now: () => new Date(clock.shift())
+    });
+    const output = await service.assemble(request());
+    const marketPackage = output.marketPackages[0];
+    const anchor = parseUsActiveSessionAnchor(marketPackage.marketContext.calendarContext);
+    assert.equal(output.analysisRequest.generatedAt, finalGeneratedAt);
+    assert.equal(marketPackage.marketContext.marketState, marketState);
+    assert.equal(anchor.marketState, marketState);
+    assert.equal(anchor.endsAtInclusive, acquisitionStartedAt);
+    assert.equal(marketPackage.evidenceContext.evidence.some(entry =>
+      entry.item.evidenceCategory === 'news'), true);
+    const providerInput = JSON.parse(buildClaudeAnalysisRequest(output).messages[0].content);
+    assert.equal(providerInput.currentSessionContext[0].evidenceRefs.length, 1);
+  }
+});
+
+test('PRE, REGULAR and POST continue after a sixth valid article until the attempt ceiling', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, publishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z', '2026-09-08T11:45:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
+  ]) {
+    const diagnostics = [];
+    const candidates = Array.from({length: ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS}, (_, index) => ({
+      headline: `Current Yahoo story ${index + 1}`,
+      url: `https://finance.yahoo.com/news/current-yahoo-story-${index + 1}.html`,
+      uuid: null,
+      publisher: 'Yahoo Finance'
+    }));
+    const {service, calls} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, marketState, {overlayAsOf});
+        }
+      }),
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) {
+          calls.yahooCurrentNewsArticle.push(candidate);
+          if (!candidate.url.endsWith('-6.html')) {
+            return {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
+          }
+          return {ok: true, type: 'SUCCESS', articleContent: {
+            sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+            headline: candidate.headline, publisher: 'Yahoo Finance',
+            publishedAt, updatedAt: null,
+            articleText: 'Usable current-session Yahoo article after bounded backfill.'
+          }};
+        }
+      },
+      now: () => new Date(generatedAt),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    await service.assemble(request());
+    const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+    assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    assert.equal(acquisition.selectedCandidateCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    assert.equal(acquisition.candidateConsideredCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    assert.equal(acquisition.articleFetchAttemptCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+    assert.equal(acquisition.articleFetchSuccessCount, 1);
+    assert.equal(acquisition.articleExtractionFailureCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS - 1);
+    assert.equal(acquisition.acquiredCurrentSessionCount, 1);
+    assert.equal(acquisition.backfillUsed, true);
+  }
+});
+
+test('classifier-preflight rejection continues to the next package-admissible active candidate', async () => {
+  const activeBenchmark = snapshotWithState('^RUT', 'REGULAR', {hasOverlay: false});
+  const yahooItem = yahooEvidence('^RUT').items[0];
+  const smallCandidate = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Small current Yahoo article', summary: 'Small admissible summary.',
+    canonicalUrl: 'https://finance.yahoo.com/news/small-current-yahoo-article.html',
+    publishedAt: '2026-09-08T14:30:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
+  const largeCandidate = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Large current Yahoo article', summary: 'y'.repeat(8192),
+    canonicalUrl: 'https://finance.yahoo.com/news/large-current-yahoo-article.html',
+    publishedAt: '2026-09-08T14:29:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
+  function activeClassifierBytes(federalItems, candidate) {
+    const items = [yahooItem, ...federalItems, candidate];
+    const collection = createEvidenceCollection({market: 'US', items});
+    return Buffer.byteLength(JSON.stringify(buildClaudeEvidenceRoleClassificationRequest({
+      marketContext: {
+        market: 'US', exchangeTimezone: 'America/New_York', marketState: 'REGULAR',
+        primaryCompletedSessionDate: '2026-09-04'
+      },
+      benchmarkTelemetry: [{reference: 't1', snapshot: activeBenchmark}],
+      evidence: collection.items.map((item, index) => ({
+        reference: `e${index + 1}`,
+        horizon: index === collection.items.length - 1 ? 'CURRENT_SESSION' : 'COMPLETED_SESSION',
+        requiresBroadMarketSubjects: index === collection.items.length - 1,
+        item
+      }))
+    })), 'utf8');
+  }
+  // Step 9F.2b: the classifier limit is now 300 KB, so 20 filler items (the old
+  // 64 KB boundary's count) can no longer reach it even at the fixed 8 KB
+  // per-article classifier cut (20 * 8 KB = 160 KB). 45 items keeps the search
+  // boundary comfortably under that cut (45 * 8 KB = 360 KB > 300 KB), so the
+  // search still finds its boundary before truncation flattens the curve.
+  let low = 0;
+  let high = 8192;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const federalItems = manyFedEvidence(45, middle).items;
+    if (activeClassifierBytes(federalItems, smallCandidate)
+        <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) low = middle;
+    else high = middle - 1;
+  }
+  const federalCollection = manyFedEvidence(45, low);
+  assert.ok(activeClassifierBytes(federalCollection.items, smallCandidate)
+    <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  assert.ok(activeClassifierBytes(federalCollection.items, largeCandidate)
+    > CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+
+  const diagnostics = [];
+  const candidates = [{
+    headline: largeCandidate.title, url: largeCandidate.canonicalUrl,
+    uuid: null, publisher: 'Yahoo Finance'
+  }, {
+    headline: smallCandidate.title, url: smallCandidate.canonicalUrl,
+    uuid: null, publisher: 'Yahoo Finance'
+  }];
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {hasOverlay: false});
+      }
+    }),
+    federalReserveEvidenceAcquisition: {
+      async acquireEvidence() { return federalCollection; }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        calls.yahooCurrentNewsArticle.push(candidate);
+        const large = candidate.url === largeCandidate.canonicalUrl;
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: large ? largeCandidate.publishedAt : smallCandidate.publishedAt,
+          updatedAt: null, articleText: large ? 'y'.repeat(8192) : 'Small admissible summary.'
+        }};
+      }
+    },
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const output = await service.assemble(request());
+  const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+  assert.equal(calls.yahooCurrentNewsArticle.length, 2);
+  assert.equal(acquisition.classifierPreflightRejectedCount, 1);
+  assert.equal(acquisition.acquiredCurrentSessionCount, 1);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.title === smallCandidate.title), true);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.title === largeCandidate.title), false);
+});
+
+test('active Yahoo classifier preflight counts previously admitted current articles cumulatively', async () => {
+  const benchmark = snapshotWithState('^RUT', 'REGULAR', {hasOverlay: false});
+  const first = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'First current Yahoo article', summary: 'a'.repeat(4096),
+    canonicalUrl: 'https://finance.yahoo.com/news/first-current-yahoo-article.html',
+    publishedAt: '2026-09-08T14:30:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
+  const second = createEvidenceItem({
+    sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+    title: 'Second current Yahoo article', summary: 'b'.repeat(4096),
+    canonicalUrl: 'https://finance.yahoo.com/news/second-current-yahoo-article.html',
+    publishedAt: '2026-09-08T14:31:00.000Z', symbols: [], publisher: 'Yahoo Finance'
+  });
+  function requestBytes(federalSummaryBytes, currentItems) {
+    // Step 9F.2b: 45 federal filler items (see the sibling preflight test above
+    // for why 20 can no longer reach the new 300 KB classifier limit).
+    const base = [yahooEvidence('^RUT').items[0],
+      ...manyFedEvidence(45, federalSummaryBytes).items];
+    const items = base.concat(currentItems);
+    const collection = createEvidenceCollection({market: 'US', items});
+    return Buffer.byteLength(JSON.stringify(buildClaudeEvidenceRoleClassificationRequest({
+      marketContext: {
+        market: 'US', exchangeTimezone: 'America/New_York', marketState: 'REGULAR',
+        primaryCompletedSessionDate: '2026-09-04'
+      },
+      benchmarkTelemetry: [{reference: 't1', snapshot: benchmark}],
+      evidence: collection.items.map((item, index) => ({
+        reference: `e${index + 1}`,
+        horizon: index >= base.length ? 'CURRENT_SESSION' : 'COMPLETED_SESSION',
+        requiresBroadMarketSubjects: index >= base.length,
+        item
+      }))
+    })), 'utf8');
+  }
+  let low = 0;
+  let high = 8192;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (requestBytes(middle, [first])
+        <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) low = middle;
+    else high = middle - 1;
+  }
+  assert.ok(requestBytes(low, [first])
+    <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  assert.ok(requestBytes(low, [second])
+    <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  assert.ok(requestBytes(low, [first, second])
+    > CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  const diagnostics = [];
+  const candidates = [first, second].map(item => ({
+    headline: item.title, url: item.canonicalUrl, uuid: null, publisher: 'Yahoo Finance'
+  }));
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({async acquireSnapshot() { return benchmark; }}),
+    federalReserveEvidenceAcquisition: {async acquireEvidence() {
+      return manyFedEvidence(45, low);
+    }},
+    yahooLatestNewsDiscovery: {async discoverLatestNews() {
+      return {ok: true, type: 'SUCCESS', candidates};
+    }},
+    yahooCurrentNewsArticleContentAcquisition: {async acquireArticleContent(candidate) {
+      calls.yahooCurrentNewsArticle.push(candidate);
+      const item = candidate.url === first.canonicalUrl ? first : second;
+      return {ok: true, type: 'SUCCESS', articleContent: {
+        sourceId: 'us.yahoo-finance', canonicalUrl: item.canonicalUrl,
+        headline: item.title, publisher: 'Yahoo Finance',
+        publishedAt: item.publishedAt, updatedAt: null, articleText: item.summary
+      }};
+    }},
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const output = await service.assemble(request());
+  assert.equal(calls.yahooCurrentNewsArticle.length, 2);
+  assert.equal(calls.evidenceRoleClassification[0].evidence.filter(entry =>
+    entry.horizon === 'CURRENT_SESSION').length, 1);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.title === second.title), false);
+  const acquisition = diagnostics.find(entry => entry.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.classifierPreflightRejectedCount, 1);
+  assert.equal(acquisition.acquiredCurrentSessionCount, 1);
+});
+
+// Step 9F.1f: six 16 KB articles. The classifier reads only the first 8 KB of each,
+// so all six fit its 64 KB request; the package keeps the full 16 KB for the writer.
+function step9F1fArticles(count = 6) {
+  return Array.from({length: count}, (_, index) => {
+    const lead = `Story ${index + 1}: stocks moved as investors weighed rates. `;
+    let text = lead;
+    while (Buffer.byteLength(text, 'utf8') < 16 * 1024) text += `More detail ${index + 1}. `;
+    return {
+      title: `Sixteen kilobyte Yahoo story ${index + 1}`,
+      canonicalUrl: `https://finance.yahoo.com/news/sixteen-kilobyte-yahoo-story-${index + 1}.html`,
+      publishedAt: `2026-09-08T14:${String(10 + index).padStart(2, '0')}:00.000Z`,
+      summary: text.slice(0, 16 * 1024).trim()
+    };
+  });
+}
+
+function step9F1fHarness(articles, federalCollection = null) {
+  const diagnostics = [];
+  const harnessed = harness({
+    createTelemetryAcquisition: () => ({async acquireSnapshot({symbol}) {
+      return snapshotWithState(symbol, 'REGULAR', {hasOverlay: false});
+    }}),
+    ...(federalCollection ? {federalReserveEvidenceAcquisition: {
+      async acquireEvidence() { return federalCollection; }
+    }} : {}),
+    yahooLatestNewsDiscovery: {async discoverLatestNews() {
+      return {ok: true, type: 'SUCCESS', candidates: articles.map(article => ({
+        headline: article.title, url: article.canonicalUrl, uuid: null, publisher: 'Yahoo Finance'
+      }))};
+    }},
+    yahooCurrentNewsArticleContentAcquisition: {async acquireArticleContent(candidate) {
+      const article = articles.find(entry => entry.canonicalUrl === candidate.url);
+      return {ok: true, type: 'SUCCESS', articleContent: {
+        sourceId: 'us.yahoo-finance', canonicalUrl: article.canonicalUrl,
+        headline: article.title, publisher: 'Yahoo Finance',
+        publishedAt: article.publishedAt, updatedAt: null, articleText: article.summary
+      }};
+    }},
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  return {...harnessed, diagnostics};
+}
+
+test('Step 9F.1f: six 16 KB articles all reach the classifier, which reads only the first 8 KB of each', async () => {
+  const articles = step9F1fArticles();
+  const {service, calls, diagnostics} = step9F1fHarness(articles);
+  const output = await service.assemble(request());
+  const acquisition = diagnostics.find(entry => entry.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.acquiredCurrentSessionCount, 6);
+  assert.equal(acquisition.classifierPreflightRejectedCount, 0);
+  const handoff = diagnostics.find(entry => entry.stage === 'activeYahooEvidenceHandoff');
+  assert.equal(handoff.admittedCurrentSessionCount, 6);
+  const classifierInput = calls.evidenceRoleClassification[0];
+  const current = classifierInput.evidence.filter(entry => entry.horizon === 'CURRENT_SESSION');
+  assert.equal(current.length, 6);
+  // Step 9F.2b: six full 16 KB texts (96 KB) now fit comfortably under the new
+  // 300 KB limit on their own; the fixed 8 KB classifier cut (Step 9F.1f,
+  // unchanged by this step) still applies regardless, as the assertions below confirm.
+  const request8 = buildClaudeEvidenceRoleClassificationRequest(classifierInput);
+  assert.ok(Buffer.byteLength(JSON.stringify(request8), 'utf8')
+    <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  const sent = JSON.parse(request8.messages[0].content).evidence
+    .filter(entry => entry.horizon === 'CURRENT_SESSION');
+  sent.forEach((entry, index) => {
+    const full = articles[index].summary;
+    assert.equal(Buffer.byteLength(entry.item.summary, 'utf8') <= 8 * 1024, true);
+    assert.equal(full.startsWith(entry.item.summary), true);
+    assert.ok(Buffer.byteLength(entry.item.summary, 'utf8') > 8 * 1024 - 32);
+  });
+  // The package (what the writer reads) keeps every full 16 KB text.
+  for (const article of articles) {
+    const entry = output.marketPackages[0].evidenceContext.evidence
+      .find(item => item.item.canonicalUrl === article.canonicalUrl);
+    assert.equal(entry.item.summary, article.summary);
+  }
+});
+
+test('Step 9F.1f: an article that would push the classifier over its cap is flagged, not silently dropped', async () => {
+  const articles = step9F1fArticles();
+  const benchmark = snapshotWithState('^RUT', 'REGULAR', {hasOverlay: false});
+  function classifierBytes(federalSummaryBytes, count) {
+    // Step 9F.2b: 40 federal filler items (see the preflight tests above for why
+    // 20 can no longer reach the new 300 KB classifier limit) -- kept low enough
+    // that 40 federal + 1 Yahoo completed + up to 6 current items stays within
+    // the 50-item classifier cap.
+    const base = [yahooEvidence('^RUT').items[0], ...manyFedEvidence(40, federalSummaryBytes).items];
+    const current = articles.slice(0, count).map(article => createEvidenceItem({
+      sourceId: 'us.yahoo-finance', market: 'US', evidenceCategory: 'news',
+      title: article.title, summary: article.summary, canonicalUrl: article.canonicalUrl,
+      publishedAt: article.publishedAt, symbols: [], publisher: 'Yahoo Finance'
+    }));
+    const items = base.concat(current);
+    const collection = createEvidenceCollection({market: 'US', items});
+    return Buffer.byteLength(JSON.stringify(buildClaudeEvidenceRoleClassificationRequest({
+      marketContext: {
+        market: 'US', exchangeTimezone: 'America/New_York', marketState: 'REGULAR',
+        primaryCompletedSessionDate: '2026-09-04'
+      },
+      benchmarkTelemetry: [{reference: 't1', snapshot: benchmark}],
+      evidence: collection.items.map((item, index) => ({
+        reference: `e${index + 1}`,
+        horizon: index >= base.length ? 'CURRENT_SESSION' : 'COMPLETED_SESSION',
+        requiresBroadMarketSubjects: index >= base.length,
+        item
+      }))
+    })), 'utf8');
+  }
+  let low = 0;
+  let high = 8192;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (classifierBytes(middle, 5) <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) low = middle;
+    else high = middle - 1;
+  }
+  assert.ok(classifierBytes(low, 6) > CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES);
+  const {service, diagnostics} = step9F1fHarness(articles, manyFedEvidence(40, low));
+  await service.assemble(request());
+  const acquisition = diagnostics.find(entry => entry.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.acquiredCurrentSessionCount, 5);
+  assert.equal(acquisition.classifierPreflightRejectedCount, 1);
+  const audit = diagnostics.filter(entry => entry.stage === 'activeYahooCandidateAudit')
+    .flatMap(entry => entry.candidates);
+  assert.deepEqual(audit.map(entry => entry.decision),
+    ['ADMITTED', 'ADMITTED', 'ADMITTED', 'ADMITTED', 'ADMITTED', 'REJECTED_CLASSIFIER_PREFLIGHT']);
+});
+
+slotsOffTest('active Yahoo stops at the twelve-attempt ceiling even when the next candidate would be usable', async () => {
+  const diagnostics = [];
+  const candidates = Array.from({length: ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS + 2}, (_, index) => ({
+    headline: `Unusable Yahoo story ${index + 1}`,
+    url: `https://finance.yahoo.com/news/unusable-yahoo-story-${index + 1}.html`,
+    uuid: null,
+    publisher: 'Yahoo Finance'
+  }));
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {overlayAsOf: '2026-09-08T14:55:00.000Z'});
+      }
+    }),
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        calls.yahooCurrentNewsArticle.push(candidate);
+        if (candidate.url.endsWith(`-${ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS + 1}.html`)) return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+          articleText: 'This valid thirteenth article must remain outside the fixed attempt ceiling.'
+        }};
+        return {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
+      }
+    },
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const output = await service.assemble(request());
+  const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+  assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(acquisition.candidateConsideredCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(acquisition.articleFetchAttemptCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(acquisition.articleFetchSuccessCount, 0);
+  assert.equal(acquisition.articleExtractionFailureCount, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(acquisition.otherArticleExtractionRejectionCount,
+    ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(acquisition.acquiredCurrentSessionCount, 0);
+  assert.equal(acquisition.backfillUsed, true);
+  assert.equal(calls.evidenceRoleClassification.length, 0);
+  assert.ok(diagnostics.some(item => item.stage === 'evidenceRoleClassification'
+    && item.outcome === 'SKIPPED_ZERO_CURRENT_SESSION_EVIDENCE'));
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.evidenceCategory === 'news'), false);
+  assert.ok(output.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('Not enough current Yahoo Finance news to say what is moving the market today.')));
+});
+
+test('ambiguous common-word tickers do not reorder unrelated Yahoo headlines', async () => {
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {hasOverlay: false});
+      }
+    }),
+    yahooMostActiveAcquisition: {
+      async acquireMostActive() { return {ok: true, type: 'SUCCESS', candidates: [{
+        symbol: 'A', shortName: 'Agilent Technologies', longName: 'Agilent Technologies, Inc.'
+      }]}; }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates: [{
+        headline: 'A broad rally lifts global markets',
+        url: 'https://finance.yahoo.com/news/a-broad-rally.html', uuid: null, publisher: 'Yahoo Finance'
+      }, {
+        headline: 'Agilent Technologies raises its outlook',
+        url: 'https://finance.yahoo.com/news/agilent-raises-outlook.html', uuid: null,
+        publisher: 'Yahoo Finance'
+      }]}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        calls.yahooCurrentNewsArticle.push(candidate);
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+          articleText: 'Usable current-session Yahoo evidence.'
+        }};
+      }
+    },
+    now: () => new Date('2026-09-08T15:00:00.000Z')
+  });
+  await service.assemble(request());
+  assert.equal(calls.yahooCurrentNewsArticle.length, 2);
+  assert.equal(calls.yahooCurrentNewsArticle[0].headline,
+    'Agilent Technologies raises its outlook');
+});
+
+test('active Yahoo diagnostics distinguish retrieval and extraction failures before a usable article', async () => {
+  const diagnostics = [];
+  const candidates = ['one', 'two', 'three'].map(slug => ({
+    headline: `Current ${slug} story`,
+    url: `https://finance.yahoo.com/news/current-${slug}.html`,
+    uuid: null,
+    publisher: 'Yahoo Finance'
+  }));
+  const {service} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {overlayAsOf: '2026-09-08T14:55:00.000Z'});
+      }
+    }),
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        if (candidate.url.endsWith('/current-one.html')) {
+          return {ok: false, type: 'HTTP_FAILURE', articleContent: null};
+        }
+        if (candidate.url.endsWith('/current-two.html')) {
+          return {
+            ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null,
+            extractionFailureType: 'NO_ARTICLE_BODY_CONTAINER_OR_TEXT'
+          };
+        }
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance',
+          canonicalUrl: 'https://finance.yahoo.com/news/one-current-article.html',
+          headline: candidate.headline,
+          publisher: 'Yahoo Finance',
+          publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+          articleText: 'Usable current-session article content.'
+        }};
+      }
+    },
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  await service.assemble(request());
+  const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.candidateConsideredCount, 3);
+  assert.equal(acquisition.articleFetchAttemptCount, 3);
+  assert.equal(acquisition.articleFetchSuccessCount, 1);
+  assert.equal(acquisition.articleFetchRequestFailureCount, 1);
+  assert.equal(acquisition.articleExtractionFailureCount, 1);
+  assert.equal(acquisition.articleBodyUnavailableCount, 1);
+  assert.equal(acquisition.articleMetadataFailureCount, 0);
+  assert.equal(acquisition.articleIdentityHeadlineMismatchCount, 0);
+  assert.equal(acquisition.articleCanonicalRedirectMismatchCount, 0);
+  assert.equal(acquisition.otherArticleExtractionRejectionCount, 0);
+  assert.equal(acquisition.acquiredCurrentSessionCount, 1);
+  assert.equal(acquisition.backfillUsed, false);
+  assert.equal(acquisition.duplicateEvidenceCount, 0);
+  assert.equal(acquisition.activeWindowUnavailableCount, 0);
+  assert.equal(acquisition.benchmarkOverlayInvalidCount, 0);
+  assert.equal(acquisition.otherEvidenceConstructionRejectedCount, 0);
+});
+
+test('active Yahoo diagnostics classify each sanitized extraction rejection before a usable article', async () => {
+  const diagnostics = [];
+  const subtypes = [
+    'NO_COMPATIBLE_ARTICLE_METADATA',
+    'ARTICLE_IDENTITY_OR_HEADLINE_MISMATCH',
+    'NO_ARTICLE_BODY_CONTAINER_OR_TEXT',
+    'CANONICAL_OR_REDIRECT_MISMATCH',
+    'OTHER_EXTRACTION_REJECTION'
+  ];
+  const candidates = subtypes.concat('valid').map(value => ({
+    headline: `Current ${value} story`,
+    url: `https://finance.yahoo.com/news/current-${value.toLowerCase()}.html`,
+    uuid: null, publisher: 'Yahoo Finance'
+  }));
+  const {service} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {overlayAsOf: '2026-09-08T14:55:00.000Z'});
+      }
+    }),
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        const subtype = subtypes.find(value => candidate.url.includes(value.toLowerCase()));
+        if (subtype) return {
+          ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null,
+          extractionFailureType: subtype
+        };
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+          articleText: 'Usable current-session article content.'
+        }};
+      }
+    },
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  await service.assemble(request());
+  const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.articleExtractionFailureCount, 5);
+  assert.equal(acquisition.articleMetadataFailureCount, 1);
+  assert.equal(acquisition.articleIdentityHeadlineMismatchCount, 1);
+  assert.equal(acquisition.articleBodyUnavailableCount, 1);
+  assert.equal(acquisition.articleCanonicalRedirectMismatchCount, 1);
+  assert.equal(acquisition.otherArticleExtractionRejectionCount, 1);
+  assert.equal(acquisition.acquiredCurrentSessionCount, 1);
 });
 
 test('active Yahoo news becomes CURRENT_SESSION evidence and can support current catalysts and Section 4', async () => {
@@ -646,16 +1688,159 @@ test('active Yahoo news becomes CURRENT_SESSION evidence and can support current
     market: 'US', sessionDate: '2026-09-08', evidenceRefs: [current.reference]
   }]);
   assert.equal(providerInput.sectionFourReferenceAllowlist.evidenceRefs.includes(current.reference), true);
-  assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, []);
+  assert.deepEqual(output.marketPackages[0].evidenceContext.furtherReadings, [
+    {evidenceRef: 'e5', sessionDate: '2026-09-04', kind: 'READ'}
+  ]);
+});
+
+test('active package coverage diagnostic exposes bounded classifier roles and refs only', async () => {
+  const diagnostics = [];
+  const generatedAt = '2026-09-08T15:00:00.000Z';
+  const {service} = harness({
+    createTelemetryAcquisition: () => ({async acquireSnapshot({symbol}) {
+      return snapshotWithState(symbol, 'REGULAR', {overlayAsOf: '2026-09-08T14:55:00.000Z'});
+    }}),
+    yahooMostActiveAcquisition: {async acquireMostActive() {
+      return {ok: true, type: 'SUCCESS', candidates: [{
+        symbol: 'MSFT', shortName: 'Microsoft', longName: 'Microsoft Corporation'
+      }]};
+    }},
+    yahooLatestNewsDiscovery: {async discoverLatestNews() {
+      return {ok: true, type: 'SUCCESS', candidates: [{
+        headline: 'Microsoft outlook lifts stocks',
+        url: 'https://finance.yahoo.com/news/microsoft-outlook-lifts-stocks.html',
+        uuid: null, publisher: 'Yahoo Finance'
+      }]};
+    }},
+    yahooCurrentNewsArticleContentAcquisition: {async acquireArticleContent(candidate) {
+      return {ok: true, type: 'SUCCESS', articleContent: {
+        sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+        headline: candidate.headline, publisher: 'Yahoo Finance',
+        publishedAt: '2026-09-08T14:30:00.000Z', updatedAt: null,
+        articleText: 'PRIVATE article prose must not be logged.'
+      }};
+    }},
+    evidenceRoleClassification: {async classifyEvidenceRoles(input) {
+      return {ok: true, type: 'SUCCESS', output: {classifications: input.evidence.map(entry => ({
+        reference: entry.reference,
+        materiality: entry.horizon === 'CURRENT_SESSION' ? 'HIGH' : 'LOW',
+        roles: entry.horizon === 'CURRENT_SESSION'
+          ? ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'] : [],
+        subjects: entry.horizon === 'CURRENT_SESSION'
+          ? [{kind: 'COMPANY', name: 'Microsoft'}] : []
+      }))}};
+    }},
+    now: () => new Date(generatedAt),
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const output = await service.assemble(request());
+  const focusRef = output.marketPackages[0].evidenceContext.broadMarketFocus[0].evidenceRef;
+  const packageDiagnostic = diagnostics.find(value =>
+    value.stage === 'activeSessionSectionCoveragePackage');
+  assert.ok(packageDiagnostic);
+  assert.equal(packageDiagnostic.broadMarketFocusRefCount, 1);
+  assert.deepEqual(packageDiagnostic.broadMarketFocusRefs, [focusRef]);
+  assert.deepEqual(packageDiagnostic.broadMarketFocusDetails, [{
+    evidenceRef: focusRef, classificationRoles: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST'],
+    materialityTier: 'HIGH', confidence: null, specificSubjectCount: 1
+  }]);
+  assert.ok(packageDiagnostic.materialEventRefs.includes(focusRef));
+  assert.ok(packageDiagnostic.principalCatalystRefs.includes(focusRef));
+  assert.deepEqual(packageDiagnostic.conflictRefs, []);
+  assert.deepEqual(packageDiagnostic.upcomingEventRefs, []);
+  assert.equal(packageDiagnostic.upcomingEventCount, 0);
+  const serialized = JSON.stringify(diagnostics);
+  assert.equal(serialized.includes('PRIVATE article prose'), false);
+  // Step 8K: only the candidate audit event may carry (truncated) headlines.
+  assert.equal(JSON.stringify(diagnostics.filter(value =>
+    value.stage !== 'activeYahooCandidateAudit')).includes('Microsoft'), false);
+  assert.equal(output.marketPackages[0].evidenceContext.broadMarketFocus[0].evidenceRef, focusRef);
+  assert.equal(diagnostics.some(value => value.stage === 'activeSessionSectionCoveragePackage'), true);
+
+  const completedDiagnostics = [];
+  const completed = harness({onDiagnostics: value => completedDiagnostics.push(value)});
+  await completed.service.assemble(request());
+  assert.equal(completedDiagnostics.some(value =>
+    value.stage === 'activeSessionSectionCoveragePackage'), false);
+});
+
+test('PRE, REGULAR and POST conservatively complete an omitted CURRENT_SESSION classification', async () => {
+  for (const [marketState, generatedAt, overlayAsOf, publishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:30:00.000Z', '2026-09-08T11:45:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:55:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:55:00.000Z', '2026-09-08T20:30:00.000Z']
+  ]) {
+    const diagnostics = [];
+    const {service, calls} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, marketState, {overlayAsOf});
+        }
+      }),
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() {
+          return {ok: true, type: 'SUCCESS', candidates: [{
+            headline: 'Current Yahoo market development',
+            url: 'https://finance.yahoo.com/news/current-yahoo-market-development.html',
+            uuid: null,
+            publisher: 'Yahoo Finance'
+          }]};
+        }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) {
+          return {ok: true, type: 'SUCCESS', articleContent: {
+            sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+            headline: candidate.headline, publisher: 'Yahoo Finance',
+            publishedAt, updatedAt: null,
+            articleText: 'Usable current-session Yahoo evidence.'
+          }};
+        }
+      },
+      evidenceRoleClassification: {
+        async classifyEvidenceRoles(input) {
+          calls.evidenceRoleClassification.push(input);
+          const current = input.evidence.find(entry => entry.horizon === 'CURRENT_SESSION');
+          return {ok: true, type: 'SUCCESS', output: {classifications: input.evidence
+            .filter(entry => entry.reference !== current.reference)
+            .map(entry => ({
+              reference: entry.reference,
+              materiality: 'LOW',
+              roles: [],
+              subjects: []
+            }))}};
+        },
+        async repairEvidenceSubjects() { throw new Error('not expected'); }
+      },
+      now: () => new Date(generatedAt),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const output = await service.assemble(request());
+    const current = calls.evidenceRoleClassification[0].evidence.find(entry =>
+      entry.horizon === 'CURRENT_SESSION');
+    assert.ok(current);
+    assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+      entry.reference === current.reference), true);
+    assert.ok(diagnostics.some(entry => entry.stage === 'evidenceRoleClassificationCoverage'
+      && entry.suppliedReferenceCount === calls.evidenceRoleClassification[0].evidence.length
+      && entry.returnedReferenceCount === calls.evidenceRoleClassification[0].evidence.length - 1
+      && entry.missingReferenceCount === 1
+      && entry.unknownOrExtraReferenceCount === 0
+      && entry.deterministicCompletionApplied === true));
+  }
 });
 
 test('stale and future Yahoo news never become CURRENT_SESSION evidence', async () => {
   const generatedAt = '2026-09-08T15:00:00.000Z';
   const candidates = [
-    ['Stale market story', 'stale', '2026-09-05T14:00:00.000Z'],
+    // Step 9F.1c: one hour before the reading window start (last close 2026-09-04T20:00Z minus 24 h).
+    ['Stale market story', 'stale', '2026-09-03T19:00:00.000Z'],
     ['Future market story', 'future', '2026-09-08T15:00:00.001Z'],
-    ['Current market story', 'current', '2026-09-08T14:30:00.000Z']
+    ['Current market story', 'current', '2026-09-08T14:30:00.000Z'],
+    ['Missing-time market story', 'missing-time', null],
+    ['Malformed-time market story', 'malformed-time', 'not-a-date']
   ];
+  const diagnostics = [];
   const {service, calls} = harness({
     createTelemetryAcquisition: () => ({
       async acquireSnapshot({symbol}) {
@@ -682,11 +1867,12 @@ test('stale and future Yahoo news never become CURRENT_SESSION evidence', async 
           sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
           headline: candidate.headline, publisher: 'Yahoo Finance',
           publishedAt: found[2], updatedAt: null,
-          articleText: `${candidate.headline} has bounded usable content.`
+          articleText: `PRIVATE_ARTICLE_BODY ${candidate.headline} has bounded usable content.`
         }};
       }
     },
-    now: () => new Date(generatedAt)
+    now: () => new Date(generatedAt),
+    onDiagnostics: value => diagnostics.push(value)
   });
   const output = await service.assemble(request());
   const currentEntries = calls.evidenceRoleClassification[0].evidence.filter(entry =>
@@ -695,9 +1881,23 @@ test('stale and future Yahoo news never become CURRENT_SESSION evidence', async 
   assert.equal(currentEntries[0].item.title, 'Current market story');
   assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
     entry.item.title === 'Stale market story' || entry.item.title === 'Future market story'), false);
+  const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.latestNewsCandidateCount, 5);
+  assert.equal(acquisition.selectedCandidateCount, 5);
+  assert.equal(acquisition.candidateConsideredCount, 5);
+  assert.equal(acquisition.articleFetchAttemptCount, 5);
+  assert.equal(acquisition.articleFetchSuccessCount, 5);
+  assert.equal(acquisition.missingOrMalformedPublicationTimeCount, 2);
+  assert.equal(acquisition.beforeSessionWindowCount, 1);
+  assert.equal(acquisition.afterSessionWindowCount, 1);
+  assert.equal(acquisition.activeWindowRejectionCount, 2);
+  assert.equal(acquisition.acquiredCurrentSessionCount, 1);
+  assert.equal(diagnostics.find(item => item.stage === 'activeYahooEvidenceHandoff')
+    .admittedCurrentSessionCount, 1);
+  assert.equal(JSON.stringify(diagnostics).includes('PRIVATE_ARTICLE_BODY'), false);
 });
 
-test('CLOSED, WEEKEND and HOLIDAY preserve completed research and skip active Yahoo acquisition', async () => {
+test('CLOSED, WEEKEND and HOLIDAY preserve completed research and now run the Yahoo news reading', async () => {
   for (const marketState of ['CLOSED', 'WEEKEND', 'HOLIDAY']) {
     const diagnostics = [];
     const {service, calls} = harness({
@@ -708,14 +1908,183 @@ test('CLOSED, WEEKEND and HOLIDAY preserve completed research and skip active Ya
     });
     const output = await service.assemble(request());
     assert.equal(output.marketPackages[0].marketContext.marketState, marketState);
-    assert.equal(calls.yahooMostActive, 0);
-    assert.equal(calls.yahooLatestNews, 0);
+    assert.equal(calls.yahooMostActive, 1);
+    assert.equal(calls.yahooLatestNews, 1);
     assert.equal(calls.yahooCurrentNewsArticle.length, 0);
     assert.equal(calls.yahooRecapResearch.length, 1);
     assert.equal(calls.cnbcRecapResearch.length, 1);
     assert.equal(calls.cnbc.length, 1);
-    assert.ok(diagnostics.some(item => item.stage === 'activeYahooAcquisition'
-      && item.outcome === 'SKIPPED_COMPLETED_SESSION'));
+    const acquisition = diagnostics.find(item => item.stage === 'activeYahooAcquisition');
+    assert.equal(acquisition.outcome, 'NOT_FOUND');
+    assert.equal(acquisition.subsequentDevelopmentCount, 0);
+    assert.equal(diagnostics.some(item => item.stage === 'activeYahooEvidenceHandoff'), false);
+    assert.deepEqual(diagnostics.find(item => item.stage === 'completedYahooEvidenceHandoff'), {
+      stage: 'completedYahooEvidenceHandoff', acquiredCount: 0, admittedCount: 0,
+      subsequentDevelopmentCount: 0, classifierAdmissionRejectedCount: 0
+    });
+  }
+});
+
+// ---- Step 9F.1e: the Yahoo news reading in CLOSED, WEEKEND and HOLIDAY ----
+function step9f1eSnapshot(symbol, marketState, latestDate) {
+  const base = snapshotForLatestDate(symbol, latestDate);
+  return createFiveSessionSnapshot({
+    market: 'US', symbol, instrumentName: base.instrumentName,
+    instrumentType: base.instrumentType, currency: base.currency, marketState,
+    completedSessions: base.completedSessions, currentOverlay: null
+  });
+}
+
+// Step 9F.2d.3: optional lists, an article's own headline and a pool hook.
+async function step9f1eCompletedRun({marketState, triggerAt, latestDate, articles, myStocks = [], watchlist = [],
+  onCandidatePool}) {
+  const diagnostics = [];
+  const candidates = articles.map(({name, headline}) => step8kCandidate(headline || `Neutral ${name} story`));
+  const publishedByUrl = new Map(candidates.map((candidate, index) =>
+    [candidate.url, articles[index].publishedAt]));
+  const {service, calls} = harness({
+    now: () => new Date(triggerAt),
+    sleep: async () => {},
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) { return step9f1eSnapshot(symbol, marketState, latestDate); }
+    }),
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() {
+        calls.yahooLatestNews++;
+        return {ok: true, type: 'SUCCESS', candidates};
+      }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        calls.yahooCurrentNewsArticle.push(candidate);
+        return step8kUsableArticle(candidate, publishedByUrl.get(candidate.url));
+      }
+    },
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        calls.cnbc.push(horizons);
+        return cnbcResearchSuccess(horizons, ['COMPLETED_SESSION', 'SUBSEQUENT_DEVELOPMENT']);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        calls.evidenceRoleClassification.push(input);
+        // CNBC news is kept (material); everything else is low, so the CNBC
+        // retention step runs and the Yahoo news references must be remapped.
+        return {ok: true, type: 'SUCCESS', output: {
+          classifications: input.evidence.map(({reference, item}) => item.sourceId === 'us.cnbc'
+            ? {reference, materiality: 'MEDIUM', roles: ['MATERIAL_EVENT'],
+                subjects: [{kind: 'COMPANY', name: item.title}]}
+            : {reference, materiality: 'LOW', roles: [], subjects: []})
+        }};
+      },
+      async repairEvidenceSubjects(input) {
+        return {ok: true, type: 'SUCCESS', output: {
+          repairs: input.evidence.map(({reference}) => ({reference, subjects: []}))
+        }};
+      }
+    },
+    onDiagnostics: value => diagnostics.push(value),
+    ...(onCandidatePool ? {onCandidatePool} : {})
+  });
+  const output = await service.assemble(request('US', {myStocks, watchlist}));
+  return {output, calls, diagnostics,
+    audit: diagnostics.filter(value => value.stage === 'activeYahooCandidateAudit')
+      .flatMap(event => event.candidates)};
+}
+
+test('Step 9F.1e CLOSED, WEEKEND and HOLIDAY read Yahoo news in the reading window and keep after-close articles apart', async () => {
+  const cases = [
+    {label: 'CLOSED (night)', marketState: 'CLOSED',
+      triggerAt: '2026-09-24T01:09:00.000Z', latestDate: '2026-09-23', close: '2026-09-23T20:00:00.000Z'},
+    {label: 'CLOSED (pre-dawn)', marketState: 'CLOSED',
+      triggerAt: '2026-09-24T07:30:00.000Z', latestDate: '2026-09-23', close: '2026-09-23T20:00:00.000Z'},
+    {label: 'WEEKEND', marketState: 'WEEKEND',
+      triggerAt: '2026-09-27T12:00:00.000Z', latestDate: '2026-09-25', close: '2026-09-25T20:00:00.000Z'},
+    {label: 'HOLIDAY', marketState: 'HOLIDAY',
+      triggerAt: '2026-09-07T16:00:00.000Z', latestDate: '2026-09-04', close: '2026-09-04T20:00:00.000Z'}
+  ];
+  for (const {label, marketState, triggerAt, latestDate, close} of cases) {
+    const closeTime = Date.parse(close);
+    const at = offsetMs => new Date(closeTime + offsetMs).toISOString();
+    const windowStart = at(-24 * 3600000);
+    const articles = [
+      {name: 'inside start', publishedAt: windowStart},
+      {name: 'outside start', publishedAt: at(-24 * 3600000 - 1000)},
+      {name: 'before close', publishedAt: at(-3600000)},
+      {name: 'at close', publishedAt: close},
+      {name: 'after close', publishedAt: at(1000)},
+      {name: 'evening', publishedAt: at(2 * 3600000)}
+    ];
+    const baseline = await step9f1eCompletedRun({marketState, triggerAt, latestDate, articles: []});
+    const run = await step9f1eCompletedRun({marketState, triggerAt, latestDate, articles});
+    const pkg = run.output.marketPackages[0];
+    assert.equal(pkg.marketContext.marketState, marketState, label);
+    assert.equal(run.calls.yahooLatestNews, 1, label);
+    assert.equal(run.calls.yahooCurrentNewsArticle.length, 6, label);
+
+    // Just inside the window start is admitted; one second before it is not.
+    const decision = name => run.audit.find(entry => entry.headline === `Neutral ${name} story`).decision;
+    assert.equal(decision('inside start'), 'ADMITTED', label);
+    assert.equal(decision('outside start'), 'REJECTED_BEFORE_READING_WINDOW', label);
+    assert.equal(run.audit.find(entry => entry.headline === 'Neutral after close story').afterClose, true, label);
+    assert.equal(run.audit.find(entry => entry.headline === 'Neutral before close story').afterClose, undefined, label);
+    assert.equal(run.audit.every(entry => entry.attempts === 1), true, label);
+
+    // Existing evidence keeps its order; Yahoo news is appended after it.
+    const oldItems = baseline.output.marketPackages[0].evidenceContext.evidence.map(entry => entry.item);
+    const newItems = pkg.evidenceContext.evidence.map(entry => entry.item);
+    assert.deepEqual(newItems.slice(0, oldItems.length), oldItems, label);
+    assert.deepEqual(newItems.slice(oldItems.length).map(item => item.title), [
+      'Neutral inside start story', 'Neutral before close story', 'Neutral at close story',
+      'Neutral after close story', 'Neutral evening story'
+    ], label);
+    assert.equal(newItems.slice(oldItems.length).every(item =>
+      item.sourceId === 'us.yahoo-finance' && item.evidenceCategory === 'news'), true, label);
+    assert.equal(oldItems.filter(item => item.sourceId === 'us.cnbc').length, 2, label);
+
+    // Before or at the close: completed session. After the close: later development.
+    const reference = title => `e${newItems.findIndex(item => item.title === title) + 1}`;
+    const context = pkg.evidenceContext;
+    const oldContext = baseline.output.marketPackages[0].evidenceContext;
+    const completed = ['inside start', 'before close', 'at close']
+      .map(name => reference(`Neutral ${name} story`));
+    const later = ['after close', 'evening'].map(name => reference(`Neutral ${name} story`));
+    assert.deepEqual(context.supportingEvidence, oldContext.supportingEvidence.concat(completed), label);
+    assert.deepEqual(context.subsequentDevelopments,
+      oldContext.subsequentDevelopments.concat(later), label);
+    for (const key of ['materialEvents', 'principalCatalysts', 'authoritativeFacts',
+      'sessionAssociations', 'broadMarketFocus', 'furtherReadings', 'unresolvedGaps']) {
+      assert.deepEqual(context[key], oldContext[key], `${label} ${key}`);
+    }
+
+    // The classifier sees the Yahoo news last, with the same horizons.
+    const evidence = run.calls.evidenceRoleClassification[0].evidence;
+    assert.deepEqual(evidence.slice(-5).map(entry => entry.horizon), [
+      'COMPLETED_SESSION', 'COMPLETED_SESSION', 'COMPLETED_SESSION',
+      'SUBSEQUENT_DEVELOPMENT', 'SUBSEQUENT_DEVELOPMENT'
+    ], label);
+    assert.equal(evidence.slice(-5).every(entry => entry.requiresBroadMarketSubjects), true, label);
+    assert.deepEqual(evidence.slice(0, -5).map(({reference, horizon, item}) =>
+      ({reference, horizon, item})),
+    baseline.calls.evidenceRoleClassification[0].evidence.map(({reference, horizon, item}) =>
+      ({reference, horizon, item})), label);
+
+    // Recap and CNBC research are called exactly as before.
+    for (const key of ['yahooRecapResearch', 'cnbcRecapResearch', 'cnbc']) {
+      assert.deepEqual(run.calls[key], baseline.calls[key], `${label} ${key}`);
+    }
+    const recapAndCnbc = diagnostics => diagnostics.filter(value =>
+      ['yahooRecapIntegration', 'cnbcRecapResearchIntegration', 'cnbcNewsResearchIntegration']
+        .includes(value.stage));
+    assert.deepEqual(recapAndCnbc(run.diagnostics), recapAndCnbc(baseline.diagnostics), label);
+    assert.deepEqual(run.diagnostics.find(value => value.stage === 'completedYahooEvidenceHandoff'), {
+      stage: 'completedYahooEvidenceHandoff', acquiredCount: 5, admittedCount: 5,
+      subsequentDevelopmentCount: 2, classifierAdmissionRejectedCount: 0
+    }, label);
+    assert.equal(run.diagnostics.find(value => value.stage === 'activeYahooAcquisition')
+      .subsequentDevelopmentCount, 2, label);
+    assert.equal(validateClaudeAnalysisInput(run.output), true, label);
   }
 });
 
@@ -735,7 +2104,7 @@ test('unsupported special session fails closed before any news research path', a
   assert.equal(calls.cnbc.length, 0);
 });
 
-test('assembles a canonical US package with supplied benchmarks and deterministic refs', async () => {
+cnbcFilterOffTest('assembles a canonical US package with supplied benchmarks and deterministic refs', async () => {
   const {service, calls} = harness();
   const output = await service.assemble(request('US', {
     benchmarkAnchors: [
@@ -813,7 +2182,7 @@ test('assembles a canonical US package with supplied benchmarks and deterministi
   ]);
 });
 
-test('classifies package-owned ordered evidence refs once and derives both role arrays', async () => {
+cnbcFilterOffTest('classifies package-owned ordered evidence refs once and derives both role arrays', async () => {
   let classifierCalls = 0;
   let classifierInput;
   const {service} = harness({
@@ -864,7 +2233,20 @@ test('classifies package-owned ordered evidence refs once and derives both role 
     'https://www.cnbc.com/2026/09/04/item-2.html');
 });
 
-test('fails package assembly when required evidence-role classification fails or is invalid', async () => {
+function assertClassifierFallback(output, diagnostics) {
+  assert.equal(validateClaudeAnalysisInput(output), true);
+  const evidenceContext = output.marketPackages[0].evidenceContext;
+  assert.deepEqual(evidenceContext.materialEvents, []);
+  assert.deepEqual(evidenceContext.principalCatalysts, []);
+  assert.deepEqual(evidenceContext.broadMarketFocus, []);
+  assert.equal(evidenceContext.unresolvedGaps.filter(gap =>
+    gap.includes('Could not sort the news by what it explains')).length, 1);
+  assert.ok(diagnostics.some(value => value.stage === 'evidenceRoleClassificationFallback'
+    && value.outcome === 'CONSERVATIVE_UNCLASSIFIED'));
+  assert.equal(diagnostics.some(value => value.stage === 'analysisPackageAssemblyFailure'), false);
+}
+
+test('Step 8U.10: completed-session classifier failure or invented ref degrades instead of failing', async () => {
   const cases = [
     {
       evidenceRoleClassification: {
@@ -894,7 +2276,8 @@ test('fails package assembly when required evidence-role classification fails or
       ...evidenceRoleClassification,
       onDiagnostics(value) { diagnostics.push(value); }
     });
-    await assert.rejects(service.assemble(request()), /Evidence-role classification|references/);
+    const output = await service.assemble(request());
+    assertClassifierFallback(output, diagnostics);
     if (index === 0) {
       assert.deepEqual(diagnostics.find(value => value.stage === 'evidenceRoleClassificationFailure'), {
         stage: 'evidenceRoleClassificationFailure',
@@ -905,15 +2288,261 @@ test('fails package assembly when required evidence-role classification fails or
     } else {
       assert.equal(diagnostics.some(value => value.stage === 'evidenceRoleClassificationFailure'), false);
     }
-    assert.deepEqual(diagnostics.find(value => value.stage === 'analysisPackageAssemblyFailure'), {
-      stage: 'analysisPackageAssemblyFailure',
-      failureStage: 'EVIDENCE_ROLE_CLASSIFICATION'
-    });
   }
 });
 
-test('fails closed when classifier assigns a subsequent development as principal catalyst', async () => {
+test('Step 8U.10: completed-session partial classifier coverage degrades rather than defaulting roles', async () => {
+  const diagnostics = [];
+  const instance = harness({
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        const result = roleClassificationSuccess(input, {e1: ['MATERIAL_EVENT']});
+        result.output.classifications.pop();
+        return result;
+      }
+    },
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  const output = await instance.service.assemble(request());
+  assertClassifierFallback(output, diagnostics);
+  assert.equal(output.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('Could not sort some of the news')), false);
+});
+
+test('Step 8U.10: completed-session package degrades when only stock telemetry survives', async () => {
+  const diagnostics = [];
+  const {service, calls} = harness({
+    now: () => new Date('2026-09-24T01:09:00.000Z'),
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotForLatestDate(symbol, symbol === 'MSFT' ? '2026-09-23' : '2026-09-22');
+      }
+    }),
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  const output = await service.assemble(request('US', {
+    myStocks: [{market: 'US', symbol: 'MSFT'}]
+  }));
+  assert.equal(calls.evidenceRoleClassification.length, 0);
+  assert.ok(diagnostics.some(value => value.stage === 'analysisMaterialOmission'
+    && value.symbol === '^RUT' && value.failureType === 'COMPLETED_SESSION_DATE_MISMATCH'));
+  assertClassifierFallback(output, diagnostics);
+});
+
+test('a surviving fresh benchmark makes completed-session classifier preflight available', async () => {
+  let classifierCalls = 0;
+  const {service, calls} = harness({
+    now: () => new Date('2026-09-24T01:09:00.000Z'),
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotForLatestDate(symbol, '2026-09-23');
+      }
+    }),
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        classifierCalls++;
+        calls.evidenceRoleClassification.push(input);
+        return roleClassificationSuccess(input);
+      }
+    }
+  });
+  const output = await service.assemble(request());
+  assert.equal(classifierCalls, 1);
+  assert.equal(calls.evidenceRoleClassification.length, 1);
+  assert.deepEqual(output.marketPackages[0].telemetry.benchmarkSnapshots.map(entry => entry.snapshot.symbol),
+    ['^RUT']);
+  assert.equal(output.marketPackages[0].marketContext.primaryCompletedSessionDate, '2026-09-23');
+});
+
+test('active PRE retains conservative classifier failure fallback with current evidence', async () => {
+  const diagnostics = [];
+  const {service, calls} = harness({
+    now: () => new Date('2026-09-08T12:00:00.000Z'),
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'PRE', {
+          overlayAsOf: '2026-09-08T11:30:00.000Z'
+        });
+      }
+    }),
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() {
+        return {ok: true, type: 'SUCCESS', candidates: [{
+          headline: 'Current Yahoo market development',
+          url: 'https://finance.yahoo.com/news/current-yahoo-market-development.html',
+          uuid: null, publisher: 'Yahoo Finance'
+        }]};
+      }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt: '2026-09-08T11:45:00.000Z', updatedAt: null,
+          articleText: 'Usable current-session Yahoo evidence.'
+        }};
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        calls.evidenceRoleClassification.push(input);
+        return {ok: false, type: 'CONTRACT_FAILURE', message: 'Malformed classification'};
+      }
+    },
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  const output = await service.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(output), true);
+  assert.equal(calls.evidenceRoleClassification.length, 1);
+  assert.ok(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.title === 'Current Yahoo market development'));
+  assert.ok(output.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('Could not sort the news by what it explains')));
+  assert.ok(diagnostics.some(value => value.stage === 'evidenceRoleClassificationFallback'
+    && value.outcome === 'CONSERVATIVE_UNCLASSIFIED'));
+});
+
+const STEP_8U10_CLASSIFIER_FAILURES = Object.freeze([
+  ['CONTRACT_FAILURE result', async () => ({
+    ok: false, type: 'CONTRACT_FAILURE', message: 'Malformed classification', upstreamStatus: 200
+  })],
+  ['UPSTREAM_FAILURE result', async () => ({ok: false, type: 'UPSTREAM_FAILURE'})],
+  ['thrown error', async () => { throw new Error('classifier unavailable'); }]
+]);
+
+function step8U10WriterReply(gap) {
+  const section = (content, evidenceRefs, telemetryRefs, uncertainties = []) =>
+    ({content, evidenceRefs: evidenceRefs.join('|'), telemetryRefs: telemetryRefs.join('|'),
+      uncertainties: uncertainties.join('|')});
+  const transport = {
+    status: 'DEGRADED',
+    evidenceGaps: [gap],
+    s1: section('The Russell 2000 closed higher in the last trading session.', ['e1'], ['t1']),
+    s2: section('The Russell 2000 rose in the last trading session.', ['e1'], ['t1']),
+    s3: section(null, [], [], ['Not enough data to point out specific stocks or sectors.']),
+    s4: section('No securities are configured in My Stocks.', [], []),
+    s5: section('Small companies ended the last trading session higher.', ['e1'], ['t1']),
+    s6: section(null, [], [], ['Not enough data to point out a clear opportunity.']),
+    s7: section(null, [], [], ['Nothing confirmed to watch for next.']),
+    s8: {}
+  };
+  return {
+    ok: true, status: 200,
+    async json() { return {content: [{type: 'text', text: JSON.stringify(transport)}]}; }
+  };
+}
+
+test('Step 8U.10: a failed classifier on CLOSED, WEEKEND and HOLIDAY returns a DEGRADED report, not a 502', async () => {
+  for (const marketState of ['CLOSED', 'WEEKEND', 'HOLIDAY']) {
+    for (const [label, classifyEvidenceRoles] of STEP_8U10_CLASSIFIER_FAILURES) {
+      const diagnostics = [];
+      const {service} = harness({
+        createTelemetryAcquisition: () => ({
+          async acquireSnapshot({symbol}) { return snapshotWithState(symbol, marketState); }
+        }),
+        evidenceRoleClassification: {classifyEvidenceRoles},
+        onDiagnostics(value) { diagnostics.push(value); }
+      });
+      const output = await service.assemble(request());
+      assert.equal(output.marketPackages[0].marketContext.marketState, marketState);
+      assertClassifierFallback(output, diagnostics);
+      const gap = output.marketPackages[0].evidenceContext.unresolvedGaps.find(value =>
+        value.includes('Could not sort the news by what it explains'));
+
+      const writerDiagnostics = [];
+      let writerCalls = 0;
+      const invocation = await invokeClaudeAnalysis({
+        input: output, apiKey: 'test-key',
+        fetchImpl: async () => { writerCalls++; return step8U10WriterReply(gap); },
+        onDiagnostics: value => writerDiagnostics.push(value)
+      });
+      assert.equal(invocation.ok, true, `${marketState} ${label}: ${invocation.message}`);
+      assert.equal(writerCalls, 1);
+      assert.equal(invocation.output.status, 'DEGRADED');
+      assert.equal(invocation.output.evidenceGaps.includes(gap), true);
+      assert.equal(invocation.output.sections[0].content,
+        'The Russell 2000 closed higher in the last trading session.');
+      // No roles survive, so Section 2 is blanked with the existing plain wording.
+      assert.equal(invocation.output.sections[1].content, null);
+      assert.deepEqual(invocation.output.sections[1].uncertainties,
+        ['Not enough data to point to a main market driver.']);
+    }
+  }
+});
+
+test('Step 8U.10: a working classifier on CLOSED, WEEKEND and HOLIDAY is unchanged', async () => {
+  for (const marketState of ['CLOSED', 'WEEKEND', 'HOLIDAY']) {
+    const diagnostics = [];
+    const {service} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) { return snapshotWithState(symbol, marketState); }
+      }),
+      evidenceRoleClassification: {
+        async classifyEvidenceRoles(input) {
+          return roleClassificationSuccess(input, {
+            e1: ['MATERIAL_EVENT'],
+            e2: ['MATERIAL_EVENT', 'PRINCIPAL_CATALYST']
+          });
+        }
+      },
+      onDiagnostics(value) { diagnostics.push(value); }
+    });
+    const output = await service.assemble(request());
+    const evidenceContext = output.marketPackages[0].evidenceContext;
+    assert.equal(validateClaudeAnalysisInput(output), true);
+    assert.deepEqual(evidenceContext.materialEvents, ['e1', 'e2'], marketState);
+    assert.deepEqual(evidenceContext.principalCatalysts, ['e2'], marketState);
+    assert.equal(evidenceContext.unresolvedGaps.some(gap =>
+      gap.includes('Could not sort the news by what it explains')), false);
+    assert.equal(diagnostics.some(value => value.stage === 'evidenceRoleClassificationFallback'), false);
+  }
+});
+
+test('Step 8U.10: PRE, REGULAR and POST classifier failure fallback is unchanged', async () => {
+  for (const [marketState, generatedAt, publishedAt] of [
+    ['PRE', '2026-09-08T12:00:00.000Z', '2026-09-08T11:45:00.000Z'],
+    ['REGULAR', '2026-09-08T15:00:00.000Z', '2026-09-08T14:30:00.000Z'],
+    ['POST', '2026-09-08T21:00:00.000Z', '2026-09-08T20:30:00.000Z']
+  ]) {
+    const diagnostics = [];
+    const {service} = harness({
+      now: () => new Date(generatedAt),
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) { return snapshotWithState(symbol, marketState); }
+      }),
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates: [{
+          headline: 'Current Yahoo market development',
+          url: 'https://finance.yahoo.com/news/current-yahoo-market-development.html',
+          uuid: null, publisher: 'Yahoo Finance'
+        }]}; }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) { return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url,
+          headline: candidate.headline, publisher: 'Yahoo Finance',
+          publishedAt, updatedAt: null,
+          articleText: 'Usable current-session Yahoo evidence.'
+        }}; }
+      },
+      evidenceRoleClassification: {
+        async classifyEvidenceRoles() { return {ok: false, type: 'CONTRACT_FAILURE'}; }
+      },
+      onDiagnostics(value) { diagnostics.push(value); }
+    });
+    const output = await service.assemble(request());
+    assert.equal(output.marketPackages[0].marketContext.marketState, marketState);
+    assertClassifierFallback(output, diagnostics);
+    assert.ok(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+      entry.item.title === 'Current Yahoo market development'), marketState);
+  }
+});
+
+test('completed-session classifier rejects a subsequent-development principal catalyst', async () => {
+  const diagnostics = [];
   const {service} = harness({
+    onDiagnostics(value) { diagnostics.push(value); },
     cnbcNewsResearch: {
       async researchNews({horizons}) {
         return cnbcResearchSuccess(horizons, ['SUBSEQUENT_DEVELOPMENT']);
@@ -927,10 +2556,12 @@ test('fails closed when classifier assigns a subsequent development as principal
       }
     }
   });
-  await assert.rejects(
-    service.assemble(request()),
-    /subsequent development cannot be a principal catalyst/
-  );
+  // Step 8U.10: the rejected output is discarded whole, so the post-close item
+  // is still never a principal catalyst; the package degrades instead of failing.
+  const output = await service.assemble(request());
+  assertClassifierFallback(output, diagnostics);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.sourceId === 'us.cnbc'), false);
 });
 
 test('reports sanitized non-negative timings for existing package stages', async () => {
@@ -1007,7 +2638,7 @@ test('attributes Yahoo recap timings without hiding or double-counting them in f
     + timing.packageAssemblyFinalizationMs, timing.packageRuntimeTotalMs);
 });
 
-test('integrates a validated Yahoo recap with package-owned ordering, identity and horizon', async () => {
+cnbcFilterOffTest('integrates a validated Yahoo recap with package-owned ordering, identity and horizon', async () => {
   const article = yahooRecapArticle();
   const articleCalls = [];
   const evidenceCalls = [];
@@ -1074,7 +2705,7 @@ test('integrates a validated Yahoo recap with package-owned ordering, identity a
   }]);
   assert.deepEqual(context.unresolvedGaps, [CNBC_RECAP_UNAVAILABLE_GAP]);
   assert.deepEqual(context.furtherReadings, [{
-    evidenceRef: 'e2', sessionDate: '2026-09-04'
+    evidenceRef: 'e2', sessionDate: '2026-09-04', kind: 'RECAP'
   }]);
   assert.equal(JSON.stringify(output).includes('c1'), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
@@ -1371,7 +3002,7 @@ test('validated Yahoo focus survives general CNBC classifier-capacity rejection'
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
-test('real Yahoo validation, article acquisition and evidence construction reach Further Readings', async () => {
+cnbcFilterOffTest('real Yahoo validation, article acquisition and evidence construction reach Further Readings', async () => {
   const url = 'https://finance.yahoo.com/markets/live/stock-market-today-september-4.html';
   const title = 'Stock market today: September 4 recap';
   const publishedAt = '2026-09-04T20:03:54Z';
@@ -1380,7 +3011,7 @@ test('real Yahoo validation, article acquisition and evidence construction reach
     '@type': 'LiveBlogPosting', headline: title, datePublished: publishedAt,
     dateModified: updatedAt, url,
     publisher: {'@type': 'Organization', name: 'Yahoo Finance'},
-    articleBody: 'The US stock market finished the September 4 session higher.'
+    articleBody: 'The US stock market finished the September 4 session higher. The S&P 500 rose 0.4% and the Nasdaq gained 0.6%.'
   })}</script>`;
   const requests = [];
   const fetchImpl = async requestedUrl => {
@@ -1421,13 +3052,13 @@ test('real Yahoo validation, article acquisition and evidence construction reach
   assert.equal(context.evidence[1].item.canonicalUrl, url);
   assert.equal(context.evidence[1].item.publishedAt, '2026-09-04T20:03:54.000Z');
   assert.equal(context.evidence[1].item.provenance.publisher, 'Yahoo Finance');
-  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04'}]);
+  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04', kind: 'RECAP'}]);
   assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), false);
   assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_UNAVAILABLE_GAP), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
-test('later second-fetch Yahoo dateModified becomes authoritative through evidence construction', async () => {
+cnbcFilterOffTest('later second-fetch Yahoo dateModified becomes authoritative through evidence construction', async () => {
   const url = 'https://finance.yahoo.com/markets/live/stock-market-today-september-4.html';
   const title = 'Stock market today: September 4 recap';
   const publishedAt = '2026-09-04T20:03:54Z';
@@ -1437,7 +3068,7 @@ test('later second-fetch Yahoo dateModified becomes authoritative through eviden
     '@type': 'LiveBlogPosting', headline: title, datePublished: publishedAt,
     dateModified: updatedAt, url,
     publisher: {'@type': 'Organization', name: 'Yahoo Finance'},
-    articleBody: 'The US stock market finished the September 4 session higher.'
+    articleBody: 'The US stock market finished the September 4 session higher. The S&P 500 rose 0.4% and the Nasdaq gained 0.6%.'
   })}</script>`;
   let pageFetches = 0;
   let constructedArticle = null;
@@ -1485,23 +3116,26 @@ test('later second-fetch Yahoo dateModified becomes authoritative through eviden
   assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.yahoo-finance'
     && entry.item.evidenceCategory === 'news'), true);
   assert.deepEqual(context.sessionAssociations, [{evidenceRef: 'e2', sessionDate: '2026-09-04'}]);
-  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04'}]);
+  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04', kind: 'RECAP'}]);
   assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), false);
 });
 
-test('advanced Yahoo updatedAt must remain inside the same canonical evidence horizon', async () => {
+// Step 9F.1g: the publish time alone decides the horizon; a later update does not move or reject the recap.
+test('advanced Yahoo updatedAt does not move the recap out of its publish-time horizon', async () => {
   const cases = [
     {
       name: 'completed publication with post-close update',
       publishedAt: '2026-09-04T19:45:00.000Z',
       validatedUpdatedAt: '2026-09-04T19:50:00.000Z',
-      acquiredUpdatedAt: '2026-09-04T20:20:00.000Z'
+      acquiredUpdatedAt: '2026-09-04T20:20:00.000Z',
+      horizon: 'COMPLETED_SESSION'
     },
     {
       name: 'update after final generatedAt',
       publishedAt: '2026-09-04T20:03:54.000Z',
       validatedUpdatedAt: '2026-09-04T20:10:00.000Z',
-      acquiredUpdatedAt: '2026-09-06T10:00:00.001Z'
+      acquiredUpdatedAt: '2026-09-06T10:00:00.001Z',
+      horizon: 'SUBSEQUENT_DEVELOPMENT'
     }
   ];
   for (const item of cases) {
@@ -1521,23 +3155,29 @@ test('advanced Yahoo updatedAt must remain inside the same canonical evidence ho
           return {ok: true, type: 'SUCCESS', articleContent: article};
         }
       },
+      yahooRecapEvidenceConstruction: {
+        constructEvidence(value) {
+          horizons.push(value.horizon.classification);
+          return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+        }
+      },
       onDiagnostics(value) { diagnostics.push(value); }
     });
+    const horizons = [];
     const output = await service.assemble(request());
     const context = output.marketPackages[0].evidenceContext;
     assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.yahoo-finance'
-      && entry.item.evidenceCategory === 'news'), false, item.name);
-    assert.deepEqual(context.sessionAssociations, [], item.name);
-    assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), true,
+      && entry.item.evidenceCategory === 'news'), true, item.name);
+    assert.deepEqual(horizons, [item.horizon], item.name);
+    assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), false,
       item.name);
-    assert.deepEqual(diagnostics.find(value => value.stage === 'yahooRecapIntegration'), {
-      stage: 'yahooRecapIntegration', outcome: 'FAILURE', researchType: 'VALIDATED',
-      failureType: 'HORIZON_MISMATCH', candidateRank: null
-    }, item.name);
+    assert.equal(diagnostics.some(value => value.stage === 'yahooRecapIntegration'), false,
+      item.name);
   }
 });
 
-test('Yahoo orchestration accepts an added update timestamp but rejects a removed one', async () => {
+// Step 9F.1g: the update time is not compared, so a removed one is accepted too.
+test('Yahoo orchestration accepts an added or a removed update timestamp', async () => {
   const publishedAt = '2026-09-04T20:03:54.000Z';
   const acquiredUpdatedAt = '2026-09-04T20:20:00.000Z';
   const addedArticle = yahooRecapArticle({publishedAt, updatedAt: acquiredUpdatedAt});
@@ -1576,20 +3216,25 @@ test('Yahoo orchestration accepts an added update timestamp but rejects a remove
         })};
       }
     },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) {
+        return yahooRecapEvidenceSuccess(value.articleContent, value.horizon);
+      }
+    },
     onDiagnostics(value) { diagnostics.push(value); }
   });
   const removedOutput = await removed.service.assemble(request());
   assert.equal(removedOutput.marketPackages[0].evidenceContext.evidence.some(entry =>
-    entry.item.sourceId === 'us.yahoo-finance' && entry.item.evidenceCategory === 'news'), false);
-  assert.deepEqual(diagnostics.find(value => value.stage === 'yahooRecapIntegration'), {
-    stage: 'yahooRecapIntegration', outcome: 'FAILURE', researchType: 'VALIDATED',
-    failureType: 'ARTICLE_CONTRACT_FAILURE', candidateRank: null
-  });
+    entry.item.sourceId === 'us.yahoo-finance' && entry.item.evidenceCategory === 'news'), true);
+  assert.equal(diagnostics.some(value => value.stage === 'yahooRecapIntegration'), false);
 });
 
-test('real Yahoo article retrieval failure remains optional after validated research', async () => {
+// Step 9F.1g: a 503 is retried by the shared helper (3 attempts, fake pauses).
+cnbcFilterOffTest('real Yahoo article retrieval failure remains optional after validated research', async () => {
   let fetches = 0;
+  const pauses = [];
   const {service} = harness({
+    sleep: async ms => { pauses.push(ms); },
     yahooRecapResearch: {
       async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }
     },
@@ -1603,7 +3248,8 @@ test('real Yahoo article retrieval failure remains optional after validated rese
   });
   const output = await service.assemble(request());
   const context = output.marketPackages[0].evidenceContext;
-  assert.equal(fetches, 1);
+  assert.equal(fetches, 3);
+  assert.deepEqual(pauses, [250, 750]);
   assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.yahoo-finance'
     && entry.item.evidenceCategory === 'news'), false);
   assert.deepEqual(context.furtherReadings, []);
@@ -1612,7 +3258,98 @@ test('real Yahoo article retrieval failure remains optional after validated rese
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
-test('places a recap published inside the completed-session boundary in supporting evidence', async () => {
+// Step 9F.1g: a recap whose address is not on the old pattern is accepted by its
+// content and reaches Further Readings through the real services.
+function step9f1gRecapPage(url) {
+  return `<link rel="canonical" href="${url}"><script type="application/ld+json">${JSON.stringify({
+    '@type': 'NewsArticle', headline: 'Stocks close higher on September 4',
+    datePublished: '2026-09-04T20:03:54Z', dateModified: '2026-09-04T20:20:00Z', url,
+    publisher: {'@type': 'Organization', name: 'Yahoo Finance'},
+    articleBody: 'US stocks rose. The Dow added 0.5%, the S&P 500 gained 0.7% and the Nasdaq climbed 1.2%.'
+  })}</script>`;
+}
+
+function step9f1gRecapHarness(url, pageStatuses, extra = {}) {
+  const pageRequests = [];
+  const statuses = pageStatuses.slice();
+  const fetchImpl = async requestedUrl => {
+    if (requestedUrl === 'https://api.anthropic.com/v1/messages') {
+      return {
+        ok: true, status: 200, headers: {get: () => null},
+        async json() {
+          return {content: [{type: 'web_search_tool_result', content: [{
+            type: 'web_search_result', title: 'Stocks close higher', url
+          }]}]};
+        }
+      };
+    }
+    pageRequests.push(requestedUrl);
+    const status = statuses.length > 0 ? statuses.shift() : 200;
+    return {
+      ok: status === 200, status, url,
+      headers: {get: name => name === 'content-type' ? 'text/html; charset=utf-8' : null},
+      async text() { return status === 200 ? step9f1gRecapPage(url) : ''; }
+    };
+  };
+  const {service} = harness({
+    yahooRecapResearch: createYahooRecapResearchRuntime({apiKey: 'test-key', fetchImpl}),
+    yahooRecapArticleContentAcquisition: createYahooRecapArticleContentAcquisitionService({fetchImpl}),
+    yahooRecapEvidenceConstruction: createYahooRecapEvidenceConstructionService({
+      evidenceConstructionBounds: {
+        maxHeadlineBytes: 512, maxPublisherNameBytes: 256,
+        maxEvidenceTextBytes: 8192, maxResultBytes: 12288
+      }
+    }),
+    ...extra
+  });
+  return {service, pageRequests};
+}
+
+cnbcFilterOffTest('Step 9F.1g: a recap at a new-style address is accepted by content and reaches Further Readings', async () => {
+  const url = 'https://finance.yahoo.com/markets/stocks/articles/stocks-close-higher-september-4.html';
+  const {service, pageRequests} = step9f1gRecapHarness(url, []);
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.deepEqual(pageRequests, [url, url]);
+  assert.equal(context.evidence[1].item.canonicalUrl, url);
+  assert.equal(context.evidence[1].item.publishedAt, '2026-09-04T20:03:54.000Z');
+  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e2', sessionDate: '2026-09-04', kind: 'RECAP'}]);
+  assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), false);
+  assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+test('Step 9F.1g: the recap article download uses the shared retries', async () => {
+  const url = 'https://finance.yahoo.com/markets/live/stock-market-today-september-4.html';
+  // The first page request is the page check; the rest are the article download.
+  const rows = [
+    {name: 'article fails once then succeeds', statuses: [200, 503], articleAttempts: 2,
+      pauses: [250], admitted: true},
+    {name: 'article fails twice then succeeds', statuses: [200, 503, 503], articleAttempts: 3,
+      pauses: [250, 750], admitted: true},
+    {name: 'article not found: one attempt only', statuses: [200, 404], articleAttempts: 1,
+      pauses: [], admitted: false}
+  ];
+  for (const row of rows) {
+    const pauses = [];
+    const diagnostics = [];
+    const {service, pageRequests} = step9f1gRecapHarness(url, row.statuses, {
+      sleep: async ms => { pauses.push(ms); },
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    const output = await service.assemble(request());
+    const context = output.marketPackages[0].evidenceContext;
+    assert.equal(pageRequests.length, 1 + row.articleAttempts, row.name);
+    assert.deepEqual(pauses, row.pauses, row.name);
+    assert.deepEqual(diagnostics.find(value => value.stage === 'yahooRecapArticleDownload'), {
+      stage: 'yahooRecapArticleDownload', attempts: row.articleAttempts, retriesStoppedByBudget: false
+    }, row.name);
+    assert.equal(context.evidence.some(entry => entry.item.canonicalUrl === url), row.admitted, row.name);
+    assert.equal(context.unresolvedGaps.includes(YAHOO_RECAP_RETRIEVAL_FAILURE_GAP), !row.admitted,
+      row.name);
+  }
+});
+
+cnbcFilterOffTest('places a recap published inside the completed-session boundary in supporting evidence', async () => {
   const publishedAt = '2026-09-04T19:45:00.000Z';
   const article = yahooRecapArticle({publishedAt});
   const research = yahooRecapResearchSuccess({publishedAt});
@@ -1802,13 +3539,15 @@ test('keeps thrown Yahoo recap failures sanitized in integration diagnostics', a
     stage: 'yahooRecapIntegration', outcome: 'FAILURE', researchType: null,
     failureType: 'THROWN_FAILURE', candidateRank: null
   });
-  const serialized = JSON.stringify(diagnostics);
+  // Step 9F.1e: completed runs now emit the Yahoo news summary, whose count field
+  // name contains "articleBody"; only leaked values are forbidden.
+  const serialized = JSON.stringify(diagnostics).replaceAll('"articleBodyUnavailableCount"', '');
   for (const forbidden of [
     'articleBody', 'rawHtml', 'authorization', 'apiKey', 'secret', 'provider response body'
   ]) assert.equal(serialized.includes(forbidden), false, forbidden);
 });
 
-test('skips Yahoo recap research when the canonical primary session date is null', async () => {
+test('rejects telemetry without a calendar-expected completed session before recap research', async () => {
   let researchCalls = 0;
   const {service, calls} = harness({
     createTelemetryAcquisition: () => ({
@@ -1818,24 +3557,9 @@ test('skips Yahoo recap research when the canonical primary session date is null
       async discoverAndValidateRecap() { researchCalls++; throw new Error('not expected'); }
     }
   });
-  const output = await service.assemble(request());
-  assert.equal(output.marketPackages[0].marketContext.primaryCompletedSessionDate, null);
+  await assert.rejects(service.assemble(request()), /No validated US telemetry is available/);
   assert.equal(researchCalls, 0);
-  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(
-    record => record.item.evidenceCategory === 'news' && record.item.sourceId === 'us.yahoo-finance'
-  ), false);
-  assert.deepEqual(output.marketPackages[0].evidenceContext.unresolvedGaps, [
-    YAHOO_RECAP_UNAVAILABLE_GAP,
-    CNBC_RECAP_UNAVAILABLE_GAP,
-    CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP,
-    EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP
-  ]);
-  assert.deepEqual(output.marketPackages[0].evidenceContext.materialEvents, []);
-  assert.deepEqual(output.marketPackages[0].evidenceContext.principalCatalysts, []);
   assert.equal(calls.evidenceRoleClassification.length, 0);
-  assert.equal(output.marketPackages[0].evidenceContext.unresolvedGaps.filter(
-    gap => gap === EVIDENCE_ROLE_CLASSIFICATION_UNAVAILABLE_GAP
-  ).length, 1);
 });
 
 test('does not reuse a previous successful Yahoo recap when the current discovery is absent', async () => {
@@ -1977,10 +3701,8 @@ test('integrates one CNBC recap before general CNBC with package-owned associati
     {evidenceRef: 'e5', sessionDate: '2026-09-04'}
   ]);
   assert.deepEqual(context.furtherReadings, [
-    {evidenceRef: 'e2', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e5', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e6', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e7', sessionDate: '2026-09-04'}
+    {evidenceRef: 'e2', sessionDate: '2026-09-04', kind: 'RECAP'},
+    {evidenceRef: 'e5', sessionDate: '2026-09-04', kind: 'RECAP'}
   ]);
   assert.equal(context.principalCatalysts.includes('e5'), false);
   assert.deepEqual(context.unresolvedGaps, []);
@@ -2040,7 +3762,7 @@ test('validated CNBC daily recap uses one package evidence ref for analysis and 
   assert.ok(context.subsequentDevelopments.includes(recapReference));
   assert.equal(context.principalCatalysts.includes(recapReference), false);
   assert.deepEqual(context.furtherReadings.filter(entry => entry.evidenceRef === recapReference), [
-    {evidenceRef: recapReference, sessionDate: '2026-09-04'}
+    {evidenceRef: recapReference, sessionDate: '2026-09-04', kind: 'RECAP'}
   ]);
   assert.deepEqual(fetched, [recapUrl]);
   assert.equal(validateClaudeAnalysisInput(output), true);
@@ -2105,7 +3827,7 @@ test('predicted CNBC recap remains analysis evidence and Further Reading with un
     assert.ok(context.subsequentDevelopments.includes(reference));
     assert.equal(context.principalCatalysts.includes(reference), false);
     assert.deepEqual(context.furtherReadings.filter(entry => entry.evidenceRef === reference), [
-      {evidenceRef: reference, sessionDate: '2026-09-04'}
+      {evidenceRef: reference, sessionDate: '2026-09-04', kind: 'RECAP'}
     ]);
     assert.deepEqual(fetched, [recapUrl]);
     assert.equal(validateClaudeAnalysisInput(output), true);
@@ -2199,15 +3921,12 @@ test('integrates completed and subsequent CNBC evidence after Yahoo and Fed with
   assert.deepEqual(context.supportingEvidence, ['e1', 'e2', 'e3', 'e4']);
   assert.deepEqual(context.subsequentDevelopments, ['e5']);
   assert.deepEqual(context.principalCatalysts, []);
-  assert.deepEqual(context.furtherReadings, [
-    {evidenceRef: 'e4', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e5', sessionDate: '2026-09-04'}
-  ]);
+  assert.deepEqual(context.furtherReadings, []);
   assert.equal(JSON.stringify(output).includes('c1'), false);
   assert.equal(JSON.stringify(output).includes('c2'), false);
 });
 
-test('filters five provisional CNBC items and compacts every retained reference-bearing path', async () => {
+cnbcFilterOffTest('filters five provisional CNBC items and compacts every retained reference-bearing path', async () => {
   let repairInput;
   const {service} = harness({
     cnbcNewsResearch: {
@@ -2261,10 +3980,7 @@ test('filters five provisional CNBC items and compacts every retained reference-
     {evidenceRef: 'e4', subjects: [{kind: 'COMPANY', name: 'CNBC market news item 2'}]},
     {evidenceRef: 'e5', subjects: [{kind: 'SECTOR', name: 'CNBC market news item 4'}]}
   ]);
-  assert.deepEqual(context.furtherReadings, [
-    {evidenceRef: 'e4', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e5', sessionDate: '2026-09-04'}
-  ]);
+  assert.deepEqual(context.furtherReadings, []);
   assert.deepEqual(repairInput.evidence.map(entry => [entry.reference, entry.title]), [
     ['e4', 'CNBC market news item 2']
   ]);
@@ -2272,6 +3988,52 @@ test('filters five provisional CNBC items and compacts every retained reference-
   assert.equal(JSON.stringify(output).includes('CNBC market news item 3'), false);
   assert.equal(JSON.stringify(output).includes('CNBC market news item 5'), false);
   assert.equal(validateClaudeAnalysisInput(output), true);
+});
+
+// Step 9F.2f on (default): the same five provisional CNBC items as above are
+// no longer gated by materiality/role -- all five are retained, same as a
+// Yahoo news item or a base evidence item would be.
+test('Step 9F.2f on (default): all five provisional CNBC items are retained, none gated by materiality or role', async () => {
+  const {service} = harness({
+    cnbcNewsResearch: {
+      async researchNews({horizons}) {
+        return cnbcResearchSuccess(horizons, [
+          'COMPLETED_SESSION', 'COMPLETED_SESSION', 'COMPLETED_SESSION',
+          'SUBSEQUENT_DEVELOPMENT', 'SUBSEQUENT_DEVELOPMENT'
+        ]);
+      }
+    },
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles(input) {
+        return roleClassificationSuccess(
+          input,
+          {
+            e5: ['MATERIAL_EVENT'],
+            e7: ['MATERIAL_EVENT'],
+            e8: ['MATERIAL_EVENT']
+          },
+          {
+            e5: [],
+            e7: [{kind: 'SECTOR', name: 'CNBC market news item 4'}],
+            e8: [{kind: 'COMPANY', name: 'CNBC market news item 5'}]
+          },
+          {e4: 'LOW', e5: 'HIGH', e6: 'MEDIUM', e7: 'MEDIUM', e8: 'LOW'}
+        );
+      },
+      async repairEvidenceSubjects(input) {
+        return {ok: true, type: 'SUCCESS', output: {repairs: [{
+          reference: 'e4', subjects: [{kind: 'COMPANY', name: 'CNBC market news item 2'}]
+        }]}};
+      }
+    }
+  });
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  const titles = JSON.stringify(output);
+  for (let item = 1; item <= 5; item++) {
+    assert.equal(titles.includes(`CNBC market news item ${item}`), true, `item ${item} missing`);
+  }
+  assert.equal(context.evidence.filter(entry => entry.item.sourceId === 'us.cnbc').length, 5);
 });
 
 test('excludes generic market and broad-index labels from broad-market focus', async () => {
@@ -2599,7 +4361,7 @@ test('admits provisional CNBC evidence only while the 50-item classifier bound r
   assert.equal(context.unresolvedGaps.includes(BROAD_MARKET_EVIDENCE_UNAVAILABLE_GAP), false);
 });
 
-test('keeps oversized provisional CNBC evidence optional at the 64 KiB classifier preflight', async () => {
+test('keeps oversized provisional CNBC evidence optional at the classifier preflight', async () => {
   const benchmark = snapshot('^RUT');
   const yahooItem = yahooEvidence('^RUT').items[0];
   const provisional = cnbcResearchSuccess(
@@ -2623,18 +4385,20 @@ test('keeps oversized provisional CNBC evidence optional at the 64 KiB classifie
     });
     return Buffer.byteLength(JSON.stringify(requestBody), 'utf8');
   }
+  // Step 9F.2b: 45 federal filler items (see the active-session preflight tests
+  // above for why 20 can no longer reach the new 300 KB classifier limit).
   let low = 0;
-  let high = 4000;
+  let high = 8192;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    const items = [yahooItem, ...manyFedEvidence(20, middle).items];
+    const items = [yahooItem, ...manyFedEvidence(45, middle).items];
     if (classifierBytes(items) <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES) {
       low = middle;
     } else {
       high = middle - 1;
     }
   }
-  const fedCollection = manyFedEvidence(20, low);
+  const fedCollection = manyFedEvidence(45, low);
   const baseItems = [yahooItem, ...fedCollection.items];
   assert.equal(classifierBytes(baseItems)
     <= CLAUDE_EVIDENCE_ROLE_CLASSIFICATION_PROVISIONAL_MAX_REQUEST_BYTES, true);
@@ -2667,13 +4431,24 @@ test('keeps oversized provisional CNBC evidence optional at the 64 KiB classifie
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
-test('roleless low-materiality CNBC provisional evidence adds no final evidence or gap', async () => {
+cnbcFilterOffTest('roleless low-materiality CNBC provisional evidence adds no final evidence or gap', async () => {
   const {service} = harness();
   const output = await service.assemble(request());
   const context = output.marketPackages[0].evidenceContext;
   assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), false);
   assert.deepEqual(context.unresolvedGaps, [YAHOO_RECAP_UNAVAILABLE_GAP, CNBC_RECAP_UNAVAILABLE_GAP]);
   assert.deepEqual(context.furtherReadings, []);
+});
+
+// Step 9F.2f (10 Oct 2026 decision: CNBC gets no special conditions). While
+// cnbcNoSpecialConditionsEnabled is on (the default), the same roleless,
+// LOW-materiality general CNBC item as above is no longer gated out -- it is
+// admitted on the same terms as Yahoo news and the base evidence items.
+test('Step 9F.2f on (default): roleless low-materiality general CNBC evidence is admitted like any other source', async () => {
+  const {service} = harness();
+  const output = await service.assemble(request());
+  const context = output.marketPackages[0].evidenceContext;
+  assert.equal(context.evidence.some(entry => entry.item.sourceId === 'us.cnbc'), true);
 });
 
 test('non-portfolio company and sector CNBC evidence survives package roles without stock telemetry and follows recap anchors in Further Readings', async () => {
@@ -2786,10 +4561,8 @@ test('non-portfolio company and sector CNBC evidence survives package roles with
   ]);
   assert.deepEqual(context.evidenceContext.supportingEvidence.slice(-2), ['e8', 'e9']);
   assert.deepEqual(context.evidenceContext.furtherReadings, [
-    {evidenceRef: 'e4', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e7', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e8', sessionDate: '2026-09-04'},
-    {evidenceRef: 'e9', sessionDate: '2026-09-04'}
+    {evidenceRef: 'e4', sessionDate: '2026-09-04', kind: 'RECAP'},
+    {evidenceRef: 'e7', sessionDate: '2026-09-04', kind: 'RECAP'}
   ]);
   assert.deepEqual(output.portfolioContext.myStocks.map(item => item.symbol), ['AAPL']);
   assert.deepEqual(output.portfolioContext.watchlist.map(item => item.symbol), ['NVDA']);
@@ -2920,16 +4693,16 @@ test('Further Readings deduplicates general CNBC evidence against mandatory reca
   });
   const context = (await service.assemble(request())).marketPackages[0].evidenceContext;
   assert.equal(context.evidence.filter(entry => entry.item.canonicalUrl === recapUrl).length, 2);
-  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e4', sessionDate: '2026-09-04'}]);
+  assert.deepEqual(context.furtherReadings, [{evidenceRef: 'e4', sessionDate: '2026-09-04', kind: 'RECAP'}]);
 });
 
 test('Further Readings preserves each available recap anchor before validated general CNBC evidence', async () => {
   for (const scenario of [
     {yahoo: true, cnbc: false, expected: [
-      'Stock market today: September 4 recap', 'CNBC market news item 1'
+      'Stock market today: September 4 recap'
     ]},
     {yahoo: false, cnbc: true, expected: [
-      'Stock market news for Sept. 4, 2026', 'CNBC market news item 1'
+      'Stock market news for Sept. 4, 2026'
     ]}
   ]) {
     const overrides = {
@@ -3033,7 +4806,7 @@ test('successful CNBC recap remains in the package when general bounded search f
   }]);
   assert.deepEqual(context.furtherReadings, [{
     evidenceRef: cnbcEvidence[0].reference,
-    sessionDate: '2026-09-04'
+    sessionDate: '2026-09-04', kind: 'RECAP'
   }]);
   assert.equal(context.unresolvedGaps.includes(CNBC_RECAP_UNAVAILABLE_GAP), false);
   assert.equal(context.unresolvedGaps.includes(CNBC_NEWS_RESEARCH_UNAVAILABLE_GAP), true);
@@ -3187,7 +4960,8 @@ test('unavailable or inconsistent canonical benchmark boundaries degrade CNBC on
   const oneSession = createFiveSessionSnapshot({
     market: 'US', symbol: '^RUT', instrumentName: 'benchmark', instrumentType: 'INDEX',
     currency: 'USD', marketState: 'CLOSED',
-    completedSessions: [snapshot('^RUT').completedSessions[1]], currentOverlay: null
+    completedSessions: [snapshotForLatestDate('^RUT', '2026-09-04').completedSessions[4]],
+    currentOverlay: null
   });
   let researchCalls = 0;
   const diagnostics = [];
@@ -3232,7 +5006,7 @@ test('requires non-empty normalized US anchors without any backend symbol assump
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
-test('continues with one deterministic unresolved gap when Federal Reserve acquisition fails', async () => {
+cnbcFilterOffTest('continues with one deterministic unresolved gap when Federal Reserve acquisition fails', async () => {
   const {service} = harness({
     federalReserveEvidenceAcquisition: {async acquireEvidence() { throw new Error('unavailable'); }}
   });
@@ -3245,20 +5019,30 @@ test('continues with one deterministic unresolved gap when Federal Reserve acqui
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
 
-test('fails closed for future-dated Yahoo or Federal Reserve evidence', async () => {
+test('omits future-dated Yahoo or Federal Reserve evidence without losing valid peers', async () => {
   const future = '2026-09-07T10:00:00Z';
   const yahoo = harness({
     yahooEvidenceAcquisition: {async acquireEvidence({symbol}) { return yahooEvidence(symbol, future); }}
   }).service;
-  await assert.rejects(yahoo.assemble(request()), /Future-dated evidence/);
+  const yahooOutput = await yahoo.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(yahooOutput), true);
+  assert.equal(yahooOutput.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.publishedAt === future), false);
+  assert.equal(yahooOutput.marketPackages[0].evidenceContext.evidence[0].reference, 'e1');
+  assert.ok(yahooOutput.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('Future-dated evidence was omitted')));
 
   const fed = harness({
     federalReserveEvidenceAcquisition: {async acquireEvidence() { return fedEvidence(future); }}
   }).service;
-  await assert.rejects(fed.assemble(request()), /Future-dated evidence/);
+  const fedOutput = await fed.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(fedOutput), true);
+  assert.equal(fedOutput.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.publishedAt === future), false);
+  assert.deepEqual(fedOutput.marketPackages[0].evidenceContext.authoritativeFacts, ['e1', 'e2']);
 });
 
-test('uses acquisition start for research and final assembly time for strict future-evidence validation', async () => {
+test('uses final assembly time to retain newly published evidence and omit future evidence', async () => {
   const acquisitionStartedAt = '2026-09-06T10:00:00.000Z';
   const evidencePublishedAt = '2026-09-06T10:00:01.000Z';
   const finalGeneratedAt = '2026-09-06T10:00:02.000Z';
@@ -3292,35 +5076,273 @@ test('uses acquisition start for research and final assembly time for strict fut
     },
     onDiagnostics(value) { diagnostics.push(value); }
   });
-  await assert.rejects(future.service.assemble(request()), /Future-dated evidence/);
-  assert.deepEqual(diagnostics.find(value => value.stage === 'analysisPackageAssemblyFailure'), {
-    stage: 'analysisPackageAssemblyFailure',
-    failureStage: 'FUTURE_DATED_EVIDENCE_VALIDATION'
+  const futureOutput = await future.service.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(futureOutput), true);
+  assert.equal(futureOutput.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.publishedAt === '2026-09-06T10:00:03.000Z'), false);
+  assert.deepEqual(diagnostics.find(value => value.stage === 'futureEvidenceOmission'), {
+    stage: 'futureEvidenceOmission', omittedReferenceCount: 1,
+    causalClassificationDiscarded: false
   });
 });
 
-test('fails closed for required telemetry, persistence and Yahoo evidence failures', async () => {
+test('zero telemetry fails but persistence and Yahoo evidence failures preserve other material', async () => {
   const telemetry = harness({
     createTelemetryAcquisition: () => ({async acquireSnapshot() { throw new Error('telemetry failed'); }})
   }).service;
-  await assert.rejects(telemetry.assemble(request()), /telemetry failed/);
+  await assert.rejects(telemetry.assemble(request()), /No validated US telemetry/);
 
   const persistence = harness({
     snapshotPersistence: {async persistSnapshot() { throw new Error('persistence failed'); }}
   }).service;
-  await assert.rejects(persistence.assemble(request()), /persistence failed/);
+  const persistedFallback = await persistence.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(persistedFallback), true);
+  assert.ok(persistedFallback.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('The saved price history could not be checked')));
 
   const yahoo = harness({
     yahooEvidenceAcquisition: {async acquireEvidence() { throw new Error('Yahoo failed'); }}
   }).service;
-  await assert.rejects(yahoo.assemble(request()), /Yahoo failed/);
+  const yahooFallback = await yahoo.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(yahooFallback), true);
+  assert.ok(yahooFallback.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('Some Yahoo Finance market data was missing')));
 });
 
-test('rejects inconsistent persisted reconstruction and malformed provider material', async () => {
+test('one failed symbol or evidence item leaves unrelated telemetry and references canonical', async () => {
+  const diagnostics = [];
+  const instance = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        if (symbol === 'AAPL') throw new Error('raw provider failure');
+        return snapshot(symbol);
+      }
+    }),
+    yahooEvidenceAcquisition: {
+      async acquireEvidence({symbol}) {
+        if (symbol === 'MSFT') throw new Error('raw evidence failure');
+        return yahooEvidence(symbol);
+      }
+    },
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  const output = await instance.service.assemble(request('US', {
+    myStocks: [{market: 'US', symbol: 'MSFT'}, {market: 'US', symbol: 'AAPL'}],
+    watchlist: [{market: 'US', symbol: 'NVDA'}]
+  }));
+  assert.equal(validateClaudeAnalysisInput(output), true);
+  assert.deepEqual(output.marketPackages[0].telemetry.stockSnapshots.map(entry => entry.snapshot.symbol),
+    ['MSFT', 'NVDA']);
+  assert.deepEqual(output.portfolioContext.myStocks.map(entry =>
+    [entry.symbol, entry.telemetryRefs, entry.evidenceRefs]), [
+    ['MSFT', ['t2'], []], ['AAPL', [], []]
+  ]);
+  assert.deepEqual(output.portfolioContext.watchlist[0].telemetryRefs, ['t3']);
+  assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry =>
+    entry.item.symbols.includes('AAPL') || entry.item.symbols.includes('MSFT')), false);
+  assert.equal(diagnostics.filter(entry => entry.stage === 'analysisMaterialOmission').length, 2);
+  assert.equal(JSON.stringify(diagnostics).includes('raw provider failure'), false);
+});
+
+test('partial completed-session history remains valid without fabricating missing sessions', async () => {
+  const instance = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        const complete = snapshot(symbol);
+        return createFiveSessionSnapshot({
+          market: 'US', symbol, instrumentName: complete.instrumentName,
+          instrumentType: complete.instrumentType, currency: complete.currency,
+          marketState: complete.marketState,
+          completedSessions: complete.completedSessions.slice(-1), currentOverlay: null
+        });
+      }
+    })
+  });
+  const output = await instance.service.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(output), true);
+  assert.equal(output.marketPackages[0].telemetry.benchmarkSnapshots[0].snapshot.completeness,
+    'PARTIAL');
+  assert.equal(output.marketPackages[0].telemetry.benchmarkSnapshots[0].snapshot.completedSessions.length,
+    1);
+});
+
+test('Step 8U.10: a failed benchmark does not stop portfolio acquisition and completed classification degrades', async () => {
+  const diagnostics = [];
+  const attemptedSymbols = [];
+  const instance = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        attemptedSymbols.push(symbol);
+        if (symbol === '^RUT') throw new Error('benchmark unavailable');
+        return snapshot(symbol);
+      }
+    }),
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  const output = await instance.service.assemble(request('US', {
+    myStocks: [{market: 'US', symbol: 'MSFT'}]
+  }));
+  assertClassifierFallback(output, diagnostics);
+  assert.deepEqual(attemptedSymbols, ['^RUT', 'MSFT']);
+  assert.deepEqual(instance.calls.yahoo, ['MSFT']);
+  assert.ok(diagnostics.some(value => value.stage === 'analysisMaterialOmission'
+    && value.symbol === '^RUT' && value.source === 'YAHOO_TELEMETRY'));
+});
+
+test('Step 8U.10: completed classifier failure degrades alongside recoverable source failures', async () => {
+  const diagnostics = [];
+  const instance = harness({
+    onDiagnostics(value) { diagnostics.push(value); },
+    snapshotPersistence: {async persistSnapshot() { throw new Error('database unavailable'); }},
+    federalReserveEvidenceAcquisition: {async acquireEvidence() { throw new Error('Fed unavailable'); }},
+    evidenceRoleClassification: {
+      async classifyEvidenceRoles() { return {ok: false, type: 'UPSTREAM_FAILURE'}; }
+    }
+  });
+  const output = await instance.service.assemble(request());
+  assertClassifierFallback(output, diagnostics);
+  assert.deepEqual(instance.calls.persistence, []);
+  assert.deepEqual(instance.calls.yahoo, ['^RUT']);
+});
+
+test('logs sanitized snapshot persistence and readback validation failure subtypes', async () => {
+  const persistenceSubtypes = [
+    'SNAPSHOT_READ_INVALID',
+    'SNAPSHOT_CALENDAR_UNSUPPORTED',
+    'SNAPSHOT_CONTINUITY_INVALID',
+    'SNAPSHOT_READ_MISMATCH',
+    'SNAPSHOT_PERSISTENCE_FAILED'
+  ];
+
+  for (const failureSubtype of persistenceSubtypes) {
+    const diagnostics = [];
+    const failure = Object.assign(new Error('secret persisted row and provider payload'), {
+      code: failureSubtype,
+      persistedRows: [{close: 123.45}],
+      providerPayload: {secret: 'must-not-leak'}
+    });
+    const instance = harness({
+      snapshotPersistence: {async persistSnapshot() { throw failure; }},
+      onDiagnostics(value) { diagnostics.push(value); }
+    });
+
+    const output = await instance.service.assemble(request());
+    assert.equal(validateClaudeAnalysisInput(output), true);
+    assert.deepEqual(
+      diagnostics.find(value => value.stage === 'snapshotPersistenceReadbackFailure'),
+      {
+        stage: 'snapshotPersistenceReadbackFailure',
+        symbol: '^RUT',
+        boundary: 'PERSISTENCE',
+        failureSubtype
+      }
+    );
+    assert.deepEqual(instance.calls.yahoo, ['^RUT']);
+    const serialized = JSON.stringify(diagnostics);
+    assert.equal(serialized.includes('secret persisted row'), false);
+    assert.equal(serialized.includes('must-not-leak'), false);
+    assert.equal(serialized.includes('123.45'), false);
+  }
+
+  const diagnostics = [];
+  const invalidReadback = harness({
+    snapshotPersistence: {async persistSnapshot() { return snapshot('WRONG'); }},
+    onDiagnostics(value) { diagnostics.push(value); }
+  });
+  const recoveredReadback = await invalidReadback.service.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(recoveredReadback), true);
+  assert.deepEqual(
+    diagnostics.find(value => value.stage === 'snapshotPersistenceReadbackFailure'),
+    {
+      stage: 'snapshotPersistenceReadbackFailure',
+      symbol: '^RUT',
+      boundary: 'POST_READBACK_VALIDATION',
+      failureSubtype: 'INVALID_PERSISTED_SNAPSHOT'
+    }
+  );
+  assert.deepEqual(invalidReadback.calls.yahoo, ['^RUT']);
+});
+
+test('logs only allowlisted SNAPSHOT_READ_MISMATCH details', async () => {
+  const cases = [
+    {
+      diagnosticDetails: {
+        mismatchReason: 'NEWEST_SESSION_DATE',
+        acquiredNewestSessionDate: '2026-09-04',
+        persistedNewestSessionDate: '2026-09-07',
+        close: 999
+      },
+      expected: {
+        mismatchReason: 'NEWEST_SESSION_DATE',
+        acquiredNewestSessionDate: '2026-09-04',
+        persistedNewestSessionDate: '2026-09-07'
+      }
+    },
+    {
+      diagnosticDetails: {
+        mismatchReason: 'MISSING_ACQUIRED_SESSION',
+        missingSessionDate: '2026-09-03',
+        row: {secret: true}
+      },
+      expected: {mismatchReason: 'MISSING_ACQUIRED_SESSION', missingSessionDate: '2026-09-03'}
+    },
+    {
+      diagnosticDetails: {
+        mismatchReason: 'CANONICAL_SESSION_VALUES',
+        sessionDate: '2026-09-04',
+        differingFields: ['close', 'providerSecret', 'volume'],
+        values: [100, 101]
+      },
+      expected: {
+        mismatchReason: 'CANONICAL_SESSION_VALUES',
+        sessionDate: '2026-09-04',
+        differingFields: ['close', 'volume']
+      }
+    }
+  ];
+
+  for (const testCase of cases) {
+    const diagnostics = [];
+    const failure = Object.assign(new Error('raw database content'), {
+      code: 'SNAPSHOT_READ_MISMATCH',
+      diagnosticDetails: testCase.diagnosticDetails
+    });
+    const instance = harness({
+      snapshotPersistence: {async persistSnapshot() { throw failure; }},
+      onDiagnostics(value) { diagnostics.push(value); }
+    });
+    if (testCase.expected.mismatchReason === 'CANONICAL_SESSION_VALUES') {
+      await assert.rejects(instance.service.assemble(request()), /No validated US telemetry/);
+    } else {
+      const output = await instance.service.assemble(request());
+      assert.equal(validateClaudeAnalysisInput(output), true);
+    }
+    assert.deepEqual(
+      diagnostics.find(value => value.stage === 'snapshotPersistenceReadbackFailure'),
+      {
+        stage: 'snapshotPersistenceReadbackFailure',
+        symbol: '^RUT',
+        boundary: 'PERSISTENCE',
+        failureSubtype: 'SNAPSHOT_READ_MISMATCH',
+        ...testCase.expected
+      }
+    );
+    assert.deepEqual(instance.calls.yahoo,
+      testCase.expected.mismatchReason === 'CANONICAL_SESSION_VALUES' ? [] : ['^RUT']);
+    const serialized = JSON.stringify(diagnostics);
+    assert.equal(serialized.includes('raw database content'), false);
+    assert.equal(serialized.includes('providerSecret'), false);
+    assert.equal(serialized.includes('"values"'), false);
+    assert.equal(serialized.includes('"close":999'), false);
+  }
+});
+
+test('isolates inconsistent persisted reconstruction and malformed optional provider material', async () => {
   const wrongPersistence = harness({
     snapshotPersistence: {async persistSnapshot() { return snapshot('WRONG'); }}
   }).service;
-  await assert.rejects(wrongPersistence.assemble(request()), /Invalid canonical US snapshot/);
+  const readbackFallback = await wrongPersistence.assemble(request());
+  assert.equal(validateClaudeAnalysisInput(readbackFallback), true);
 
   const malformedFed = harness({
     federalReserveEvidenceAcquisition: {async acquireEvidence() { return null; }}
@@ -3358,3 +5380,1526 @@ test('returns immutable output without mutating membership or acquired canonical
   assert.equal(Object.isFrozen(acquiredEvidence), true);
   assert.equal(validateClaudeAnalysisInput(output), true);
 });
+
+// ── Step 8K: relevance ranking before the active Yahoo article fetch, and the candidate audit log ──
+function step8kCandidate(headline, extra = {}) {
+  const slug = headline.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return {
+    headline, url: `https://finance.yahoo.com/news/${slug}.html`, uuid: null,
+    publisher: 'Yahoo Finance', ...extra
+  };
+}
+
+function step8kUsableArticle(candidate, publishedAt = '2026-09-08T14:30:00.000Z') {
+  return {ok: true, type: 'SUCCESS', articleContent: {
+    sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url, headline: candidate.headline,
+    publisher: 'Yahoo Finance', publishedAt, updatedAt: null,
+    articleText: 'Usable current-session article content.'
+  }};
+}
+
+// Step 9F.2e.4a: the reader's try-order switch (SCORE_TRY_ORDER_ENABLED) is
+// read from process.env on every run. The tier-order tests below run with it
+// off (today's order, unchanged); each also checks the score order with it on.
+async function withScoreTryOrder(value, operation) {
+  const saved = process.env.SCORE_TRY_ORDER_ENABLED;
+  process.env.SCORE_TRY_ORDER_ENABLED = value;
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.SCORE_TRY_ORDER_ENABLED;
+    else process.env.SCORE_TRY_ORDER_ENABLED = saved;
+  }
+}
+
+async function step8kActiveRun({candidates, myStocks = [], watchlist = [], mostActive = [], acquire = null,
+  discoveryExtra = {}, clock = {}, extra = {}}) {
+  const diagnostics = [];
+  const {service, calls} = harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {overlayAsOf: '2026-09-08T14:55:00.000Z'});
+      }
+    }),
+    yahooMostActiveAcquisition: {
+      async acquireMostActive() { return {ok: true, type: 'SUCCESS', candidates: mostActive}; }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates, ...discoveryExtra}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        calls.yahooCurrentNewsArticle.push(candidate);
+        return acquire ? acquire(candidate)
+          : {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
+      }
+    },
+    now: () => new Date('2026-09-08T15:00:00.000Z'),
+    sleep: async () => {},
+    ...clock,
+    // Step 9F.2d.3: e.g. the candidate-pool hook.
+    ...extra,
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const output = await service.assemble(request('US', {myStocks, watchlist}));
+  const auditEvents = diagnostics.filter(value => value.stage === 'activeYahooCandidateAudit');
+  return {
+    output, calls, diagnostics, auditEvents,
+    audit: auditEvents.flatMap(event => event.candidates)
+  };
+}
+
+test('Step 8K the real caller passes My Stocks snapshots so a holding headline outranks a neutral one', async () => {
+  const neutral = step8kCandidate('Quarterly gardening tips for spring');
+  const holding = step8kCandidate('VEEV lifts guidance after a strong quarter');
+  const {audit, calls} = await step8kActiveRun({
+    candidates: [neutral, holding], myStocks: [{market: 'US', symbol: 'VEEV'}]
+  });
+  assert.deepEqual(audit.map(entry => [entry.rank, entry.tier, entry.headline]), [
+    [1, 1, holding.headline], [2, 5, neutral.headline]
+  ]);
+  assert.equal(calls.yahooCurrentNewsArticle[0].url, holding.url);
+});
+
+test('Step 8K the real caller passes Watchlist snapshots so a watchlist headline outranks a neutral one', async () => {
+  const neutral = step8kCandidate('Quarterly gardening tips for spring');
+  const watched = step8kCandidate('AAPL unveils a new product line');
+  const {audit, calls} = await step8kActiveRun({
+    candidates: [neutral, watched], watchlist: [{market: 'US', symbol: 'AAPL'}]
+  });
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.headline]), [
+    [1, watched.headline], [5, neutral.headline]
+  ]);
+  assert.equal(calls.yahooCurrentNewsArticle[0].url, watched.url);
+});
+
+test('Step 8K a headline naming a most-active stock is still ranked first', async () => {
+  const {audit} = await step8kActiveRun({
+    candidates: [step8kCandidate('Oil jumps as Iran tension builds'),
+      step8kCandidate('Microsoft outlook lifts sentiment')],
+    mostActive: [{symbol: 'MSFT', shortName: 'Microsoft', longName: 'Microsoft Corporation'}]
+  });
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.headline]), [
+    [1, 'Microsoft outlook lifts sentiment'], [2, 'Oil jumps as Iran tension builds']
+  ]);
+});
+
+test('Step 8K real headlines: US market and macro stories outrank non-US and lifestyle stories', async () => {
+  const headlines = [
+    'Australian developer axes Sydney suburban data centre plan after local opposition',
+    'Singapore Stocks Rally to Three-Week High; Oiltek International Zooms 13%',
+    "What's a 'normal' age to retire? Experts weigh in",
+    'Stocks fall as Middle East stalemate boosts oil',
+    'Dollar steadies near two-month high as US-Iran stalemate lifts oil, Fed rate hike bets build'
+  ];
+  const {audit, calls} = await step8kActiveRun({candidates: headlines.map(h => step8kCandidate(h))});
+  assert.deepEqual(audit.map(entry => [entry.rank, entry.tier, entry.headline]), [
+    [1, 2, headlines[3]], [2, 2, headlines[4].slice(0, 80)],
+    [3, 4, headlines[0].slice(0, 80)], [4, 4, headlines[1]], [5, 4, headlines[2]]
+  ]);
+  // Step 8K.1: the three non-US and lifestyle headlines are never fetched.
+  assert.deepEqual(audit.map(entry => entry.decision), [
+    'EXTRACTION_FAILED', 'EXTRACTION_FAILED',
+    'SKIPPED_BELOW_RELEVANCE_FLOOR', 'SKIPPED_BELOW_RELEVANCE_FLOOR', 'SKIPPED_BELOW_RELEVANCE_FLOOR'
+  ]);
+  assert.equal(calls.yahooCurrentNewsArticle.length, 2);
+});
+
+test('Step 8K whole-word matching: Oiltek is not oil and generic words do not add relevance', async () => {
+  const {audit} = await step8kActiveRun({candidates: [
+    step8kCandidate('Oiltek International wins a new contract'),
+    step8kCandidate('Stocks and shares in focus as markets wait'),
+    step8kCandidate('Oil prices jump, crude stays firm'),
+    step8kCandidate('Fed rate cut hopes lift Treasury yields'),
+    step8kCandidate('How to open a savings account')
+  ]});
+  const tierByHeadline = new Map(audit.map(entry => [entry.headline, entry.tier]));
+  assert.equal(tierByHeadline.get('Oiltek International wins a new contract'), 5);
+  assert.equal(tierByHeadline.get('Stocks and shares in focus as markets wait'), 3);
+  assert.equal(tierByHeadline.get('Oil prices jump, crude stays firm'), 2);
+  assert.equal(tierByHeadline.get('Fed rate cut hopes lift Treasury yields'), 2);
+  assert.equal(tierByHeadline.get('How to open a savings account'), 4);
+});
+
+test('Step 8K a tier 1 or tier 2 signal keeps a non-US headline out of the lowest tier', async () => {
+  const {audit} = await step8kActiveRun({candidates: [
+    step8kCandidate('Singapore retirement savings guide'),
+    step8kCandidate('US tariffs on China hit Nasdaq futures')
+  ]});
+  assert.deepEqual(audit.map(entry => entry.tier), [2, 4]);
+});
+
+test('Step 8K.1 tier 4a candidates are dropped before fetching and stay in the audit', async () => {
+  const headlines = ['Singapore retirement savings guide', 'Australian mortgage rates explained',
+    'How to choose a credit card', 'ASX slips on local news', 'Malaysia and Indonesia budgets'];
+  const {audit, calls} = await step8kActiveRun({candidates: headlines.map(h => step8kCandidate(h))});
+  assert.equal(calls.yahooCurrentNewsArticle.length, 0);
+  assert.equal(audit.length, headlines.length);
+  assert.ok(audit.every(entry => entry.tier === 4 && entry.decision === 'SKIPPED_BELOW_RELEVANCE_FLOOR'));
+});
+
+test('Step 8K.1 tier 4b China and India headlines are kept, fetched and ranked last', async () => {
+  const china = step8kCandidate('China May Reopen Chip Export Market');
+  const india = step8kCandidate('India growth outlook improves');
+  const neutral = step8kCandidate('Neutral story number 1');
+  const dropped = step8kCandidate('Singapore stocks rally');
+  const macro = step8kCandidate('Oil jumps on Iran tension');
+  const {audit, calls} = await step8kActiveRun({candidates: [china, dropped, india, neutral, macro]});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.decision]), [
+    [2, 'EXTRACTION_FAILED'], [4, 'EXTRACTION_FAILED'],
+    [4, 'EXTRACTION_FAILED'], [5, 'EXTRACTION_FAILED'],
+    [4, 'SKIPPED_BELOW_RELEVANCE_FLOOR']
+  ]);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url),
+    [macro.url, china.url, india.url, neutral.url]);
+});
+
+test('Step 8K.1 a China or India headline is kept even when it also matches a tier 4a term', async () => {
+  const {audit, calls} = await step8kActiveRun({candidates: [
+    step8kCandidate('Singapore retirement funds eye China rebound'),
+    step8kCandidate('Australia miners rally on India demand')
+  ]});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.decision]), [
+    [4, 'EXTRACTION_FAILED'], [4, 'EXTRACTION_FAILED']
+  ]);
+  assert.equal(calls.yahooCurrentNewsArticle.length, 2);
+});
+
+test('Step 8K.1 Hong Kong, Hang Seng, Nikkei and FTSE headlines are kept and ranked last', async () => {
+  const kept = ['Hong Kong shares slide overnight', 'Hang Seng falls on property worries',
+    'Nikkei hits record high', 'FTSE 100 edges up in early trade'].map(h => step8kCandidate(h));
+  const neutral = step8kCandidate('Neutral story number 1');
+  const {audit, calls} = await step8kActiveRun({candidates: kept.concat(neutral)});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.decision]), [
+    ...kept.map(() => [4, 'EXTRACTION_FAILED']), [5, 'EXTRACTION_FAILED']
+  ]);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url),
+    [...kept.map(candidate => candidate.url), neutral.url]);
+});
+
+test('Step 8K.1 STI matches as a whole word only: stimulus and investing are not dropped', async () => {
+  const {audit} = await step8kActiveRun({candidates: [
+    step8kCandidate('Stimulus hopes lift sentiment'), step8kCandidate('Investing for the long run'),
+    step8kCandidate('STI closes higher')
+  ]});
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.decision]), [
+    ['Stimulus hopes lift sentiment', 'EXTRACTION_FAILED'],
+    ['Investing for the long run', 'EXTRACTION_FAILED'],
+    ['STI closes higher', 'SKIPPED_BELOW_RELEVANCE_FLOOR']
+  ]);
+});
+
+test('Step 8K.1 "how to" is dropped only at the start of a headline', async () => {
+  const {audit} = await step8kActiveRun({candidates: [
+    step8kCandidate('How to trade volatile markets'), step8kCandidate('Investors weigh how to respond')
+  ]});
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.tier, entry.decision]), [
+    ['Investors weigh how to respond', 5, 'EXTRACTION_FAILED'],
+    ['How to trade volatile markets', 4, 'SKIPPED_BELOW_RELEVANCE_FLOOR']
+  ]);
+});
+
+test('Step 8K.1 a neutral tier 3b headline is not dropped', async () => {
+  const {audit, calls} = await step8kActiveRun({candidates: [step8kCandidate('Quarterly gardening tips for spring')]});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.subTier, entry.decision]),
+    [[5, '3b', 'EXTRACTION_FAILED']]);
+  assert.equal(calls.yahooCurrentNewsArticle.length, 1);
+});
+
+test('Step 8K.1 tier 3a (benchmark index or broad-market term) is ranked above tier 4b', async () => {
+  const tier3a = step8kCandidate('Russell rebounds after a volatile trading day');
+  const tier4b = step8kCandidate('China factory data lifts sentiment');
+  const {audit, calls} = await withScoreTryOrder('off', () => step8kActiveRun({candidates: [tier4b, tier3a]}));
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.subTier, entry.headline]), [
+    [3, '3a', tier3a.headline], [4, '4b', tier4b.headline]
+  ]);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url), [tier3a.url, tier4b.url]);
+  // Step 9F.2e.4a, switch on: Asia/Europe (3 points) is tried before generic (1 point).
+  const scored = await withScoreTryOrder('on', () => step8kActiveRun({candidates: [tier4b, tier3a]}));
+  assert.deepEqual(scored.calls.yahooCurrentNewsArticle.map(call => call.url), [tier4b.url, tier3a.url]);
+});
+
+test('Step 8K.1 tier 3b (no relevance signal) is ranked last, below tier 4b', async () => {
+  const tier4b = step8kCandidate('Nikkei climbs on tech rally');
+  const tier3b = step8kCandidate('Quarterly gardening tips for spring');
+  const {audit, calls} = await step8kActiveRun({candidates: [tier3b, tier4b]});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.subTier, entry.headline]), [
+    [4, '4b', tier4b.headline], [5, '3b', tier3b.headline]
+  ]);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url), [tier4b.url, tier3b.url]);
+});
+
+test('Step 8K.1 a Singapore/lifestyle drop term still wins over a bare tier 3a word in the same headline', async () => {
+  const {audit} = await step8kActiveRun({candidates: [step8kCandidate('Singapore stocks rally')]});
+  assert.deepEqual(audit.map(entry => [entry.tier, entry.subTier, entry.decision]),
+    [[4, '4a', 'SKIPPED_BELOW_RELEVANCE_FLOOR']]);
+});
+
+test('Step 8K.1 the candidate audit records the sub-tier alongside the tier for every candidate', async () => {
+  const identity = step8kCandidate('AAPL unveils a new product line');
+  const macro = step8kCandidate('Fed rate cut hopes lift Treasury yields');
+  const tier3a = step8kCandidate('Broad market stocks rally on trading day');
+  const tier4b = step8kCandidate('China factory data lifts sentiment');
+  const tier4a = step8kCandidate('Singapore retirement savings guide');
+  const tier3b = step8kCandidate('Quarterly gardening tips for spring');
+  const {audit} = await step8kActiveRun({
+    candidates: [identity, macro, tier3a, tier4b, tier4a, tier3b], watchlist: [{market: 'US', symbol: 'AAPL'}]
+  });
+  const subTierByHeadline = new Map(audit.map(entry => [entry.headline, [entry.tier, entry.subTier]]));
+  assert.deepEqual(subTierByHeadline.get(identity.headline), [1, '1a']);
+  assert.deepEqual(subTierByHeadline.get(macro.headline), [2, null]);
+  assert.deepEqual(subTierByHeadline.get(tier3a.headline), [3, '3a']);
+  assert.deepEqual(subTierByHeadline.get(tier4b.headline), [4, '4b']);
+  assert.deepEqual(subTierByHeadline.get(tier4a.headline), [4, '4a']);
+  assert.deepEqual(subTierByHeadline.get(tier3b.headline), [5, '3b']);
+});
+
+test('Step 8K.3 the candidate audit records the edition and the acquisition diagnostic carries the US counts', async () => {
+  const us = step8kCandidate('Oil jumps on Iran tension', {edition: 'US'});
+  const sg = step8kCandidate('Quarterly gardening tips for spring', {edition: 'SG'});
+  const untagged = step8kCandidate('Nikkei climbs on tech rally');
+  const {audit, diagnostics} = await step8kActiveRun({
+    candidates: [us, sg, untagged],
+    discoveryExtra: {usOutcome: 'SHAPE_CHANGED', usSectionCount: 48, usCandidateCount: 0,
+      singaporeCandidateCount: 3, crossEditionDuplicateCount: 2}
+  });
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.edition]), [
+    [us.headline, 'US'], [untagged.headline, null], [sg.headline, 'SG']
+  ]);
+  const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.usNewsOutcome, 'SHAPE_CHANGED');
+  assert.equal(acquisition.usNewsSectionCount, 48);
+  assert.equal(acquisition.usNewsCandidateCount, 0);
+  assert.equal(acquisition.singaporeNewsCandidateCount, 3);
+  assert.equal(acquisition.crossEditionDuplicateCount, 2);
+});
+
+test('Step 8K.3 a discovery service without edition metadata still runs and reports zero US counts', async () => {
+  const {diagnostics} = await step8kActiveRun({candidates: [step8kCandidate('Oil jumps on Iran tension')]});
+  const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.usNewsOutcome, 'NOT_CONFIGURED');
+  assert.equal(acquisition.usNewsCandidateCount, 0);
+  assert.equal(acquisition.crossEditionDuplicateCount, 0);
+});
+
+test('Step 8K.3 ninety worst-case audit entries stay inside the per-event byte budget, all present, none truncated', async () => {
+  const candidates = Array.from({length: 90}, (_, index) => step8kCandidate(
+    `Oil jumps on Iran tension ${String(index).padStart(2, '0')} ${'x'.repeat(100)}`,
+    {edition: index < 60 ? 'US' : 'SG', publisher: 'P'.repeat(60),
+      url: `https://finance.yahoo.com/markets/stocks/articles/${'s'.repeat(80)}-${String(index).padStart(9, '0')}.html`}
+  ));
+  const {auditEvents} = await step8kActiveRun({candidates});
+  const entries = auditEvents.flatMap(event => event.candidates);
+  assert.equal(entries.length, 90);
+  assert.deepEqual(entries.map(entry => entry.rank), Array.from({length: 90}, (_, index) => index + 1));
+  for (const event of auditEvents) {
+    assert.ok(event.candidates.length <= 10);
+    assert.ok(Buffer.byteLength(JSON.stringify({...event, generationId: '0'.repeat(36)}), 'utf8') <= 3400,
+      `event part ${event.part} exceeds the byte budget`);
+    assert.equal(event.parts, auditEvents.length);
+  }
+});
+
+test('Step 8K.1 when every candidate is dropped the limited-evidence path is unchanged', async () => {
+  const {output, calls} = await step8kActiveRun({candidates: [
+    step8kCandidate('Singapore stocks rally'), step8kCandidate('How to choose a credit card')
+  ]});
+  assert.equal(calls.yahooCurrentNewsArticle.length, 0);
+  assert.equal(calls.evidenceRoleClassification.length, 0);
+  assert.ok(output.marketPackages[0].evidenceContext.unresolvedGaps.some(gap =>
+    gap.includes('Not enough current Yahoo Finance news')));
+});
+
+slotsOffTest('Step 8K.1 dropped candidates use no fetch attempts, so the twelve-attempt cap still applies to the rest', async () => {
+  const dropped = Array.from({length: 5}, (_, index) => step8kCandidate(`Singapore story number ${index + 1}`));
+  const neutral = Array.from({length: 16}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
+  const {audit, calls} = await step8kActiveRun({candidates: dropped.concat(neutral)});
+  assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_BELOW_RELEVANCE_FLOOR').length, 5);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 4);
+});
+
+test('Step 8K page order stays stable inside a tier', async () => {
+  const headlines = Array.from({length: 6}, (_, index) => `Neutral story number ${index + 1}`);
+  const {audit} = await step8kActiveRun({candidates: headlines.map(h => step8kCandidate(h))});
+  assert.deepEqual(audit.map(entry => entry.headline), headlines);
+  assert.deepEqual(audit.map(entry => entry.tier), headlines.map(() => 5));
+});
+
+slotsOffTest('Step 8K.5 fetch budget: twelve attempts (raised from eight), six admissions', async () => {
+  const many = Array.from({length: 16}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
+  const unusable = await step8kActiveRun({candidates: many});
+  assert.equal(unusable.calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS, 12);
+  assert.equal(unusable.calls.evidenceRoleClassification.length, 0);
+  assert.equal(unusable.audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 4);
+
+  const usable = Array.from({length: 10}, (_, index) => step8kCandidate(`Oil story number ${index + 1}`));
+  const admitted = await step8kActiveRun({candidates: usable, acquire: step8kUsableArticle});
+  assert.equal(ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES, 6);
+  assert.equal(admitted.calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
+  assert.equal(admitted.audit.filter(entry => entry.decision === 'ADMITTED').length,
+    ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
+  assert.equal(admitted.audit.filter(entry => entry.decision === 'SKIPPED_MAX_ADMITTED').length,
+    usable.length - ACTIVE_YAHOO_MAX_ADMITTED_ARTICLES);
+  assert.equal(admitted.calls.evidenceRoleClassification.length, 1);
+});
+
+test('Step 8K candidate audit lists all candidates in numbered parts of at most ten', async () => {
+  const candidates = Array.from({length: 23}, (_, index) => step8kCandidate(`Neutral story number ${index + 1}`));
+  const {auditEvents, audit} = await step8kActiveRun({candidates});
+  assert.deepEqual(auditEvents.map(event => [event.part, event.parts, event.candidates.length]), [
+    [1, 3, 10], [2, 3, 10], [3, 3, 3]
+  ]);
+  assert.deepEqual(audit.map(entry => entry.rank), Array.from({length: 23}, (_, index) => index + 1));
+  assert.equal(auditEvents[0].windowStartsAtInclusive, '2026-09-04T20:00:00.000Z');
+  assert.equal(auditEvents[0].windowEndsAtInclusive, '2026-09-08T15:00:00.000Z');
+});
+
+slotsOffTest('Step 8K candidate audit records the decision for each rejection type', async () => {
+  const candidates = ['exception', 'timeout', 'extraction', 'notime', 'before', 'after', 'admitted',
+    'duplicate', 'fillone', 'filltwo', 'fillthree', 'fillfour', 'last'
+  ].map(name => step8kCandidate(`Neutral ${name} story`));
+  const byName = name => candidates.find(candidate => candidate.headline === `Neutral ${name} story`);
+  const {audit, calls} = await step8kActiveRun({
+    candidates,
+    acquire: async candidate => {
+      if (candidate.headline === byName('exception').headline) throw new Error('network');
+      if (candidate.headline === byName('timeout').headline) {
+        return {ok: false, type: 'TIMEOUT', articleContent: null};
+      }
+      if (['fillone', 'filltwo', 'fillthree', 'fillfour'].some(name => candidate.headline === byName(name).headline)) {
+        return {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
+      }
+      if (candidate.headline === byName('extraction').headline) return {
+        ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null,
+        extractionFailureType: 'NO_ARTICLE_BODY_CONTAINER_OR_TEXT'
+      };
+      if (candidate.headline === byName('notime').headline) {
+        const value = step8kUsableArticle(candidate);
+        return {...value, articleContent: {...value.articleContent, publishedAt: null}};
+      }
+      if (candidate.headline === byName('before').headline) return step8kUsableArticle(candidate, '2026-09-03T19:00:00.000Z');
+      if (candidate.headline === byName('after').headline) return step8kUsableArticle(candidate, '2026-09-08T15:30:00.000Z');
+      if (candidate.headline === byName('duplicate').headline) {
+        const value = step8kUsableArticle(byName('admitted'));
+        return {...value, articleContent: {...value.articleContent, headline: candidate.headline}};
+      }
+      return step8kUsableArticle(candidate);
+    }
+  });
+  // Step 9F.1d: the timeout is downloaded 3 times, but the cap counts articles tried.
+  assert.equal(new Set(calls.yahooCurrentNewsArticle.map(call => call.url)).size,
+    ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS + 2);
+  const byHeadline = new Map(audit.map(entry => [entry.headline, entry]));
+  const decision = name => byHeadline.get(`Neutral ${name} story`);
+  assert.deepEqual([decision('exception').decision, decision('exception').failureType,
+    decision('exception').attempts], ['FETCH_FAILED', 'EXCEPTION', 1]);
+  assert.deepEqual([decision('timeout').decision, decision('timeout').failureType,
+    decision('timeout').attempts], ['FETCH_FAILED', 'TIMEOUT', 3]);
+  assert.deepEqual([decision('extraction').decision, decision('extraction').failureType],
+    ['EXTRACTION_FAILED', 'NO_ARTICLE_BODY_CONTAINER_OR_TEXT']);
+  assert.equal(decision('notime').decision, 'REJECTED_NO_PUBLICATION_TIME');
+  assert.deepEqual([decision('before').decision, decision('before').publishedAt],
+    ['REJECTED_BEFORE_READING_WINDOW', '2026-09-03T19:00:00.000Z']);
+  assert.deepEqual([decision('after').decision, decision('after').publishedAt],
+    ['REJECTED_AFTER_READING_WINDOW', '2026-09-08T15:30:00.000Z']);
+  assert.equal(decision('admitted').decision, 'ADMITTED');
+  assert.equal(decision('duplicate').decision, 'REJECTED_DUPLICATE');
+  assert.equal(decision('last').decision, 'SKIPPED_MAX_ATTEMPTS');
+});
+
+test('Step 8K candidate audit events stay under 3.5 KB, truncate text and carry no article text or URL query', async () => {
+  const candidates = Array.from({length: 30}, (_, index) => {
+    const headline = `日本語${index} `.repeat(40);
+    return {
+      headline, uuid: null, publisher: 'Very Long Publisher Name '.repeat(6),
+      url: `https://finance.yahoo.com/news/${'long-slug-segment-'.repeat(8)}${index}.html?utm=SECRETQUERY`
+    };
+  });
+  const {auditEvents, audit} = await step8kActiveRun({candidates});
+  assert.equal(audit.length, 30);
+  for (const event of auditEvents) {
+    const bytes = Buffer.byteLength(JSON.stringify({
+      ...event, generationId: '0123456789abcdef0123456789abcdef'
+    }), 'utf8');
+    assert.ok(bytes <= 3500, `event part ${event.part} is ${bytes} bytes`);
+    assert.equal(event.parts, auditEvents.length);
+  }
+  for (const entry of audit) {
+    assert.ok(Array.from(entry.headline).length <= 80);
+    assert.ok(Array.from(entry.publisher).length <= 24);
+    assert.ok(entry.slug.length <= 48);
+  }
+  const serialized = JSON.stringify(auditEvents);
+  assert.equal(serialized.includes('SECRETQUERY'), false);
+  assert.equal(serialized.includes('articleText'), false);
+});
+
+test('Step 9F.1e a Yahoo news listing of the Yahoo recap article is a duplicate, not a second item', async () => {
+  const article = yahooRecapArticle();
+  const listing = {headline: article.headline, url: article.canonicalUrl, uuid: null,
+    publisher: 'Yahoo Finance'};
+  const other = step8kCandidate('Neutral weekend story');
+  const diagnostics = [];
+  const {service} = harness({
+    sleep: async () => {},
+    yahooRecapResearch: {async discoverAndValidateRecap() { return yahooRecapResearchSuccess(); }},
+    yahooRecapArticleContentAcquisition: {
+      async acquireArticleContent() { return {ok: true, type: 'SUCCESS', articleContent: article}; }
+    },
+    yahooRecapEvidenceConstruction: {
+      constructEvidence(value) { return yahooRecapEvidenceSuccess(value.articleContent, value.horizon); }
+    },
+    yahooLatestNewsDiscovery: {
+      async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates: [listing, other]}; }
+    },
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        return step8kUsableArticle(candidate, '2026-09-05T15:00:00.000Z');
+      }
+    },
+    onDiagnostics: value => diagnostics.push(value)
+  });
+  const output = await service.assemble(request());
+  const items = output.marketPackages[0].evidenceContext.evidence.map(entry => entry.item);
+  assert.equal(items.filter(item => item.canonicalUrl === article.canonicalUrl).length, 1);
+  assert.equal(items.at(-1).canonicalUrl, other.url);
+  const audit = diagnostics.filter(value => value.stage === 'activeYahooCandidateAudit')
+    .flatMap(event => event.candidates);
+  assert.deepEqual(audit.map(entry => entry.decision), ['REJECTED_DUPLICATE', 'ADMITTED']);
+  assert.equal(audit[1].afterClose, true);
+});
+
+test('Step 9F.1e completed-session runs emit the candidate audit event in the active style', async () => {
+  const diagnostics = [];
+  const {service} = harness({onDiagnostics: value => diagnostics.push(value)});
+  await service.assemble(request());
+  const audit = diagnostics.filter(value => value.stage === 'activeYahooCandidateAudit');
+  assert.deepEqual(audit.map(event => [event.part, event.parts, event.candidates.length]), [[1, 1, 0]]);
+  assert.equal(audit[0].windowStartsAtInclusive, null);
+  assert.equal(audit[0].readingWindowStartsAt, '2026-09-03T20:00:00.000Z');
+  assert.ok(diagnostics.some(value => value.stage === 'activeYahooAcquisition'
+    && value.outcome === 'NOT_FOUND'));
+});
+
+// ---- Step 8K.5: label ordering (Step 9F.1c), twelve attempts, and the tier reorder ----
+test('Step 9F.1c a candidate whose label says it is older than the reading window start plus four hours is tried last, not skipped', async () => {
+  // REGULAR run at 2026-09-08T15:00Z; the reading window starts 2026-09-03T20:00Z (115 h earlier); tolerance 4 h, so 119 h is the boundary.
+  const labelled = (name, ageLabel) => step8kCandidate(`Neutral ${name} story`, ageLabel ? {ageLabel} : {});
+  const candidates = [
+    labelled('fresh', '3h ago'), labelled('boundary', '119h ago'), labelled('stalehours', '120h ago'),
+    labelled('staledays', '6d ago'), labelled('yesterday', 'yesterday'), labelled('nolabel', null),
+    labelled('weeks', '3 weeks ago'), labelled('minutes', '12 min ago')
+  ];
+  const {audit, calls, diagnostics} = await withScoreTryOrder('off', () => step8kActiveRun({candidates}));
+  const entryOf = name => audit.find(entry => entry.headline === `Neutral ${name} story`);
+  for (const name of ['fresh', 'boundary', 'stalehours', 'staledays', 'yesterday', 'nolabel', 'weeks', 'minutes']) {
+    assert.equal(entryOf(name).decision, 'EXTRACTION_FAILED', name);
+  }
+  assert.equal(entryOf('stalehours').labelOld, true);
+  assert.equal(entryOf('staledays').labelOld, true);
+  assert.equal(entryOf('boundary').labelOld, undefined);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(candidate => candidate.headline),
+    ['fresh', 'boundary', 'yesterday', 'nolabel', 'weeks', 'minutes', 'stalehours', 'staledays']
+      .map(name => `Neutral ${name} story`));
+  assert.equal(entryOf('fresh').ageLabel, '3h ago');
+  assert.equal(entryOf('nolabel').ageLabel, null);
+  const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.equal(acquisition.staleByLabelCount, 2);
+  assert.equal(acquisition.articleFetchAttemptCount, 8);
+  // Step 9F.2e.4a, switch on: the same two go last; the rest by recency points,
+  // then the newer label, with no readable label counted as the oldest.
+  const scored = await withScoreTryOrder('on', () => step8kActiveRun({candidates}));
+  assert.deepEqual(scored.calls.yahooCurrentNewsArticle.map(candidate => candidate.headline),
+    ['minutes', 'fresh', 'boundary', 'yesterday', 'nolabel', 'weeks', 'stalehours', 'staledays']
+      .map(name => `Neutral ${name} story`));
+});
+
+slotsOffTest('Step 9F.1c label-old candidates go behind fresh ones and the twelve-attempt cap still applies', async () => {
+  const stale = Array.from({length: 14}, (_, index) => step8kCandidate(`Neutral old story ${index + 1}`, {ageLabel: '6d ago'}));
+  const fresh = Array.from({length: 14}, (_, index) => step8kCandidate(`Neutral new story ${index + 1}`, {ageLabel: '2h ago'}));
+  const {audit, calls} = await step8kActiveRun({candidates: stale.concat(fresh)});
+  assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.ok(calls.yahooCurrentNewsArticle.every(candidate => candidate.headline.startsWith('Neutral new story')));
+  assert.equal(audit.filter(entry => entry.labelOld === true).length, 14);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 16);
+});
+
+test('Step 9F.1c an unusable or missing label never moves a candidate', async () => {
+  const unusable = ['', '   ', 'just now', '5 ago', 'ago 5d', '5 fortnights ago', '99999d ago'];
+  const candidates = unusable.map((ageLabel, index) => step8kCandidate(`Neutral odd label story ${index + 1}`, {ageLabel}));
+  const {audit, calls} = await step8kActiveRun({candidates: [
+    step8kCandidate('Neutral huge label story', {ageLabel: '9999d ago'})
+  ].concat(candidates)});
+  // "9999d ago" parses (four digits) and is label-old, so it is tried last; nothing is skipped.
+  assert.equal(audit.filter(entry => entry.labelOld === true).length, 1);
+  assert.equal(audit.filter(entry => entry.decision === 'EXTRACTION_FAILED').length, unusable.length + 1);
+  assert.equal(calls.yahooCurrentNewsArticle.at(-1).headline, 'Neutral huge label story');
+});
+
+test('Step 8K.5 tier order: portfolio, then wire market wrap, then most-active only, then other macro', async () => {
+  const plainMacro = step8kCandidate('Oil jumps on Iran tension');
+  const mostActiveOnly = step8kCandidate('Intel unveils a new chip line');
+  const wireWrap = step8kCandidate('US stock futures slip as oil rises', {publisher: 'Reuters'});
+  const portfolio = step8kCandidate('AAPL unveils a new product line');
+  const inputs = {
+    candidates: [plainMacro, mostActiveOnly, wireWrap, portfolio],
+    watchlist: [{market: 'US', symbol: 'AAPL'}],
+    mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
+  };
+  const {audit, calls} = await withScoreTryOrder('off', () => step8kActiveRun(inputs));
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.tier, entry.subTier]), [
+    [portfolio.headline, 1, '1a'], [wireWrap.headline, 2, '2w'],
+    [mostActiveOnly.headline, 1, '1b'], [plainMacro.headline, 2, null]
+  ]);
+  assert.deepEqual(calls.yahooCurrentNewsArticle.map(call => call.url),
+    [portfolio.url, wireWrap.url, mostActiveOnly.url, plainMacro.url]);
+  // Step 9F.2e.4a, switch on: wire macro wrap (25), plain macro (20), Most
+  // Active (12), portfolio (8); the audit rows keep their tier ranks.
+  const scored = await withScoreTryOrder('on', () => step8kActiveRun(inputs));
+  assert.deepEqual(scored.calls.yahooCurrentNewsArticle.map(call => call.url),
+    [wireWrap.url, plainMacro.url, mostActiveOnly.url, portfolio.url]);
+  assert.deepEqual(scored.audit.map(entry => [entry.rank, entry.tryRank]), [[1, 4], [2, 1], [3, 3], [4, 2]]);
+});
+
+test('Step 8K.5 a wire partner without a tier 2 term does not jump ahead of a most-active headline', async () => {
+  const wireNoMacro = step8kCandidate('Retailer names a new chief executive', {publisher: 'Reuters'});
+  const mostActiveOnly = step8kCandidate('Intel unveils a new chip line');
+  const {audit} = await step8kActiveRun({
+    candidates: [wireNoMacro, mostActiveOnly],
+    mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
+  });
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.subTier]),
+    [[mostActiveOnly.headline, '1b'], [wireNoMacro.headline, '3b']]);
+});
+
+test('Step 8K.5 a wire market wrap outranks a same-tier single-company piece regardless of publisher', async () => {
+  const otherPublisher = step8kCandidate('Intel: is the stock a buy at these levels', {publisher: 'Simply Wall St.'});
+  const wrap = step8kCandidate('Stocks fall as Treasury yields climb', {publisher: 'Associated Press'});
+  const {audit} = await step8kActiveRun({
+    candidates: [otherPublisher, wrap],
+    mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
+  });
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.subTier]),
+    [[wrap.headline, '2w'], [otherPublisher.headline, '1b']]);
+});
+
+test('Step 9F.2c.1 publishers other than wire partners (including Simply Wall St, Motley Fool, Insider Monkey) no longer affect ranking order', async () => {
+  const simplyWallSt = step8kCandidate('Neutral gardening story one', {publisher: 'Simply Wall St.'});
+  const motley = step8kCandidate('Neutral gardening story two', {publisher: 'The Motley Fool'});
+  const insider = step8kCandidate('Neutral gardening story three', {publisher: 'Insider Monkey'});
+  const regular = step8kCandidate('Neutral gardening story four');
+  const otherRegular = step8kCandidate('Neutral gardening story five', {publisher: 'Barchart'});
+  const {audit, calls} = await step8kActiveRun({candidates: [simplyWallSt, motley, regular, insider, otherRegular]});
+  // Page order is preserved exactly as given, with no publisher-based reordering.
+  assert.deepEqual(audit.map(entry => entry.headline),
+    [simplyWallSt.headline, motley.headline, regular.headline, insider.headline, otherRegular.headline]);
+  assert.equal(calls.yahooCurrentNewsArticle.length, 5);
+  assert.ok(audit.every(entry => entry.decision === 'EXTRACTION_FAILED'));
+});
+
+test('Step 9F.2c.1 a wire partner still earns its tier 2w bucket but a non-wire publisher never does', async () => {
+  const blogA = step8kCandidate('Intel valuation looks stretched', {publisher: 'Motley Fool'});
+  const active = step8kCandidate('Intel unveils a new chip line');
+  const blogB = step8kCandidate('Intel dividend prospects', {publisher: 'Motley Fool'});
+  const {audit} = await step8kActiveRun({
+    candidates: [blogA, active, blogB],
+    mostActive: [{symbol: 'INTC', shortName: 'Intel Corporation', longName: 'Intel Corporation'}]
+  });
+  // All three match the Intel identity (tier 1b); with no publisher split, page order decides.
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.subTier]),
+    [[blogA.headline, '1b'], [active.headline, '1b'], [blogB.headline, '1b']]);
+});
+
+// ---- Step 9F.2c.1: 3 Oct 2026 approved word-list additions, whole-word matching ----
+test('Step 9F.2c.1 the approved macro-list additions (AI, gold, bonds and similar) rank as tier 2', async () => {
+  const table = [
+    'AI Valuation Correction Could Trigger Wider Market Sell-Off, Margin Calls, Warns',
+    'Ray Dalio warns AI bubble is nearing a breaking point as debt and rates rise',
+    "Michael Burry Is Betting Against Artificial Intelligence (AI). Here's the Case for...",
+    'Oracle stock falls on more debt to fund AI chip buying, OpenAI revenue disclosure',
+    'Gold edges higher as bond yields ease'
+  ];
+  const candidates = table.map(headline => step8kCandidate(headline));
+  const {audit} = await step8kActiveRun({candidates});
+  // All five are expected tier 2, so they keep page order in the audit (ties are
+  // broken by page order); compare by position rather than by headline, since the
+  // audit truncates long headlines to 80 characters.
+  assert.deepEqual(audit.map(entry => entry.tier), table.map(() => 2));
+});
+
+test('Step 9F.2c.1 whole-word matching: a new macro term must not match inside another word', async () => {
+  const notGold = step8kCandidate('Goldman Sachs raises its price target');
+  const notAiSaid = step8kCandidate('Analysts said shares were fairly valued');
+  const notAiAig = step8kCandidate('AIG posts quarterly results');
+  const notEu = step8kCandidate('Neutral rating on retailer');
+  const {audit} = await step8kActiveRun({candidates: [notGold, notAiSaid, notAiAig, notEu]});
+  for (const headline of [notGold.headline, notAiSaid.headline, notAiAig.headline, notEu.headline]) {
+    assert.notEqual(audit.find(entry => entry.headline === headline).tier, 2, headline);
+  }
+});
+
+test('Step 9F.2c.1 the approved drop-list additions are dropped, but still protected by a macro match in the same headline', async () => {
+  // "palm oil exporters" already matches the existing tier 2 "oil" term, so this stays protected, as today.
+  const protectedByMacro = step8kCandidate('Malaysian palm oil exporters rally');
+  const dropped = step8kCandidate('Thai baht slips');
+  const {audit} = await step8kActiveRun({candidates: [protectedByMacro, dropped]});
+  assert.deepEqual(audit.map(entry => [entry.headline, entry.tier, entry.decision]), [
+    [protectedByMacro.headline, 2, 'EXTRACTION_FAILED'],
+    [dropped.headline, 4, 'SKIPPED_BELOW_RELEVANCE_FLOOR']
+  ]);
+});
+
+// ---- Step 9F.2c.1b: "AMD" the eye disease must not match the AMD macro term ----
+const STEP_9F2C1B_ROWS = [
+  {headline: 'Kodiak Sciences (KOD) Climbs Nearly 3x on Promising Wet AMD Trial', macro: false},
+  {headline: 'Dry AMD drug wins approval, shares jump', macro: false},
+  {headline: 'Study of age-related macular degeneration shows promise', macro: false},
+  {headline: 'AMD stock jumps on new data center chip', macro: true},
+  {headline: 'Nvidia, Broadcom, and AMD Investors Need to Have Oct. 15 Circled on Their Calendars', macro: true},
+  {headline: 'HPE stock closes at record high on growing networking orders, $1.2 billion AMD Helios order', macro: true},
+  {headline: 'Wet AMD trial results, plus Nvidia earnings preview', macro: true}
+];
+
+test('Step 9F.2c.1b "AMD" the eye disease does not match the AMD macro term, but real chip stories still do', async () => {
+  // Match on the first 80 characters: the audit truncates long headlines, and
+  // two of these rows exceed that length.
+  const candidates = STEP_9F2C1B_ROWS.map(row => step8kCandidate(row.headline));
+  const {audit} = await step8kActiveRun({candidates});
+  for (const row of STEP_9F2C1B_ROWS) {
+    const key = row.headline.slice(0, 80);
+    const entry = audit.find(e => e.headline === key);
+    assert.ok(entry, row.headline);
+    if (row.macro) {
+      assert.equal(entry.tier, 2, row.headline);
+    } else {
+      assert.notEqual(entry.tier, 2, row.headline);
+    }
+  }
+});
+
+// ---- Step 9F.2c.3: new macro terms, the "dollar" currency fix, "Wall Street" removal ----
+// Rows 8 and 10 are still macro overall (via "earnings season" -- Step
+// 9F.2c.4(a) -- and "Fed"/"rate hike" respectively) even though the dollar
+// match is suppressed for that headline.
+// Row 12 is still macro overall (via "Nvidia") even though "Wall Street" no
+// longer matches.
+const STEP_9F2C3_ROWS = [
+  {headline: 'Update: Equities Rise Intraday as Traders Parse Consumer Sentiment Survey', macro: true},
+  {headline: 'Consumer sentiment falls to a five-month low', macro: true},
+  {headline: 'Stock market today: Dow, S&P 500, Nasdaq rally', macro: true},
+  {headline: 'Dollar steadies near two-month high as US-Iran stalemate lifts oil', macro: true},
+  {headline: 'Dollar slips as Treasury yields ease', macro: true},
+  {headline: 'Costco is booming as Americans rethink where every dollar goes', macro: false},
+  {headline: 'Dollar General raises its full-year forecast', macro: false},
+  {headline: 'Dollar Tree shares jump on earnings season', macro: true},
+  {headline: 'Start-up raises billion-dollar round', macro: false},
+  {headline: 'Dollar General and Fed rate hike fears', macro: true},
+  {headline: "The Dividend Battle Wall Street Didn't See Coming", macro: false},
+  {headline: 'Wall Street closes higher as Nvidia leads rally', macro: true}
+];
+
+test('Step 9F.2c.3 new macro terms, the dollar currency fix, and the Wall Street removal', async () => {
+  const candidates = STEP_9F2C3_ROWS.map(row => step8kCandidate(row.headline));
+  const {audit} = await step8kActiveRun({candidates});
+  for (const row of STEP_9F2C3_ROWS) {
+    const key = row.headline.slice(0, 80);
+    const entry = audit.find(e => e.headline === key);
+    assert.ok(entry, row.headline);
+    if (row.macro) {
+      assert.equal(entry.tier, 2, row.headline);
+    } else {
+      assert.notEqual(entry.tier, 2, row.headline);
+    }
+  }
+});
+
+// ---- Step 9F.2c.4(b): "trillion-dollar" exclusion also catches compound ----
+// prefixes like "multitrillion-dollar" (no non-letter boundary before
+// "trillion"), not just the bare phrase. Row 1 is the real false-positive case
+// (a Fortune headline that scored macro 20 on "dollar" alone). Row 2 confirms a
+// compound dollar exclusion does not suppress an unrelated macro term in the
+// same headline. Row 3 confirms the existing bare "trillion-dollar" exclusion
+// (a non-alphanumeric boundary before the phrase) still works as before.
+const STEP_9F2C4B_ROWS = [
+  {headline: 'Does a robot cost $2 or $35 an hour? A multitrillion-dollar market depends on how', macro: false},
+  {headline: 'Nvidia leads a multitrillion-dollar rally in chip stocks', macro: true},
+  {headline: 'Start-up raises trillion-dollar round for new venture', macro: false}
+];
+
+test('Step 9F.2c.4(b) "multitrillion-dollar" and other trillion-dollar compounds are excluded from the dollar match', async () => {
+  const candidates = STEP_9F2C4B_ROWS.map(row => step8kCandidate(row.headline));
+  const {audit} = await step8kActiveRun({candidates});
+  for (const row of STEP_9F2C4B_ROWS) {
+    const key = row.headline.slice(0, 80);
+    const entry = audit.find(e => e.headline === key);
+    assert.ok(entry, row.headline);
+    if (row.macro) {
+      assert.equal(entry.tier, 2, row.headline);
+    } else {
+      assert.notEqual(entry.tier, 2, row.headline);
+    }
+  }
+});
+
+// ---- Step 9F.2c.4(a): bare "earnings" removed, three narrower phrases added ----
+// Rows 1-3 are the real false positives from the 16 Oct Trading run: single-
+// company earnings stories (not broad-market/sector) that bare "earnings"
+// wrongly promoted and must stay non-macro now. Rows 4-6 are the genuinely
+// broad-market/sector earnings-season stories the three new phrases keep.
+// Row 7 still scores macro via "oil"/"inflation" independently, and also now
+// matches "bank earnings" -- either way it stays macro (unaffected by this
+// change, listed for completeness).
+const STEP_9F2C4A_ROWS = [
+  {headline: "ASML's Q3 Earnings Coming Up", macro: false},
+  {headline: 'Domino’s Pizza Releases Earnings Pre-Market on Tuesday, Oct. 13', macro: false},
+  {headline: 'Equity Bancshares (EQBK) Stock Price Edges Higher After Q3 Earnings Strength', macro: false},
+  {headline: 'Goldman Strategists Upgrade Global Stocks on Earnings Boost', macro: true},
+  {headline: 'European shares climb on bank gains, focus turns to earnings season', macro: true},
+  {headline: 'Earnings season will fight the real world for attention', macro: true},
+  {headline: 'Oil Prices Decline as Investors Await US Inflation Data and Bank Earnings Amid Gulf tensions', macro: true}
+];
+
+test('Step 9F.2c.4(a) bare "earnings" no longer matches, but "earnings season", "bank earnings" and "earnings boost" do', async () => {
+  const candidates = STEP_9F2C4A_ROWS.map(row => step8kCandidate(row.headline));
+  const {audit} = await step8kActiveRun({candidates});
+  for (const row of STEP_9F2C4A_ROWS) {
+    const key = row.headline.slice(0, 80);
+    const entry = audit.find(e => e.headline === key);
+    assert.ok(entry, row.headline);
+    if (row.macro) {
+      assert.equal(entry.tier, 2, row.headline);
+    } else {
+      assert.notEqual(entry.tier, 2, row.headline);
+    }
+  }
+});
+
+// ---- Step 9F.1c: Yahoo admission by publish time inside the reading window ----
+// Old session window start: PRE/REGULAR 2026-09-04T20:00Z (Labor Day 09-07 skipped), POST
+// 2026-09-08T20:00Z. Reading window start is the last close minus 24 h.
+const STEP_9F1C_ROWS = [
+  {state: 'PRE', trigger: '2026-09-08T11:30:00.000Z', overlayAsOf: '2026-09-08T11:25:00.000Z',
+    oldStart: '2026-09-04T20:00:00.000Z', readingStart: '2026-09-03T20:00:00.000Z'},
+  {state: 'REGULAR', trigger: '2026-09-08T15:00:00.000Z', overlayAsOf: '2026-09-08T14:55:00.000Z',
+    oldStart: '2026-09-04T20:00:00.000Z', readingStart: '2026-09-03T20:00:00.000Z'},
+  {state: 'POST', trigger: '2026-09-08T21:00:00.000Z', overlayAsOf: '2026-09-08T20:55:00.000Z',
+    oldStart: '2026-09-08T20:00:00.000Z', readingStart: '2026-09-07T20:00:00.000Z'}
+];
+
+for (const row of STEP_9F1C_ROWS) {
+  test(`Step 9F.1c ${row.state} Yahoo articles are in or out by publish time inside the reading window`, async () => {
+    const at = offsetMs => new Date(Date.parse(row.readingStart) + offsetMs).toISOString();
+    const triggerMs = Date.parse(row.trigger);
+    // A label one hour past the old skip line (old window age + 4 h tolerance), so the
+    // old code skipped it unfetched; it is still under the new reading-window line.
+    const oldSkipHours = Math.ceil((triggerMs - Date.parse(row.oldStart)) / 3600000) + 5;
+    const articles = [
+      {name: 'atstart', publishedAt: at(0), expected: 'ADMITTED'},
+      {name: 'justinside', publishedAt: at(60000), expected: 'ADMITTED'},
+      {name: 'justoutside', publishedAt: at(-60000), expected: 'REJECTED_BEFORE_READING_WINDOW'},
+      {name: 'beforeoldstart', publishedAt: new Date(Date.parse(row.oldStart) - 3600000).toISOString(),
+        expected: 'ADMITTED'},
+      {name: 'future', publishedAt: new Date(triggerMs + 1).toISOString(), expected: 'REJECTED_AFTER_READING_WINDOW'},
+      {name: 'notime', publishedAt: null, expected: 'REJECTED_NO_PUBLICATION_TIME'},
+      {name: 'labelskip', publishedAt: new Date(triggerMs - 1800000).toISOString(),
+        ageLabel: `${oldSkipHours}h ago`, expected: 'ADMITTED'},
+      {name: 'labelwrong', publishedAt: new Date(triggerMs - 1800000).toISOString(),
+        ageLabel: '9d ago', expected: 'ADMITTED', labelOld: true}
+    ];
+    const byHeadline = new Map(articles.map(article => [`Neutral ${article.name} story`, article]));
+    const candidates = articles.map(article => step8kCandidate(`Neutral ${article.name} story`,
+      article.ageLabel ? {ageLabel: article.ageLabel} : {}));
+    const diagnostics = [];
+    const fetched = [];
+    const {service} = harness({
+      createTelemetryAcquisition: () => ({
+        async acquireSnapshot({symbol}) {
+          return snapshotWithState(symbol, row.state, {overlayAsOf: row.overlayAsOf});
+        }
+      }),
+      yahooMostActiveAcquisition: {
+        async acquireMostActive() { return {ok: true, type: 'SUCCESS', candidates: []}; }
+      },
+      yahooLatestNewsDiscovery: {
+        async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }
+      },
+      yahooCurrentNewsArticleContentAcquisition: {
+        async acquireArticleContent(candidate) {
+          fetched.push(candidate.headline);
+          return step8kUsableArticle(candidate, byHeadline.get(candidate.headline).publishedAt);
+        }
+      },
+      now: () => new Date(row.trigger),
+      onDiagnostics: value => diagnostics.push(value)
+    });
+    await service.assemble(request());
+    const auditEvents = diagnostics.filter(value => value.stage === 'activeYahooCandidateAudit');
+    const audit = auditEvents.flatMap(event => event.candidates);
+    assert.equal(auditEvents[0].readingWindowStartsAt, row.readingStart);
+    assert.equal(auditEvents[0].windowStartsAtInclusive, row.oldStart);
+    for (const article of articles) {
+      const entry = audit.find(value => value.headline === `Neutral ${article.name} story`);
+      assert.equal(entry.decision, article.expected, `${row.state} ${article.name}`);
+      assert.equal(entry.labelOld, article.labelOld, `${row.state} ${article.name} label order`);
+    }
+    // Every candidate is downloaded once; the label-old one goes last.
+    assert.equal(fetched.length, articles.length);
+    assert.equal(fetched.at(-1), 'Neutral labelwrong story');
+    const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+    assert.equal(acquisition.acquiredCurrentSessionCount, 5);
+    assert.equal(acquisition.missingOrMalformedPublicationTimeCount, 1);
+    assert.equal(acquisition.beforeSessionWindowCount, 1);
+    assert.equal(acquisition.afterSessionWindowCount, 1);
+    assert.equal(acquisition.staleByLabelCount, 1);
+    for (const event of auditEvents) {
+      assert.ok(Buffer.byteLength(JSON.stringify({...event, generationId: '0'.repeat(36)}), 'utf8') <= 3400);
+    }
+  });
+}
+
+test('Step 9F.1c the reading extension setting moves the Yahoo admission line, clamped', async () => {
+  const saved = process.env.READING_EXTENSION_HOURS;
+  const decisionAt = async (hours, publishedAt) => {
+    if (hours === undefined) delete process.env.READING_EXTENSION_HOURS;
+    else process.env.READING_EXTENSION_HOURS = hours;
+    const candidate = step8kCandidate('Neutral extension story');
+    const {audit} = await step8kActiveRun({
+      candidates: [candidate], acquire: value => step8kUsableArticle(value, publishedAt)
+    });
+    return audit[0].decision;
+  };
+  try {
+    // REGULAR at 2026-09-08T15:00Z; last close 2026-09-04T20:00Z.
+    assert.equal(await decisionAt('0', '2026-09-04T19:59:00.000Z'), 'REJECTED_BEFORE_READING_WINDOW');
+    assert.equal(await decisionAt('0', '2026-09-04T20:00:00.000Z'), 'ADMITTED');
+    assert.equal(await decisionAt('48', '2026-09-02T20:01:00.000Z'), 'ADMITTED');
+    assert.equal(await decisionAt('9999', '2026-09-01T20:01:00.000Z'), 'ADMITTED');
+    assert.equal(await decisionAt('9999', '2026-09-01T19:59:00.000Z'), 'REJECTED_BEFORE_READING_WINDOW');
+    assert.equal(await decisionAt('junk', '2026-09-03T19:59:00.000Z'), 'REJECTED_BEFORE_READING_WINDOW');
+  } finally {
+    if (saved === undefined) delete process.env.READING_EXTENSION_HOURS;
+    else process.env.READING_EXTENSION_HOURS = saved;
+  }
+});
+
+// ---- Step 9F.1d: up to 3 download attempts per article and a 30 second reading budget ----
+function step9f1dSummary(diagnostics) {
+  return diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+}
+
+const STEP_9F1D_ROWS = [
+  {name: 'fails once then succeeds', fails: ['TIMEOUT'], decision: 'ADMITTED', attempts: 2},
+  {name: 'fails twice then succeeds', fails: ['RETRIEVAL_FAILURE', 'HTTP_FAILURE_503'], decision: 'ADMITTED', attempts: 3},
+  {name: 'fails three times', fails: ['TIMEOUT', 'RESPONSE_READ_FAILURE', 'HTTP_FAILURE_429'],
+    decision: 'FETCH_FAILED', attempts: 3},
+  {name: '404 page not found', fails: ['HTTP_FAILURE_404'], decision: 'FETCH_FAILED', attempts: 1},
+  {name: 'unreadable page', fails: ['NO_USABLE_ARTICLE'], decision: 'EXTRACTION_FAILED', attempts: 1}
+];
+
+for (const row of STEP_9F1D_ROWS) {
+  test(`Step 9F.1d Yahoo article download: ${row.name}`, async () => {
+    const candidate = step8kCandidate('Neutral retry story');
+    let calls = 0;
+    const pauses = [];
+    const {audit, diagnostics} = await step8kActiveRun({
+      candidates: [candidate],
+      clock: {sleep: async ms => { pauses.push(ms); }},
+      acquire: async () => {
+        const type = row.fails[calls++];
+        if (!type) return step8kUsableArticle(candidate);
+        const [base, status] = type.startsWith('HTTP_FAILURE_') ? ['HTTP_FAILURE', Number(type.slice(13))] : [type];
+        return {ok: false, type: base, articleContent: null, ...(status ? {httpStatus: status} : {})};
+      }
+    });
+    assert.equal(calls, row.attempts);
+    assert.deepEqual([audit[0].decision, audit[0].attempts], [row.decision, row.attempts]);
+    assert.deepEqual(pauses, [250, 750].slice(0, row.attempts - 1));
+    const summary = step9f1dSummary(diagnostics);
+    assert.deepEqual([summary.articleFetchAttemptCount, summary.downloadAttemptCount, summary.readingBudgetStopped],
+      [1, row.attempts, false]);
+  });
+}
+
+slotsOffTest('Step 9F.1d retries do not use up the twelve-article cap', async () => {
+  const candidates = Array.from({length: 13}, (_, index) => step8kCandidate(`Neutral capped story ${index}`));
+  const seen = new Map();
+  const {audit, diagnostics, calls} = await step8kActiveRun({
+    candidates,
+    acquire: async candidate => {
+      const count = (seen.get(candidate.url) || 0) + 1;
+      seen.set(candidate.url, count);
+      return count === 1 ? {ok: false, type: 'TIMEOUT', articleContent: null}
+        : {ok: false, type: 'NO_USABLE_ARTICLE', articleContent: null};
+    }
+  });
+  assert.equal(seen.size, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(calls.yahooCurrentNewsArticle.length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS * 2);
+  assert.equal(audit.filter(entry => entry.attempts === 2).length, ACTIVE_YAHOO_MAX_ARTICLE_ATTEMPTS);
+  assert.equal(audit.at(-1).decision, 'SKIPPED_MAX_ATTEMPTS');
+  assert.equal(audit.at(-1).attempts, undefined);
+  const summary = step9f1dSummary(diagnostics);
+  assert.deepEqual([summary.articleFetchAttemptCount, summary.downloadAttemptCount, summary.readingBudgetStopped],
+    [12, 24, false]);
+});
+
+test('Step 9F.1d the 30 second reading budget stops further reading partway', async () => {
+  // Every download times out after 4 s of fake time. Article 1: 0-13 s (3 attempts),
+  // article 2: 13-26 s (3 attempts), article 3 starts at 26 s, ends at 30 s, and its
+  // retry is not started. Articles 4 and 5 are not tried because of the budget.
+  let now = 0;
+  const pauses = [];
+  const candidates = Array.from({length: 5}, (_, index) => step8kCandidate(`Neutral slow story ${index}`));
+  const {audit, diagnostics, calls} = await step8kActiveRun({
+    candidates,
+    clock: {monotonicNow: () => now, sleep: async ms => { pauses.push(ms); now += ms; }},
+    acquire: async () => {
+      now += 4000;
+      return {ok: false, type: 'TIMEOUT', articleContent: null};
+    }
+  });
+  assert.equal(calls.yahooCurrentNewsArticle.length, 7);
+  assert.deepEqual(pauses, [250, 750, 250, 750]);
+  assert.deepEqual(audit.map(entry => [entry.decision, entry.attempts, entry.retriesStoppedByBudget]), [
+    ['FETCH_FAILED', 3, undefined],
+    ['FETCH_FAILED', 3, undefined],
+    ['FETCH_FAILED', 1, true],
+    ['SKIPPED_READING_BUDGET', undefined, undefined],
+    ['SKIPPED_READING_BUDGET', undefined, undefined]
+  ]);
+  const summary = step9f1dSummary(diagnostics);
+  assert.deepEqual([summary.articleFetchAttemptCount, summary.downloadAttemptCount, summary.readingBudgetStopped],
+    [3, 7, true]);
+});
+
+// Step 9F.6a.4: the candidate pool reaches the optional hook, in the audit's
+// order with the audit's decisions; a failing hook changes nothing; without a
+// hook the package is the same.
+test('Step 9F.6a.4: candidate pool handed to the optional hook, package unchanged', async () => {
+  const articles = step9F1fArticles(3);
+  const pools = [];
+  const build = extra => {
+    const diagnostics = [];
+    return {diagnostics, ...harness({
+      createTelemetryAcquisition: () => ({async acquireSnapshot({symbol}) {
+        return snapshotWithState(symbol, 'REGULAR', {hasOverlay: false});
+      }}),
+      yahooLatestNewsDiscovery: {async discoverLatestNews() {
+        return {ok: true, type: 'SUCCESS', candidates: articles.map(article => ({
+          headline: article.title, url: article.canonicalUrl, uuid: null, publisher: 'Yahoo Finance'
+        }))};
+      }},
+      yahooCurrentNewsArticleContentAcquisition: {async acquireArticleContent(candidate) {
+        const article = articles.find(entry => entry.canonicalUrl === candidate.url);
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: article.canonicalUrl,
+          headline: article.title, publisher: 'Yahoo Finance',
+          publishedAt: article.publishedAt, updatedAt: null, articleText: article.summary
+        }};
+      }},
+      now: () => new Date('2026-09-08T15:00:00.000Z'),
+      onDiagnostics: value => diagnostics.push(value),
+      ...extra
+    })};
+  };
+  const withHook = build({onCandidatePool: value => pools.push(value)});
+  const withHookOutput = await withHook.service.assemble(request());
+  const withoutHook = build({});
+  const withoutHookOutput = await withoutHook.service.assemble(request());
+  const throwingHook = build({onCandidatePool: () => { throw new Error('hook failed'); }});
+  const throwingHookOutput = await throwingHook.service.assemble(request());
+
+  assert.equal(pools.length, 1);
+  assert.equal(pools[0].sourceId, 'us.yahoo-finance');
+  assert.ok(Object.isFrozen(pools[0].pool));
+  const audit = withHook.diagnostics.filter(value => value.stage === 'activeYahooCandidateAudit')
+    .flatMap(value => value.candidates);
+  assert.deepEqual(pools[0].pool.map(entry => [entry.rank, entry.decision]),
+    audit.map(entry => [entry.rank, entry.decision]));
+  assert.deepEqual(pools[0].pool.map(entry => entry.url), articles.map(article => article.canonicalUrl));
+  assert.equal(pools[0].pool.every(entry => entry.opened && entry.sourceId === 'us.yahoo-finance'), true);
+  // The pool is never logged or put in the package.
+  assert.equal(JSON.stringify(withHook.diagnostics).includes('"pool"'), false);
+  assert.equal(JSON.stringify(withHookOutput), JSON.stringify(withoutHookOutput));
+  assert.equal(JSON.stringify(throwingHookOutput), JSON.stringify(withoutHookOutput));
+  assert.throws(() => harness({onCandidatePool: 'not a function'}), TypeError);
+});
+
+// Step 9F.2e.5: the general article slots. With ARTICLE_SLOTS_ENABLED on (the
+// default) the reader admits up to 7 Yahoo slots plus CNBC's 3 unused slots
+// passed on (CNBC is not in the selection step yet) and may try 18 articles.
+test('Step 9F.2e.5 the load-time limits match the reader limits at load', () => {
+  const atLoad = readerSourceLimits('us.yahoo-finance');
+  assert.equal(LOADED_MAX_ARTICLE_ATTEMPTS, atLoad.maxArticleAttempts);
+  assert.equal(LOADED_MAX_ADMITTED_ARTICLES, atLoad.maxAdmittedArticles);
+});
+
+test('Step 9F.2e.5 article slots on: ten admitted (7 Yahoo + 3 passed on from CNBC), summary names the slots', async () => {
+  const usable = Array.from({length: 14}, (_, index) => step8kCandidate(`Oil story number ${index + 1}`));
+  // Step 9F.2d.3: portfolio slots on (the default) for the summary-field order below.
+  const {audit, calls, diagnostics} = await withArticleSlots(undefined, () => withPortfolioSlots('on', () =>
+    step8kActiveRun({candidates: usable, acquire: step8kUsableArticle})));
+  assert.equal(calls.yahooCurrentNewsArticle.length, 10);
+  assert.equal(audit.filter(entry => entry.decision === 'ADMITTED').length, 10);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_MAX_ADMITTED').length, 4);
+  const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.deepEqual([acquisition.generalSlots, acquisition.spareSlots, acquisition.maxArticleAttempts,
+    acquisition.maxAdmittedArticles, acquisition.acquiredCurrentSessionCount], [7, 3, 18, 10, 10]);
+  const keys = Object.keys(acquisition);
+  // Step 9F.2d.3: the portfolio-slot fields follow (portfolio slots on by default).
+  assert.deepEqual(keys.slice(keys.indexOf('tryOrder'), keys.indexOf('tryOrder') + 9), ['tryOrder',
+    'generalSlots', 'spareSlots', 'maxArticleAttempts', 'maxAdmittedArticles', 'portfolioSlots',
+    'portfolioSlotsFilled', 'portfolioCoveredSymbols', 'selectedCandidateCount']);
+  assert.equal(calls.evidenceRoleClassification.length, 1);
+});
+
+test('Step 9F.2e.5 article slots on: eighteen attempts when nothing is usable', async () => {
+  const many = Array.from({length: 22}, (_, index) => step8kCandidate(`Neutral unusable story ${index + 1}`));
+  const {audit, calls} = await withArticleSlots('on', () => step8kActiveRun({candidates: many}));
+  assert.equal(calls.yahooCurrentNewsArticle.length, 18);
+  assert.equal(audit.filter(entry => entry.decision === 'SKIPPED_MAX_ATTEMPTS').length, 4);
+});
+
+test('Step 9F.2e.5 article slots off: the previous caps and no new summary fields', async () => {
+  const usable = Array.from({length: 14}, (_, index) => step8kCandidate(`Oil story number ${index + 1}`));
+  const {audit, diagnostics} = await withArticleSlots('off', () =>
+    step8kActiveRun({candidates: usable, acquire: step8kUsableArticle}));
+  assert.equal(audit.filter(entry => entry.decision === 'ADMITTED').length, 6);
+  const acquisition = diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  for (const key of ['generalSlots', 'spareSlots', 'maxArticleAttempts', 'maxAdmittedArticles']) {
+    assert.equal(Object.hasOwn(acquisition, key), false, key);
+  }
+});
+
+// Each row: settings -> admitted out of 20 usable candidates.
+const STEP_9F2E5_SLOT_ROWS = [
+  [{}, 10, 'defaults: 7 + 3 spare'],
+  [{SLOT_SPILLOVER_ENABLED: 'off'}, 7, 'spillover off: no spare'],
+  [{CNBC_SLOTS: '0'}, 7, 'no CNBC slots to pass on'],
+  [{SPARE_ADMITS: '1'}, 8, 'spare limit 1'],
+  [{SPARE_ADMITS: '0'}, 7, 'spare limit 0'],
+  [{CNBC_SLOTS: '6', SPARE_ADMITS: '5'}, 12, 'CNBC 6, spare limit 5'],
+  [{YAHOO_SLOTS: '4'}, 7, 'Yahoo 4 + 3 spare'],
+  [{YAHOO_SLOTS: '0', SLOT_SPILLOVER_ENABLED: 'off'}, 0, 'no Yahoo slots, no spare'],
+  [{YAHOO_SLOTS: '99'}, 13, 'Yahoo clamped to 10, + 3 spare'],
+  [{YAHOO_MAX_ADMITTED_ARTICLES: '2'}, 10, 'the slots-off admit cap is not read while slots are on']
+];
+
+test('Step 9F.2e.5 article slots: admitted cap follows the slot settings', async () => {
+  const names = Object.keys(Object.assign({}, ...STEP_9F2E5_SLOT_ROWS.map(([env]) => env)));
+  for (const [env, expected, label] of STEP_9F2E5_SLOT_ROWS) {
+    const saved = Object.fromEntries(names.map(name => [name, process.env[name]]));
+    Object.assign(process.env, env);
+    try {
+      const usable = Array.from({length: 20}, (_, index) => step8kCandidate(`Oil story number ${index + 1}`));
+      const {audit} = await withArticleSlots('on', () =>
+        step8kActiveRun({candidates: usable, acquire: step8kUsableArticle}));
+      assert.equal(audit.filter(entry => entry.decision === 'ADMITTED').length, expected, label);
+    } finally {
+      for (const name of names) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
+    }
+  }
+});
+
+test('Step 9F.2e.5 attempts cap: 18 by default, clamped to 6-24, and the slots-off cap is not read', async () => {
+  for (const [env, expected] of [[{}, 18], [{YAHOO_MAX_ARTICLE_ATTEMPTS_PLANNED: '30'}, 24],
+    [{YAHOO_MAX_ARTICLE_ATTEMPTS_PLANNED: '2'}, 6], [{YAHOO_MAX_ARTICLE_ATTEMPTS: '20'}, 18]]) {
+    assert.equal(readerSourceLimits('us.yahoo-finance', {env}).maxArticleAttempts, expected, JSON.stringify(env));
+  }
+});
+
+// Step 9F.2d.3: the portfolio slots (PORTFOLIO_SLOTS_ENABLED, read from
+// process.env on every run; on by default) over BOTH lists.
+async function withPortfolioSlots(value, operation) {
+  const saved = process.env.PORTFOLIO_SLOTS_ENABLED;
+  if (value === undefined) delete process.env.PORTFOLIO_SLOTS_ENABLED;
+  else process.env.PORTFOLIO_SLOTS_ENABLED = value;
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.PORTFOLIO_SLOTS_ENABLED;
+    else process.env.PORTFOLIO_SLOTS_ENABLED = saved;
+  }
+}
+
+// Step 9F.2f: the CNBC-no-special-conditions switch (CNBC_NO_SPECIAL_CONDITIONS_ENABLED)
+// is read from process.env on every run; on by default. Pre-existing tests that
+// pin the previous materiality/role gate on general CNBC evidence (907aacf
+// behaviour, incidentally exercised by the default harness's one low-materiality
+// roleless CNBC candidate) run with it off; the on behaviour is tested separately.
+async function withCnbcNoSpecialConditions(value, operation) {
+  const saved = process.env.CNBC_NO_SPECIAL_CONDITIONS_ENABLED;
+  if (value === undefined) delete process.env.CNBC_NO_SPECIAL_CONDITIONS_ENABLED;
+  else process.env.CNBC_NO_SPECIAL_CONDITIONS_ENABLED = value;
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.CNBC_NO_SPECIAL_CONDITIONS_ENABLED;
+    else process.env.CNBC_NO_SPECIAL_CONDITIONS_ENABLED = saved;
+  }
+}
+
+function cnbcFilterOffTest(name, operation) {
+  test(name, () => withCnbcNoSpecialConditions('off', operation));
+}
+
+const referenceOfTitle = (output, title) => output.marketPackages[0].evidenceContext.evidence
+  .find(entry => entry.item.title === title)?.reference;
+
+test('Step 9F.2d.3 portfolio slots: a Watchlist company gets a slot in a My Stocks run, then the second pass', async () => {
+  const holding = Array.from({length: 12}, (_, index) => step8kCandidate(`VEEV story number ${index + 1}`));
+  const watched = step8kCandidate('AAPL unveils a new product line');
+  const run = value => withPortfolioSlots(value, () => {
+    const pools = [];
+    return step8kActiveRun({candidates: [...holding, watched], acquire: step8kUsableArticle,
+      myStocks: [{market: 'US', symbol: 'VEEV'}], watchlist: [{market: 'US', symbol: 'AAPL'}],
+      extra: {onCandidatePool: value => pools.push(value)}}).then(result => ({...result, pools}));
+  });
+  const on = await run(undefined);
+  // 10 general (VEEV 1-10, covering VEEV), AAPL in the first pass, VEEV 11 in the second.
+  assert.deepEqual(on.calls.yahooCurrentNewsArticle.map(candidate => candidate.headline),
+    [...holding.slice(0, 10), watched, holding[10]].map(candidate => candidate.headline));
+  assert.equal(on.audit.filter(entry => entry.decision === 'ADMITTED').length, 12);
+  assert.deepEqual(on.audit.filter(entry => entry.portfolioSlot).map(entry => [entry.headline, entry.portfolioSlot]),
+    [[holding[10].headline, 'SECOND_PASS'], [watched.headline, 'FIRST_PASS']]);
+  const acquisition = on.diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.deepEqual([acquisition.portfolioSlots, acquisition.portfolioSlotsFilled, acquisition.portfolioCoveredSymbols],
+    [2, 2, ['VEEV', 'AAPL']]);
+  assert.equal(on.output.portfolioContext.watchlist[0].evidenceRefs.includes(referenceOfTitle(on.output, watched.headline)),
+    true);
+  // The pool flag uses both lists while on, the starting list only while off.
+  const flag = (result, headline) => result.pools[0].pool.find(entry => entry.headline === headline).portfolioSlotEligible;
+  assert.deepEqual([flag(on, watched.headline), flag(on, holding[0].headline)], [true, true]);
+
+  const off = await run('off');
+  assert.equal(off.calls.yahooCurrentNewsArticle.length, 10);
+  assert.equal(off.audit.filter(entry => entry.decision === 'ADMITTED').length, 10);
+  assert.equal(off.audit.some(entry => Object.hasOwn(entry, 'portfolioSlot')), false);
+  assert.deepEqual(off.output.portfolioContext.watchlist[0].evidenceRefs.length, 1);
+  assert.deepEqual([flag(off, watched.headline), flag(off, holding[0].headline)], [false, true]);
+  const offAcquisition = off.diagnostics.find(value => value.stage === 'activeYahooAcquisition');
+  assert.equal(Object.hasOwn(offAcquisition, 'portfolioSlots'), false);
+});
+
+test('Step 9F.2d.3 portfolio slots: CLOSED, WEEKEND and HOLIDAY offer Yahoo news naming a company to Section 4', async () => {
+  const cases = [
+    {marketState: 'CLOSED', triggerAt: '2026-09-24T01:09:00.000Z', latestDate: '2026-09-23', close: '2026-09-23T20:00:00.000Z'},
+    {marketState: 'WEEKEND', triggerAt: '2026-09-27T12:00:00.000Z', latestDate: '2026-09-25', close: '2026-09-25T20:00:00.000Z'},
+    {marketState: 'HOLIDAY', triggerAt: '2026-09-07T16:00:00.000Z', latestDate: '2026-09-04', close: '2026-09-04T20:00:00.000Z'}
+  ];
+  for (const {marketState, triggerAt, latestDate, close} of cases) {
+    const at = offsetMs => new Date(Date.parse(close) + offsetMs).toISOString();
+    const articles = [
+      {name: 'holding', headline: 'VEEV lifts guidance after a strong quarter', publishedAt: at(-3600000)},
+      {name: 'watched', headline: 'AAPL unveils a new product line', publishedAt: at(3600000)},
+      {name: 'neutral', publishedAt: at(-7200000)}
+    ];
+    const run = value => withPortfolioSlots(value, () => step9f1eCompletedRun({marketState, triggerAt, latestDate,
+      articles, myStocks: [{market: 'US', symbol: 'VEEV'}], watchlist: [{market: 'US', symbol: 'AAPL'}]}));
+    const on = await run(undefined);
+    const holdingRef = referenceOfTitle(on.output, articles[0].headline);
+    const watchedRef = referenceOfTitle(on.output, articles[1].headline);
+    const neutralRef = referenceOfTitle(on.output, 'Neutral neutral story');
+    assert.deepEqual(on.output.portfolioContext.myStocks[0].evidenceRefs.slice(1), [holdingRef], marketState);
+    assert.deepEqual(on.output.portfolioContext.watchlist[0].evidenceRefs.slice(1), [watchedRef], marketState);
+    assert.equal(JSON.stringify(on.output.portfolioContext).includes(`"${neutralRef}"`), false, marketState);
+    // The after-close article stays a subsequent development.
+    assert.ok(on.output.marketPackages[0].evidenceContext.subsequentDevelopments.includes(watchedRef), marketState);
+    const off = await run('off');
+    assert.deepEqual(off.output.portfolioContext.myStocks[0].evidenceRefs.length, 1, marketState);
+    assert.deepEqual(off.output.portfolioContext.watchlist[0].evidenceRefs.length, 1, marketState);
+    // Off and on hold the same evidence; only Section 4's offer differs.
+    assert.equal(JSON.stringify(off.output.marketPackages), JSON.stringify(on.output.marketPackages), marketState);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Step 9F.2e.6 + 9F.2g: the 150 KB writer text budget switched on
+// (ARTICLE_TEXT_BUDGET_ENABLED). It runs on the reader's own admitted Yahoo
+// news before any card, horizon or reference is built for it, so a dropped
+// article never reaches classification -- no citation anywhere ever points at
+// it, and there is nothing to clean up. CNBC news and both recaps count
+// toward the budget but are never themselves dropped. Off: the Step 9F.1f
+// temporary trim runs exactly as before (covered by the pinned tests in
+// tests/claude-analysis-invocation.test.js).
+// ---------------------------------------------------------------------------
+
+async function withArticleTextBudgetBytes(bytes, operation) {
+  const saved = process.env.ARTICLE_TEXT_BUDGET_BYTES_PLANNED;
+  if (bytes === undefined) delete process.env.ARTICLE_TEXT_BUDGET_BYTES_PLANNED;
+  else process.env.ARTICLE_TEXT_BUDGET_BYTES_PLANNED = String(bytes);
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.ARTICLE_TEXT_BUDGET_BYTES_PLANNED;
+    else process.env.ARTICLE_TEXT_BUDGET_BYTES_PLANNED = saved;
+  }
+}
+
+async function withArticleTextBudgetEnabled(value, operation) {
+  const saved = process.env.ARTICLE_TEXT_BUDGET_ENABLED;
+  if (value === undefined) delete process.env.ARTICLE_TEXT_BUDGET_ENABLED;
+  else process.env.ARTICLE_TEXT_BUDGET_ENABLED = value;
+  try {
+    return await operation();
+  } finally {
+    if (saved === undefined) delete process.env.ARTICLE_TEXT_BUDGET_ENABLED;
+    else process.env.ARTICLE_TEXT_BUDGET_ENABLED = saved;
+  }
+}
+
+function step9F2e6Text(sizeKb, label) {
+  let text = `${label}. `;
+  while (Buffer.byteLength(text, 'utf8') < sizeKb * 1024) text += 'More detail follows here. ';
+  return text.slice(0, sizeKb * 1024);
+}
+
+// One macro-scored article (kept) and one neutral, zero-scored article
+// (lowest score, dropped first) through the CLOSED completed-session path,
+// with CNBC's own (never-drop) news present from the default harness.
+function step9F2e6CompletedHarness({onDiagnostics}) {
+  const macro = step8kCandidate('Federal Reserve signals its next rate path');
+  const neutral = step8kCandidate('A quiet regional retailer opens a new store');
+  const candidates = [macro, neutral];
+  const texts = new Map([[macro.url, step9F2e6Text(40, 'Macro')], [neutral.url, step9F2e6Text(40, 'Neutral')]]);
+  const {service} = harness({
+    now: () => new Date(GENERATED_AT),
+    yahooLatestNewsDiscovery: {async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }},
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url, headline: candidate.headline,
+          publisher: 'Yahoo Finance', publishedAt: '2026-09-04T19:00:00.000Z', updatedAt: null,
+          articleText: texts.get(candidate.url)
+        }};
+      }
+    },
+    onDiagnostics
+  });
+  return {service, macro, neutral};
+}
+
+test('Step 9F.2e.6 + 9F.2g: CLOSED drops the lowest-scored Yahoo article, keeps CNBC, logs the drop', async () => {
+  const diagnostics = [];
+  const {service, macro, neutral} = step9F2e6CompletedHarness({onDiagnostics: value => diagnostics.push(value)});
+  // Note: the Yahoo reader itself caps stored article text to the articleKb
+  // setting (16 KB by default), regardless of this fixture's 40 KB source
+  // text, so the two articles' real contribution is 2 x 16 KB -- the budget
+  // below is set accordingly.
+  const output = await withArticleTextBudgetEnabled('true',
+    () => withArticleTextBudgetBytes(20 * 1024, () => service.assemble(request())));
+  const evidence = output.marketPackages[0].evidenceContext.evidence;
+  const titles = evidence.map(entry => entry.item.title);
+  assert.ok(titles.includes(macro.headline), 'the higher-scored article is kept');
+  assert.ok(!titles.includes(neutral.headline), 'the lowest-scored article is dropped');
+  assert.ok(titles.some(title => title.startsWith('CNBC market news item')), 'CNBC (never-drop) is kept');
+  // No citation anywhere points at the dropped article -- it never reached
+  // classification, so there is nothing to clean up.
+  assert.equal(JSON.stringify(output).includes(neutral.headline), false);
+  const drop = diagnostics.find(value => value.stage === 'writerTextBudgetDrop');
+  assert.ok(drop, 'the drop is logged');
+  assert.equal(drop.droppedCount, 1);
+  assert.equal(drop.dropped.length, 1);
+  assert.equal(drop.dropped[0].headline, neutral.headline);
+  assert.equal(drop.dropped[0].slot, 'GENERAL');
+  assert.equal(drop.dropped[0].reason, 'OVER_WRITER_TEXT_BUDGET');
+  assert.ok(drop.totalBytesBefore > drop.totalBytesAfter);
+  assert.equal(JSON.stringify(drop).includes('More detail'), false, 'no article text in the log line');
+});
+
+test('Step 9F.2e.6 + 9F.2g: CLOSED, a generous budget drops nothing and logs no drop event', async () => {
+  const diagnostics = [];
+  const {service, macro, neutral} = step9F2e6CompletedHarness({onDiagnostics: value => diagnostics.push(value)});
+  const output = await withArticleTextBudgetEnabled('true', () => service.assemble(request()));
+  const titles = output.marketPackages[0].evidenceContext.evidence.map(entry => entry.item.title);
+  assert.ok(titles.includes(macro.headline));
+  assert.ok(titles.includes(neutral.headline));
+  assert.equal(diagnostics.some(value => value.stage === 'writerTextBudgetDrop'), false);
+});
+
+test('Step 9F.2e.6 + 9F.2g: switch off drops nothing even at a tiny budget (byte-identical to the temporary trim path)', async () => {
+  const diagnostics = [];
+  const {service, macro, neutral} = step9F2e6CompletedHarness({onDiagnostics: value => diagnostics.push(value)});
+  const output = await withArticleTextBudgetEnabled('false',
+    () => withArticleTextBudgetBytes(32 * 1024, () => service.assemble(request())));
+  const titles = output.marketPackages[0].evidenceContext.evidence.map(entry => entry.item.title);
+  assert.ok(titles.includes(macro.headline));
+  assert.ok(titles.includes(neutral.headline), 'nothing is dropped while the switch is off');
+  assert.equal(diagnostics.some(value => value.stage === 'writerTextBudgetDrop'), false);
+});
+
+// Active states (PRE, REGULAR, POST) share the identical ACTIVE_SESSION code
+// path for the budget (lib/us-analysis-package-orchestration.js reads only
+// analysisMode/completedSessionMode here, never the specific market state),
+// so one representative active-state run exercises all three; REGULAR is
+// used because step9F1fHarness already builds it.
+test('Step 9F.2e.6 + 9F.2g: REGULAR (active) also drops the lowest-scored Yahoo article', async () => {
+  const articles = step9F1fArticles(3);
+  const {service, diagnostics} = step9F1fHarness(articles);
+  const output = await withArticleTextBudgetEnabled('true',
+    () => withArticleTextBudgetBytes(20 * 1024, () => service.assemble(request())));
+  const titles = output.marketPackages[0].evidenceContext.evidence.map(entry => entry.item.title);
+  const keptCount = articles.filter(article => titles.includes(article.title)).length;
+  assert.ok(keptCount < 3, 'at least one article was dropped under the tight active-state budget');
+  const drop = diagnostics.find(value => value.stage === 'writerTextBudgetDrop');
+  assert.ok(drop, 'the drop is logged in the active-session path too');
+});
+
+// Degenerate case (Kevin's point 4): the only article naming a Watchlist
+// company is dropped by the budget. What the reader would see: Section 4
+// shows no reason at all for that stock this run (the existing Step 21D.1
+// rule -- a reason is shown only when an article linked to the stock is
+// cited), exactly as if no article about it had ever been admitted. The
+// report still assembles; nothing fails.
+test('Step 9F.2e.6 + 9F.2g: dropping a stock\'s only article leaves no Section 4 reason for it (never a failure)', async () => {
+  const watched = step8kCandidate('AAPL unveils a new product line that excites investors');
+  const macro = step8kCandidate('Federal Reserve holds rates steady at latest meeting');
+  const candidates = [macro, watched];
+  const texts = new Map([
+    [macro.url, step9F2e6Text(40, 'Macro')],
+    [watched.url, step9F2e6Text(40, 'Watched')]
+  ]);
+  const {service} = harness({
+    now: () => new Date(GENERATED_AT),
+    yahooLatestNewsDiscovery: {async discoverLatestNews() { return {ok: true, type: 'SUCCESS', candidates}; }},
+    yahooCurrentNewsArticleContentAcquisition: {
+      async acquireArticleContent(candidate) {
+        return {ok: true, type: 'SUCCESS', articleContent: {
+          sourceId: 'us.yahoo-finance', canonicalUrl: candidate.url, headline: candidate.headline,
+          publisher: 'Yahoo Finance', publishedAt: '2026-09-04T19:00:00.000Z', updatedAt: null,
+          articleText: texts.get(candidate.url)
+        }};
+      }
+    }
+  });
+  // Note: the Yahoo reader caps stored text to articleKb (16 KB default)
+  // regardless of this fixture's 40 KB source text.
+  const output = await withArticleTextBudgetEnabled('true', () => withArticleTextBudgetBytes(20 * 1024,
+    () => service.assemble(request('US', {watchlist: [{market: 'US', symbol: 'AAPL'}]}))));
+  const titles = output.marketPackages[0].evidenceContext.evidence.map(entry => entry.item.title);
+  assert.ok(!titles.includes(watched.headline), 'the Watchlist article (lower score) was dropped');
+  assert.ok(titles.includes(macro.headline));
+  // No reason at all for AAPL this run -- only its telemetry reference remains.
+  assert.equal(output.portfolioContext.watchlist[0].evidenceRefs.length, 1);
+  assert.equal(JSON.stringify(output).includes(watched.headline), false);
+});
+
+// Step 9AA.2: every My Stocks / Watchlist stock with no Yahoo quote line gets a price record,
+// appended after every other item, in no role list and not in Further Readings. Each test sets
+// the switches itself.
+const {withEnv: withSwitch} = require('./fixtures/step-8w-switches');
+const {isSectionFourPriceRecord} = require('../lib/section-rules');
+const priceRecordsOn = fn => withSwitch('SECTION_FOUR_BOTH_LISTS_ENABLED', 'on', () =>
+  withSwitch('SECTION_FOUR_TABLE_ENABLED', 'on', () => withSwitch('SECTION_FOUR_PRICE_RECORD_ENABLED', 'on', fn)));
+
+function priceRecordHarness() {
+  return harness({
+    createTelemetryAcquisition: () => ({
+      async acquireSnapshot({symbol}) {
+        if (symbol === 'AAPL') throw new Error('raw provider failure');
+        if (symbol === 'TSLA') return snapshotForLatestDate('TSLA', '2026-09-03');
+        return snapshot(symbol);
+      }
+    }),
+    snapshotPersistence: {
+      async persistSnapshot(value) {
+        if (value.symbol === 'AMD') {
+          throw Object.assign(new Error('conflict'), {code: 'SNAPSHOT_READ_MISMATCH',
+            diagnosticDetails: {mismatchReason: 'CANONICAL_SESSION_VALUES'}});
+        }
+        return value;
+      }
+    },
+    yahooEvidenceAcquisition: {
+      async acquireEvidence({symbol}) {
+        if (symbol === 'MSFT') throw new Error('raw evidence failure');
+        return yahooEvidence(symbol);
+      }
+    }
+  });
+}
+
+const priceRecordRequest = () => request('US', {
+  myStocks: [{market: 'US', symbol: 'MSFT'}, {market: 'US', symbol: 'AAPL'}, {market: 'US', symbol: 'NVDA'}],
+  watchlist: [{market: 'US', symbol: 'TSLA'}, {market: 'US', symbol: 'AMD'}, {market: 'US', symbol: 'NVDA'}]
+});
+
+test('Step 9AA.2: each way a quote line goes missing gives exactly one price record of the right kind', () =>
+  priceRecordsOn(async () => {
+    const output = await priceRecordHarness().service.assemble(priceRecordRequest());
+    assert.equal(validateClaudeAnalysisInput(output), true);
+    const marketPackage = output.marketPackages[0];
+    const evidence = marketPackage.evidenceContext.evidence;
+    const records = evidence.filter(entry => isSectionFourPriceRecord(entry.item));
+    // Blank telemetry (AAPL), stale-date drop (TSLA), persistence conflict (AMD), quote fetch
+    // failed with telemetry OK (MSFT); NVDA has its quote line and gets none. Portfolio order.
+    assert.deepEqual(records.map(entry => [entry.item.title, entry.item.summary]), [
+      ['MSFT instrument (MSFT) price', 'MSFT instrument (MSFT): $105.00, ↑ 5.00 (5.00%), at the close on Fri 4 Sep. '
+        + 'Price record made by MarketBrief for the Section 4 table.'],
+      ['AAPL price not available', 'No price available for AAPL in this report. '
+        + 'Price record made by MarketBrief for the Section 4 table.'],
+      ['TSLA price not available', 'No price available for TSLA in this report. '
+        + 'Price record made by MarketBrief for the Section 4 table.'],
+      ['AMD price not available', 'No price available for AMD in this report. '
+        + 'Price record made by MarketBrief for the Section 4 table.']
+    ]);
+    assert.equal(records[0].item.publishedAt, '2026-09-04T20:00:00.000Z');
+    assert.equal(records[1].item.publishedAt, GENERATED_AT);
+    assert.deepEqual(records.map(entry => entry.item.canonicalUrl), ['MSFT', 'AAPL', 'TSLA', 'AMD']
+      .map(symbol => `https://finance.yahoo.com/quote/${symbol}/`));
+    // Appended after every other item.
+    assert.deepEqual(records.map(entry => entry.reference), evidence.slice(-4).map(entry => entry.reference));
+    // In no role list and not in Further Readings.
+    const recordRefs = new Set(records.map(entry => entry.reference));
+    const context = marketPackage.evidenceContext;
+    for (const key of ['materialEvents', 'authoritativeFacts', 'principalCatalysts', 'supportingEvidence',
+      'conflictingEvidence', 'subsequentDevelopments']) {
+      assert.equal(context[key].some(reference => recordRefs.has(reference)), false, key);
+    }
+    assert.equal(context.furtherReadings.some(entry => recordRefs.has(entry.evidenceRef)), false);
+    assert.equal(context.broadMarketFocus.some(entry => recordRefs.has(entry.evidenceRef)), false);
+    // Each stock cites its quote line, or else its record; NVDA is in both lists, once each.
+    const refOf = symbol => output.portfolioContext.myStocks.concat(output.portfolioContext.watchlist)
+      .find(entry => entry.symbol === symbol).evidenceRefs;
+    for (const [index, symbol] of ['MSFT', 'AAPL', 'TSLA', 'AMD'].entries()) {
+      assert.deepEqual(refOf(symbol), [records[index].reference], symbol);
+    }
+    const nvda = evidence.find(entry => entry.item.title === 'NVDA market data');
+    assert.deepEqual(refOf('NVDA'), [nvda.reference]);
+  }));
+
+test('Step 9AA.2: records never move an existing reference, and the switch off adds none', () =>
+  priceRecordsOn(async () => {
+    const on = await priceRecordHarness().service.assemble(priceRecordRequest());
+    const off = await withSwitch('SECTION_FOUR_PRICE_RECORD_ENABLED', 'off', () =>
+      priceRecordHarness().service.assemble(priceRecordRequest()));
+    const onEvidence = on.marketPackages[0].evidenceContext.evidence;
+    const offEvidence = off.marketPackages[0].evidenceContext.evidence;
+    assert.equal(offEvidence.some(entry => isSectionFourPriceRecord(entry.item)), false);
+    assert.deepEqual(onEvidence.slice(0, offEvidence.length), offEvidence);
+    assert.equal(onEvidence.length, offEvidence.length + 4);
+    const {evidence: dropOn, ...contextOn} = on.marketPackages[0].evidenceContext;
+    const {evidence: dropOff, ...contextOff} = off.marketPackages[0].evidenceContext;
+    assert.deepEqual(contextOn, contextOff);
+    // Off: no stock without a quote line has any evidence ref (3722898).
+    assert.deepEqual(off.portfolioContext.myStocks.map(entry => entry.evidenceRefs.length), [0, 0, 1]);
+  }));
+
+test('Step 9AA.2: a package where every stock has its quote line is unchanged by the switch', () =>
+  priceRecordsOn(async () => {
+    const lists = request('US', {myStocks: [{market: 'US', symbol: 'MSFT'}], watchlist: [{market: 'US', symbol: 'NVDA'}]});
+    const on = await harness().service.assemble(lists);
+    const off = await withSwitch('SECTION_FOUR_PRICE_RECORD_ENABLED', 'off', () => harness().service.assemble(lists));
+    assert.equal(JSON.stringify(on), JSON.stringify(off));
+  }));
+
+test('Step 9AA.2: both lists empty gives no records', () =>
+  priceRecordsOn(async () => {
+    const output = await harness().service.assemble(request());
+    assert.equal(output.marketPackages[0].evidenceContext.evidence.some(entry => isSectionFourPriceRecord(entry.item)), false);
+  }));
