@@ -112,6 +112,20 @@ module.exports = async function handler(req, res) {
     return res.status(result.status).json(result.body);
   }
 
+  // ── 9AU Build 5A: read-only public holiday calendar for the page (GET ?holidayCalendar=1).
+  // Follows holidayCalendarDbEnabled; never writes. Any other method is refused. Loaded only
+  // when hit. ──
+  if (req.query && req.query.holidayCalendar === '1') {
+    if (req.method !== 'GET') {
+      res.setHeader('Allow', 'GET, OPTIONS');
+      return res.status(405).json({error: 'method not allowed'});
+    }
+    const {handleHolidayCalendar} = require('../lib/market-calendar-public');
+    const result = await handleHolidayCalendar({});
+    res.setHeader('Cache-Control', result.cacheControl);
+    return res.status(result.status).json(result.body);
+  }
+
   const { symbol, search, financials, finnhub } = req.query;
   const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
