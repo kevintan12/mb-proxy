@@ -129,7 +129,7 @@ test('9AU Build 1: US table early closes stay behind earlyCloseDaysEnabled', asy
   });
 });
 
-test('9AU Build 1: SG and HK table early closes stay unsupported; UK rows are ignored', async () => {
+test('9AU Build 1: SG and HK table early closes stay unsupported; UK rows are read', async () => {
   await withEnv({[SWITCH_ENV]: 'on', [EARLY_ENV]: 'on'}, async () => {
     await loadCalendar({runtime: fakeRuntime([
       day('SG', '2026-12-24', 'EARLY_CLOSE', '12:00'),
@@ -141,7 +141,8 @@ test('9AU Build 1: SG and HK table early closes stay unsupported; UK rows are ig
     assert.equal(status('HK', '2026-12-24').dayType, 'UNSUPPORTED_SPECIAL_SESSION');
     // SG 2026 now comes only from the table, which lists no Christmas holiday.
     assert.equal(status('SG', '2026-12-25').dayType, 'TRADING_DAY');
-    assert.equal(calendarYear('UK', 2026), null);
+    assert.notEqual(calendarYear('UK', 2026), null);
+    assert.equal(status('UK', '2026-12-25').dayType, 'HOLIDAY');
   });
 });
 
