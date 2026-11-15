@@ -327,10 +327,10 @@ test('9AU Build 2A: markets are independent, and each page is fetched once per r
   const db = fakeDatabase();
   const fetchImpl = fakeFetch({fail: ['NYSE', 'NASDAQ']});
   const results = await refreshCalendars({targets: [
-    {market: 'US', year: 2027}, {market: 'UK', year: 2027}, {market: 'UK', year: 2028}, {market: 'SG', year: 2027}
+    {market: 'US', year: 2027}, {market: 'UK', year: 2027}, {market: 'UK', year: 2028}, {market: 'JP', year: 2027}
   ], fetchImpl, runtime: db, now: NOW});
   assert.deepEqual(results.map(r => [r.market, r.year, r.status]),
-    [['US', 2027, 'ERROR'], ['UK', 2027, 'SAVED'], ['UK', 2028, 'SAVED'], ['SG', 2027, 'ERROR']]);
+    [['US', 2027, 'ERROR'], ['UK', 2027, 'SAVED'], ['UK', 2028, 'SAVED'], ['JP', 2027, 'ERROR']]);
   assert.equal(results[3].errors[0].code, 'UNSUPPORTED_MARKET_YEAR');
   assert.equal(fetchImpl.calls.filter(id => id === 'LSE').length, 1);
   assert.equal(yearRow(db.state, 'UK', 2028).row_count, 10);

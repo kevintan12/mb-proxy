@@ -96,7 +96,9 @@ CREATE TABLE IF NOT EXISTS market_calendar_changes (
     CONSTRAINT market_calendar_changes_source_check
     CHECK (source IS NULL OR source IN ('OFFICIAL', 'SECOND')),
   source_url TEXT,
-  note TEXT
+  note TEXT,
+  -- TRUE when the change needs a person to look at it (every engine-written change today).
+  flagged BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS market_calendar_changes_market_year_idx

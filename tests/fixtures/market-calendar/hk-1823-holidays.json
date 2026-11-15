@@ -1,0 +1,929 @@
+﻿{
+		"vcalendar": [{
+			"prodid": "-//1823 Contact Centre, HKSARG//Hong Kong Public Holidays//EN",
+			"version": "2.0",
+			"calscale": "GREGORIAN",
+			"x-wr-timezone": "Asia/Hong_Kong",
+			"x-wr-calname": "Hong Kong Public Holidays",
+			"x-wr-caldesc": "Hong Kong Public Holidays",
+			"vevent": [{
+			"dtstart": [
+				"20250101",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250102",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250101@1823.gov.hk",
+			"summary": "The first day of January"
+			},
+			{
+			"dtstart": [
+				"20250129",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250130",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250129@1823.gov.hk",
+			"summary": "Lunar New Year’s Day"
+			},
+			{
+			"dtstart": [
+				"20250130",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250131",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250130@1823.gov.hk",
+			"summary": "The second day of Lunar New Year"
+			},
+			{
+			"dtstart": [
+				"20250131",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250201",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250131@1823.gov.hk",
+			"summary": "The third day of Lunar New Year"
+			},
+			{
+			"dtstart": [
+				"20250404",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250405",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250404@1823.gov.hk",
+			"summary": "Ching Ming Festival"
+			},
+			{
+			"dtstart": [
+				"20250418",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250419",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250418@1823.gov.hk",
+			"summary": "Good Friday"
+			},
+			{
+			"dtstart": [
+				"20250419",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250420",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250419@1823.gov.hk",
+			"summary": "The day following Good Friday"
+			},
+			{
+			"dtstart": [
+				"20250421",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250422",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250421@1823.gov.hk",
+			"summary": "Easter Monday"
+			},
+			{
+			"dtstart": [
+				"20250501",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250502",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250501@1823.gov.hk",
+			"summary": "Labour Day"
+			},
+			{
+			"dtstart": [
+				"20250505",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250506",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250505@1823.gov.hk",
+			"summary": "The Birthday of the Buddha"
+			},
+			{
+			"dtstart": [
+				"20250531",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250601",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250531@1823.gov.hk",
+			"summary": "Tuen Ng Festival"
+			},
+			{
+			"dtstart": [
+				"20250701",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20250702",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20250701@1823.gov.hk",
+			"summary": "Hong Kong Special Administrative Region Establishment Day"
+			},
+			{
+			"dtstart": [
+				"20251001",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20251002",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20251001@1823.gov.hk",
+			"summary": "National Day"
+			},
+			{
+			"dtstart": [
+				"20251007",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20251008",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20251007@1823.gov.hk",
+			"summary": "The day following the Chinese Mid-Autumn Festival"
+			},
+			{
+			"dtstart": [
+				"20251029",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20251030",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20251029@1823.gov.hk",
+			"summary": "Chung Yeung Festival"
+			},
+			{
+			"dtstart": [
+				"20251225",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20251226",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20251225@1823.gov.hk",
+			"summary": "Christmas Day"
+			},
+			{
+			"dtstart": [
+				"20251226",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20251227",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250506T035044Z",
+			"transp": "TRANSPARENT",
+			"uid": "20251226@1823.gov.hk",
+			"summary": "The first weekday after Christmas Day"
+			},
+			{
+			"dtstart": [
+				"20260101",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260102",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260101@1823.gov.hk",
+			"summary": "The first day of January"
+			},
+			{
+			"dtstart": [
+				"20260217",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260218",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260217@1823.gov.hk",
+			"summary": "Lunar New Year’s Day"
+			},
+			{
+			"dtstart": [
+				"20260218",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260219",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260218@1823.gov.hk",
+			"summary": "The second day of Lunar New Year"
+			},
+			{
+			"dtstart": [
+				"20260219",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260220",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260219@1823.gov.hk",
+			"summary": "The third day of Lunar New Year"
+			},
+			{
+			"dtstart": [
+				"20260403",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260404",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260403@1823.gov.hk",
+			"summary": "Good Friday"
+			},
+			{
+			"dtstart": [
+				"20260404",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260405",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260404@1823.gov.hk",
+			"summary": "The day following Good Friday"
+			},
+			{
+			"dtstart": [
+				"20260406",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260407",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260406@1823.gov.hk",
+			"summary": "The day following Ching Ming Festival"
+			},
+			{
+			"dtstart": [
+				"20260407",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260408",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260407@1823.gov.hk",
+			"summary": "The day following Easter Monday"
+			},
+			{
+			"dtstart": [
+				"20260501",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260502",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260501@1823.gov.hk",
+			"summary": "Labour Day"
+			},
+			{
+			"dtstart": [
+				"20260525",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260526",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260525@1823.gov.hk",
+			"summary": "The day following the Birthday of the Buddha"
+			},
+			{
+			"dtstart": [
+				"20260619",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260620",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260619@1823.gov.hk",
+			"summary": "Tuen Ng Festival"
+			},
+			{
+			"dtstart": [
+				"20260701",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260702",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260701@1823.gov.hk",
+			"summary": "Hong Kong Special Administrative Region Establishment Day"
+			},
+			{
+			"dtstart": [
+				"20260926",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20260927",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20260926@1823.gov.hk",
+			"summary": "The day following the Chinese Mid-Autumn Festival"
+			},
+			{
+			"dtstart": [
+				"20261001",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20261002",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20261001@1823.gov.hk",
+			"summary": "National Day"
+			},
+			{
+			"dtstart": [
+				"20261019",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20261020",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20261019@1823.gov.hk",
+			"summary": "The day following Chung Yeung Festival"
+			},
+			{
+			"dtstart": [
+				"20261225",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20261226",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20261225@1823.gov.hk",
+			"summary": "Christmas Day"
+			},
+			{
+			"dtstart": [
+				"20261226",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20261227",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20250516T063710Z",
+			"transp": "TRANSPARENT",
+			"uid": "20261226@1823.gov.hk",
+			"summary": "The first weekday after Christmas Day"
+			},
+			{
+			"dtstart": [
+				"20270101",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270102",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270101@1823.gov.hk",
+			"summary": "The first day of January"
+			},
+			{
+			"dtstart": [
+				"20270206",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270207",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270206@1823.gov.hk",
+			"summary": "Lunar New Year's Day"
+			},
+			{
+			"dtstart": [
+				"20270208",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270209",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270208@1823.gov.hk",
+			"summary": "The third day of Lunar New Year"
+			},
+			{
+			"dtstart": [
+				"20270209",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270210",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270209@1823.gov.hk",
+			"summary": "The fourth day of Lunar New Year"
+			},
+			{
+			"dtstart": [
+				"20270326",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270327",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270326@1823.gov.hk",
+			"summary": "Good Friday"
+			},
+			{
+			"dtstart": [
+				"20270327",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270328",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270327@1823.gov.hk",
+			"summary": "The day following Good Friday"
+			},
+			{
+			"dtstart": [
+				"20270329",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270330",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270329@1823.gov.hk",
+			"summary": "Easter Monday"
+			},
+			{
+			"dtstart": [
+				"20270405",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270406",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270405@1823.gov.hk",
+			"summary": "Ching Ming Festival"
+			},
+			{
+			"dtstart": [
+				"20270501",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270502",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270501@1823.gov.hk",
+			"summary": "Labour Day"
+			},
+			{
+			"dtstart": [
+				"20270513",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270514",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270513@1823.gov.hk",
+			"summary": "The Birthday of the Buddha"
+			},
+			{
+			"dtstart": [
+				"20270609",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270610",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270609@1823.gov.hk",
+			"summary": "Tuen Ng Festival"
+			},
+			{
+			"dtstart": [
+				"20270701",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270702",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270701@1823.gov.hk",
+			"summary": "Hong Kong Special Administrative Region Establishment Day"
+			},
+			{
+			"dtstart": [
+				"20270916",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20270917",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20270916@1823.gov.hk",
+			"summary": "The day following the Chinese Mid-Autumn Festival"
+			},
+			{
+			"dtstart": [
+				"20271001",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20271002",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20271001@1823.gov.hk",
+			"summary": "National Day"
+			},
+			{
+			"dtstart": [
+				"20271008",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20271009",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20271008@1823.gov.hk",
+			"summary": "Chung Yeung Festival"
+			},
+			{
+			"dtstart": [
+				"20271225",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20271226",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20271225@1823.gov.hk",
+			"summary": "Christmas Day"
+			},
+			{
+			"dtstart": [
+				"20271227",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtend": [
+				"20271228",
+				{
+					"value": "DATE"
+				}
+			],
+			"dtstamp": "20260515T061504Z",
+			"transp": "TRANSPARENT",
+			"uid": "20271227@1823.gov.hk",
+			"summary": "The first weekday after Christmas Day"
+			}
+		]
+	}]
+}
