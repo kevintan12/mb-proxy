@@ -27,7 +27,7 @@ test('Step 9AD: the sentence counter ignores a.m., p.m. and a quoted line', () =
 });
 
 test('Step 9AD: the registry has 145 settings, all covered below', () => {
-  assert.equal(NAMES.length, 145);
+  assert.equal(NAMES.length, 148);
 });
 
 for (const name of NAMES) {
