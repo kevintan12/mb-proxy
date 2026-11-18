@@ -57,7 +57,19 @@ test('Step 9AT Build 2: the registry row (Admin boolean, on by default, env TIME
   assert.equal(names.indexOf('timeMatchesArticleEnabled'), names.indexOf('sectionFourBigMoverPercent') + 1);
 });
 
-test('Step 9AT Build 2: switch on, all six states, Sections 1 to 7: only the time phrase goes, TRIMMED count-only events', async () => {
+// 9AV Build 1 (Kevin, 18 Nov 2026): the two tests below plant a source no cited article carries, which the
+// 9AV source check would also remove; it is pinned off there so they test the time check alone.
+function pinSourceCheckOff(t) {
+  const saved = process.env.SOURCE_MATCHES_ARTICLE_ENABLED;
+  process.env.SOURCE_MATCHES_ARTICLE_ENABLED = 'off';
+  t.after(() => {
+    if (saved === undefined) delete process.env.SOURCE_MATCHES_ARTICLE_ENABLED;
+    else process.env.SOURCE_MATCHES_ARTICLE_ENABLED = saved;
+  });
+}
+
+test('Step 9AT Build 2: switch on, all six states, Sections 1 to 7: only the time phrase goes, TRIMMED count-only events', async t => {
+  pinSourceCheckOff(t);
   for (const [state, generatedAt, overlayAsOf, publishedAt] of MARKET_STATE_CASES) {
     const {input, output} = marketStateCase(state, generatedAt, overlayAsOf, publishedAt);
     const items = evidenceItems(input);
@@ -306,7 +318,8 @@ test('Step 9AT Build 2 (option B): a since-close time in Section 2 is left for S
   }
 });
 
-test('Step 9AT Build 2 (option B): with Step 9V off, the same time is checked and only the phrase goes', async () => {
+test('Step 9AT Build 2 (option B): with Step 9V off, the same time is checked and only the phrase goes', async t => {
+  pinSourceCheckOff(t);
   for (const marketState of Object.keys(COMPLETED_TIMES)) {
     const {result, events} = await runCompleted({[ENV]: undefined, [SINCE_CLOSE_ENV]: 'off'},
       completedInput(marketState));
