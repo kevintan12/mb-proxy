@@ -212,6 +212,6 @@ test('route: OPTIONS is still the normal preflight; other routes are unchanged',
   assert.equal(refresh.res.statusCode, 404);
 });
 
-test('no new setting: the registry still has 148', () => {
-  assert.equal(Object.keys(SETTINGS_REGISTRY).length, 148);
+test('no new setting: the registry still has 151', () => {
+  assert.equal(Object.keys(SETTINGS_REGISTRY).length, 151);
 });
